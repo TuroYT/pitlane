@@ -636,27 +636,36 @@ var validName = func(s string) bool {
 	return true
 }
 
-func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	t := store.Target{MaxJobMinutes: store.DefaultMaxJobMinutes}
-	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+// newTarget decodes a target creation request. Fields left out get their
+// defaults (one warm runner, GitHub's job time limit, one runner per slot).
+func newTarget(body io.Reader, slots int) (store.Target, error) {
+	t := store.Target{MinRunners: store.DefaultMinRunners, MaxJobMinutes: store.DefaultMaxJobMinutes}
+	if err := json.NewDecoder(body).Decode(&t); err != nil {
+		return t, err
 	}
 	if (t.Kind != "repo" && t.Kind != "org") || !validName(t.Owner) || (t.Kind == "repo" && !validName(t.Repo)) {
-		writeErr(w, http.StatusBadRequest, "invalid target")
-		return
+		return t, errors.New("invalid target")
 	}
 	if t.Kind == "org" {
 		t.Repo = ""
 	}
 	if t.ScaleSetName != "" && !validName(t.ScaleSetName) {
-		writeErr(w, http.StatusBadRequest, "invalid runner label")
-		return
+		return t, errors.New("invalid runner label")
 	}
 	if t.MaxRunners <= 0 {
-		t.MaxRunners = max(1, s.pool.Config().Slots)
+		t.MaxRunners = max(1, slots)
 	}
+	t.MinRunners = min(max(0, t.MinRunners), t.MaxRunners)
 	t.Enabled = true
+	return t, nil
+}
+
+func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
+	t, err := newTarget(r.Body, s.pool.Config().Slots)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	created, err := s.store.CreateTarget(t)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())

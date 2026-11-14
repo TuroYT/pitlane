@@ -65,8 +65,9 @@ it, and a slot changing owner drops its store before its first job.
 - With pnpm, keep the default store location (do not set `store-dir`) and do
   not cache it with `actions/cache` / `cache: pnpm`: Pitlane points
   `npm_config_store_dir` at the shared, hardlinked store.
-- Use **warm runners** (Repositories → Warm runners) for repositories where a
-  few seconds of pickup time matter.
+- New repositories get one **warm runner** (Repositories → Warm runners), so
+  their jobs start in about a second. Set it to 0 for repositories that rarely
+  run jobs, so their slot is free for the others.
 
 ## Lifecycle and restarts
 

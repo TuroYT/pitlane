@@ -237,6 +237,11 @@ type Target struct {
 // DefaultMaxJobMinutes is GitHub's own job time limit on hosted runners.
 const DefaultMaxJobMinutes = 360
 
+// DefaultMinRunners is the number of warm runners of a new target: one idle
+// runner kept registered so a job starts in about a second. Existing targets
+// keep their own value.
+const DefaultMinRunners = 1
+
 // FullName returns "owner/repo" or "owner".
 func (t Target) FullName() string {
 	if t.Kind == "repo" {

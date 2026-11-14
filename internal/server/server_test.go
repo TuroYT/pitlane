@@ -3,7 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
 func TestValidName(t *testing.T) {
@@ -56,5 +59,26 @@ func TestCSRFRequiresHeader(t *testing.T) {
 		if w.Code != tc.want {
 			t.Errorf("%s %s header=%q: got %d want %d", tc.method, tc.path, tc.header, w.Code, tc.want)
 		}
+	}
+}
+
+func TestNewTargetDefaults(t *testing.T) {
+	tg, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tg.MinRunners != store.DefaultMinRunners || tg.MaxRunners != 4 || tg.MaxJobMinutes != store.DefaultMaxJobMinutes || !tg.Enabled {
+		t.Fatalf("defaults: %+v", tg)
+	}
+	tg, _ = newTarget(strings.NewReader(`{"kind":"org","owner":"acme","repo":"x","minRunners":0}`), 4)
+	if tg.MinRunners != 0 || tg.Repo != "" {
+		t.Fatalf("explicit 0 warm runners not kept: %+v", tg)
+	}
+	tg, _ = newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api","minRunners":9,"maxRunners":2}`), 4)
+	if tg.MinRunners != 2 {
+		t.Fatalf("warm runners not capped by max parallel: %+v", tg)
+	}
+	if _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme"}`), 4); err == nil {
+		t.Fatal("repo target without a repository accepted")
 	}
 }
