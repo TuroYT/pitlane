@@ -4,7 +4,7 @@
 #   3. Open that address and follow the setup (token: docker compose logs pitlane | grep token)
 services:
   pitlane:
-    image: ghcr.io/turoyt/pitlane:v0.1.0
+    image: ghcr.io/turoyt/pitlane:v0.1.1@sha256:cf4b5c32f595a228deeb7e552f3763b1c4dd697e2e841d286f4390b36d0981ed
     restart: unless-stopped
     ports:
       - "8080:8080"
