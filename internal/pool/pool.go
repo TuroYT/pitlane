@@ -106,6 +106,9 @@ type SlotState struct {
 type slot struct {
 	SlotState
 	retire bool
+	// dirty marks a slot that may still hold another owner's data (a wipe or
+	// rebuild failed). It is never handed out; the retry loop rebuilds it.
+	dirty bool
 }
 
 // Pool owns the slots.
@@ -188,17 +191,25 @@ func (p *Pool) retryFailed(ctx context.Context) {
 		case <-t.C:
 		}
 		p.mu.Lock()
-		var failed []int
+		var failed, dirty []int
 		for i, s := range p.slots {
 			if s.Status == "error" && !s.retire {
 				s.Status = "starting"
-				failed = append(failed, i)
+				if s.dirty {
+					dirty = append(dirty, i)
+				} else {
+					failed = append(failed, i)
+				}
 			}
 		}
 		p.mu.Unlock()
 		for _, i := range failed {
 			p.log.Info("retrying slot", "slot", i)
 			go p.startSlot(ctx, i)
+		}
+		for _, i := range dirty {
+			p.log.Info("retrying slot rebuild", "slot", i)
+			go p.rebuildSlot(ctx, i)
 		}
 	}
 }
@@ -285,7 +296,12 @@ func (p *Pool) startSlot(ctx context.Context, i int) {
 	p.mu.Lock()
 	s := p.slots[i]
 	busy := s != nil && s.Status == "busy"
+	dirty := s != nil && s.dirty
 	p.mu.Unlock()
+	if dirty {
+		p.setStatus(i, "error", "slot must be rebuilt before reuse")
+		return
+	}
 	if !busy {
 		p.setStatus(i, "ready", "")
 	}
@@ -400,6 +416,11 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 
 // rebuildSlot deletes a slot with all its volumes and starts it again empty.
 func (p *Pool) rebuildSlot(ctx context.Context, i int) {
+	p.mu.Lock()
+	if s, ok := p.slots[i]; ok {
+		s.dirty = true // cleared only once everything is really gone
+	}
+	p.mu.Unlock()
 	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
 	if err != nil && !errdefs.IsNotFound(err) {
 		p.setStatus(i, "error", "rebuild: "+err.Error())
@@ -413,7 +434,7 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	}
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
-		s.Owner, s.TargetID = "", 0
+		s.Owner, s.TargetID, s.dirty = "", 0, false
 	}
 	delete(p.chowned, slotDocker(i))
 	delete(p.chowned, slotWork(i))
@@ -445,7 +466,7 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 	var best *slot
 	score := -1
 	for _, s := range p.slots {
-		if s.Status != "ready" || s.retire {
+		if s.Status != "ready" || s.retire || s.dirty {
 			continue
 		}
 		sc := 0
@@ -467,7 +488,9 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 	}
 	needWipe := p.cfg.CacheScope == "owner" && best.Owner != "" && best.Owner != owner
 	best.Status, best.Since = "busy", time.Now().Unix()
-	best.Owner, best.TargetID = owner, targetID
+	if !needWipe {
+		best.Owner, best.TargetID = owner, targetID
+	}
 	idx := best.Index
 	p.mu.Unlock()
 
@@ -477,10 +500,16 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 		if _, code, err := p.exec(ctx, slotName(idx), script); err != nil || code != 0 {
 			// Never hand out a slot that may still hold another owner's data.
 			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", idx, "code", code, "error", err)
+			p.mu.Lock()
+			best.dirty = true // previous owner is kept
+			p.mu.Unlock()
 			p.setStatus(idx, "starting", "")
 			go p.rebuildSlot(context.Background(), idx)
 			return Lease{}, false
 		}
+		p.mu.Lock()
+		best.Owner, best.TargetID = owner, targetID
+		p.mu.Unlock()
 	}
 	return Lease{Slot: idx, Owner: owner}, true
 }

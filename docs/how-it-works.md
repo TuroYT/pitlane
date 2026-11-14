@@ -44,6 +44,17 @@ then the same owner, then any free slot.
 | Docker Hub mirror | global | `pitlane-mirror-data` volume |
 | Downloaded actions | per slot (wiped when the slot changes owner) | `_work/_actions` in `pitlane-slot-N-work` |
 
+## Tips for the fastest CI
+
+- **Turn off `actions/cache`-based caching** in `setup-go`, `setup-node`,
+  `setup-python`… (`cache: false`, or simply do not set `cache:`). Pitlane already
+  keeps those caches on local disk. Uploading them to GitHub after every job only
+  adds time (often 30–60 s).
+- Prefer `docker buildx build` without `cache-from: type=gha`: the slot's local
+  build cache is faster.
+- Use **warm runners** (Repositories → Warm runners) for repositories where a
+  few seconds of pickup time matter.
+
 ## Lifecycle and restarts
 
 Stopping Pitlane stops the listeners but leaves busy runners running. On start,
