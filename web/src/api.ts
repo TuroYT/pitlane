@@ -93,6 +93,42 @@ export interface Job {
   workflowFullRef?: string
   /** Git ref of the workflow: "refs/heads/main", "refs/pull/42/merge", "refs/tags/v1"… */
   ref?: string
+  /** Resources the job used (null: not measured). */
+  usage?: JobUsage | null
+}
+
+/** What one container used during a job; null fields are unknown. */
+export interface ContainerUsage {
+  memPeak: number | null
+  cpuUsec: number | null
+  cpuSomeUsec: number | null
+  ioFullUsec: number | null
+  memFullUsec: number | null
+  cpuPressurePct: number | null
+  ioPressurePct: number | null
+  memPressurePct: number | null
+}
+
+export interface JobUsage {
+  wallMs: number
+  /** Runner peak + slot peak, bytes. */
+  memPeak: number | null
+  runner: ContainerUsage
+  slot: ContainerUsage
+}
+
+/** GET /api/jobs/memory */
+export interface MemorySizing {
+  windowDays: number
+  count: number
+  p50: number | null
+  p90: number | null
+  max: number | null
+  memTotal: number
+  usable: number
+  suggestedSlots: number | null
+  slots: number
+  memoryLimitMb: number
 }
 
 export interface Settings {

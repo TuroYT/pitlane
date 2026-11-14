@@ -156,6 +156,9 @@ that has taken over the host can remove them.
 - Releases are built on GitHub-hosted runners. `install.sh` verifies the binary
   against the release's `checksums.txt`, and binaries and images carry build
   provenance (`gh attestation verify`, see [Getting started](getting-started.md#updating)).
+  The in-app self-update verifies that provenance itself (Sigstore bundle,
+  release workflow identity, binary digest) and refuses to install without it
+  (see [Updates](configuration.md#updates)).
 
 ## Reporting a vulnerability
 

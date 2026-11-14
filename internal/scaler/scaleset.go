@@ -36,6 +36,8 @@ type Pool interface {
 	Remove(ctx context.Context, id string)
 	StopRunner(ctx context.Context, id string, grace time.Duration) error
 	EnsureFreeDisk(ctx context.Context)
+	// MeasureJob starts measuring a runner's job (nil: not measurable).
+	MeasureJob(ctx context.Context, runnerID string, slot int) *pool.Meter
 }
 
 var _ Pool = (*pool.Pool)(nil)

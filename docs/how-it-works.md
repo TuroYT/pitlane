@@ -92,6 +92,44 @@ the least recently restored are evicted beyond the size limit.
   their jobs start in about a second. Set it to 0 for repositories that rarely
   run jobs, so their slot is free for the others.
 
+## Resource usage per job
+
+Pitlane measures each job from cgroup v2, in both containers it uses: the
+runner and its slot (the slot daemon runs `services:` and `docker build`).
+Jobs table columns: **Peak RAM** (runner peak + slot peak), **CPU time** and
+**Pressure** (share of the job's time stalled waiting for a CPU, I/O or memory,
+from Linux PSI; the worse of runner and slot, both in the tooltip). The jobs API
+returns the same data in `usage` (`null` when not measured).
+
+- **Window.** From the job's start (GitHub's `JobStarted`; the runner's start
+  when it was missed) to the runner's exit. The slot cleanup that follows is
+  not counted.
+- **Peak memory** is `memory.peak`, page cache included. The runner's covers
+  its whole life (a warm runner waits with little memory). A slot lives for
+  many jobs, so its `memory.peak` is reset at the job's start by writing to it
+  (Linux 6.12 and later, the reset applies to Pitlane's open file); on older
+  kernels, or when the file is not writable, the slot's peak is the highest
+  `memory.current` sampled every 2 seconds, which can miss short spikes. Both
+  peaks need not coincide: their sum is an upper bound.
+- **CPU time** (`cpu.stat` `usage_usec`) and **pressure** (`total=` of
+  `cpu.pressure` "some", `io.pressure` "full", `memory.pressure` "full") are
+  deltas over the window. The runner's cgroup disappears when it exits, so its
+  last reading is at most 2 seconds old.
+- **When nothing is recorded.** Pitlane finds a container's cgroup from its
+  main process (`/proc/<pid>/cgroup`) or the standard layouts
+  (`/sys/fs/cgroup/system.slice/docker-<id>.scope`, `/sys/fs/cgroup/docker/<id>`).
+  On cgroup v1, Docker Desktop, rootless Docker, or Pitlane in a container
+  without the host's `/sys/fs/cgroup`, jobs simply have no usage; a job never
+  fails because of it. Runners adopted after a Pitlane restart are not measured.
+
+The dashboard's **Memory per job** panel shows the p50, p90 and max peak over
+the last 7 days and suggests `floor(usable memory / p90)` slots, usable memory
+being the host's (the LXC container's) memory minus 1 GB (an eighth on hosts
+under 8 GB) for the system, Docker and Pitlane, next to the configured slot
+count and memory limit. Memory, not CPU, is usually what limits parallel jobs:
+a job whose memory is near the limit, or whose memory pressure is high, needs
+fewer slots or more RAM. `GET /api/jobs/memory` serves the same data.
+
 ## Lifecycle and restarts
 
 Stopping Pitlane stops the listeners but leaves busy runners running. On start,

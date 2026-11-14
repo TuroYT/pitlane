@@ -241,8 +241,14 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 	srv.SetManager(mgr)
 
 	var restart atomic.Bool
+	updLog := log.With("component", "update")
+	ghReleases := &update.GitHub{}
+	verify, attested := update.ReleaseVerifier(os.Getenv, ghReleases, dataDir, updLog)
+	if !attested {
+		updLog.Warn("self-update will NOT verify build attestations (" + update.SkipAttestationEnv + "=true): only the checksum is checked, which is unsafe")
+	}
 	upd := &update.Updater{
-		Version: version, Store: st, GitHub: &update.GitHub{}, Probe: update.DefaultProbe(version),
+		Version: version, Store: st, GitHub: ghReleases, Probe: update.DefaultProbe(version), Verify: verify, Attested: attested,
 		Images: update.DockerImages{Cli: p.Docker(), PullFunc: func(ctx context.Context, ref string) error {
 			return p.EnsureImage(ctx, ref, true)
 		}},
@@ -257,7 +263,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 		},
 		Restart: func() { restart.Store(true); stop() },
 		Notify:  srv.Notify,
-		Log:     log.With("component", "update"),
+		Log:     updLog,
 	}
 	srv.SetUpdates(upd.Handler())
 

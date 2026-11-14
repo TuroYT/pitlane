@@ -428,3 +428,51 @@ func TestJobsPage(t *testing.T) {
 		t.Fatalf("repos %v %v", repos, err)
 	}
 }
+
+func TestJobUsage(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	i := func(v int64) *int64 { return &v }
+	if err := s.UpsertJob(Job{TargetID: 1, JobID: "j1", RunnerName: "pitlane-a", Slot: 0, QueuedAt: 100, StartedAt: 110, FinishedAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertJob(Job{TargetID: 1, JobID: "j2", RunnerName: "pitlane-b", Slot: 1, QueuedAt: 100, StartedAt: 110, FinishedAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := s.SetJobUsage(ctx, "pitlane-a", JobUsage{WallMs: 10_000,
+		Runner: ContainerUsage{MemPeak: i(1 << 30), CPUUsec: i(5_000_000), CPUSomeUsec: i(1_000_000), IOFullUsec: i(0)},
+		Slot:   ContainerUsage{MemPeak: i(2 << 30), CPUUsec: i(1_000_000)}})
+	if err != nil || !ok {
+		t.Fatalf("SetJobUsage: %v, %v", ok, err)
+	}
+	if ok, err := s.SetJobUsage(ctx, "pitlane-unknown", JobUsage{WallMs: 1}); err != nil || ok {
+		t.Fatalf("unknown runner: %v, %v", ok, err)
+	}
+	j, err := s.JobByRunner(ctx, "pitlane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := j.Usage
+	if u == nil || u.WallMs != 10_000 || *u.MemPeak != 3<<30 || *u.Runner.CPUUsec != 5_000_000 || u.Runner.MemFullUsec != nil {
+		t.Fatalf("usage: %+v", u)
+	}
+	if *u.Runner.CPUPressure != 10 || *u.Runner.IOPressure != 0 || u.Runner.MemPressure != nil || u.Slot.CPUPressure != nil {
+		t.Errorf("pressure: %+v", u.Runner)
+	}
+	jobs, err := s.Jobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if (j.Usage != nil) != (j.RunnerName == "pitlane-a") {
+			t.Errorf("job %s usage %+v", j.JobID, j.Usage)
+		}
+	}
+	peaks, err := s.JobMemoryPeaks(ctx, 150)
+	if err != nil || len(peaks) != 1 || peaks[0] != 3<<30 {
+		t.Errorf("peaks: %v, %v", peaks, err)
+	}
+	if peaks, _ := s.JobMemoryPeaks(ctx, 300); len(peaks) != 0 {
+		t.Errorf("peaks after: %v", peaks)
+	}
+}

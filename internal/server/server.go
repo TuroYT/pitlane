@@ -211,6 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/targets/{id}", s.auth(s.handleDeleteTarget))
 	mux.Handle("GET /api/jobs", s.auth(s.handleJobs))
 	mux.Handle("GET /api/jobs/repos", s.auth(s.handleJobRepos))
+	mux.Handle("GET /api/jobs/memory", s.auth(s.handleJobMemory))
 	mux.Handle("GET /api/runners/{name}/logs", s.auth(s.handleLogs))
 	mux.Handle("GET /api/runners/{name}/job-log", s.auth(s.handleJobLog))
 	mux.Handle("GET /api/runners/{name}/github", s.auth(s.handleGitHubJob))

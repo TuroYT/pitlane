@@ -160,6 +160,9 @@ type Pool struct {
 	fwdMu     sync.Mutex // cache forwarder creation
 
 	sops slotOps // nil: Docker (tests set a fake)
+
+	cgroups    cgroupFS  // zero: the host's (tests set fake directories)
+	cgroupWarn sync.Once // "cgroups not readable" is logged once
 }
 
 // slotOps is what slot wiping and cleanup need from Docker and the host.
