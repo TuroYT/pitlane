@@ -2,8 +2,11 @@ package pool
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -65,6 +68,64 @@ func TestAcquireSharedScopeNoWipe(t *testing.T) {
 	p := newTestPool("shared", SlotState{Index: 0, Status: "ready", Owner: "other"})
 	if l, _ := p.Acquire(context.Background(), "acme", 1, false); l.wipe {
 		t.Fatal("shared cache scope must not wipe between owners")
+	}
+}
+
+func TestAcquireSharedScopeWipesUnknownOwner(t *testing.T) {
+	p := newTestPool("shared", SlotState{Index: 0, Status: "ready", Owner: UnknownOwner})
+	if l, _ := p.Acquire(context.Background(), "acme", 1, false); !l.wipe {
+		t.Fatal("an unknown owner may have been a strict job: it must be wiped in the shared scope too")
+	}
+}
+
+func TestStateWriteFailureForgetsOwners(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "slots.json")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p, err := New(Config{Slots: 1, StateFile: file, CacheScope: "shared"}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.slots[0] = &slot{SlotState: SlotState{Index: 0, Owner: StrictOwner}}
+	p.mu.Lock()
+	p.saveLocked()
+	p.mu.Unlock()
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("state not written")
+	}
+	// The next write fails (the temporary file cannot be created): the
+	// stale file must not survive, it would restore the old owner.
+	if err := os.Mkdir(file+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	p.slots[0].Owner = "acme"
+	p.saveLocked()
+	p.mu.Unlock()
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("stale state file kept after a failed write: %v", err)
+	}
+	// After a restart the slot's owner is unknown, so it is wiped.
+	p2, err := New(Config{Slots: 1, StateFile: file, CacheScope: "shared"}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, known := p2.restored[0]; known {
+		t.Fatal("owner restored without a state file")
+	}
+}
+
+func TestCorruptStateRestoresNothing(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "slots.json")
+	if err := os.WriteFile(file, []byte(`{"0":{"owner":"acme"},"1":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{Slots: 2, StateFile: file}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.restored) != 0 {
+		t.Fatalf("corrupt state partly restored: %+v", p.restored)
 	}
 }
 
@@ -138,5 +199,75 @@ func TestCacheVolumeNames(t *testing.T) {
 	c, tl := strictVolumes("pitlane-1234")
 	if c == tl || c == cacheVolume("owner", "pitlane-1234") {
 		t.Fatal("strict volumes must be unique per runner")
+	}
+}
+
+func TestPruneRetiredSlotState(t *testing.T) {
+	state := map[int]persistedSlot{
+		0: {Owner: "acme"},
+		3: {Owner: "acme"},       // beyond the slot count, gone: dropped
+		4: {Owner: "acme"},       // beyond the slot count but still live: kept
+		5: {Owner: StrictOwner},  // dropped: an unknown owner is wiped in every scope
+		6: {Owner: UnknownOwner}, // dropped: forgetting it is the same
+	}
+	live := map[int]*slot{0: {}, 4: {}}
+	if n := pruneRetired(state, 2, live); n != 3 {
+		t.Fatalf("dropped %d, want 3", n)
+	}
+	for _, i := range []int{0, 4} {
+		if _, ok := state[i]; !ok {
+			t.Errorf("slot %d dropped", i)
+		}
+	}
+}
+
+func TestStateFileDropsRetiredSlots(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "slots.json")
+	old := map[int]persistedSlot{}
+	for i := range 6 {
+		old[i] = persistedSlot{Owner: "acme"}
+	}
+	b, _ := json.Marshal(old)
+	if err := os.WriteFile(file, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{Slots: 2, StateFile: file}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() map[int]persistedSlot {
+		var got map[int]persistedSlot
+		b, _ := os.ReadFile(file)
+		_ = json.Unmarshal(b, &got)
+		return got
+	}
+	if got := read(); len(got) != 2 || got[0].Owner != "acme" || got[1].Owner != "acme" {
+		t.Fatalf("state after load: %+v", got)
+	}
+
+	// Slot count reduced while slot 1 is live: kept until it is retired.
+	p.slots[0] = &slot{SlotState: SlotState{Index: 0, Owner: "acme"}}
+	p.slots[1] = &slot{SlotState: SlotState{Index: 1, Owner: "other"}}
+	p.mu.Lock()
+	p.cfg.Slots = 1
+	p.saveLocked()
+	p.mu.Unlock()
+	if got := read(); len(got) != 2 || got[1].Owner != "other" {
+		t.Fatalf("live retiring slot dropped: %+v", got)
+	}
+	p.mu.Lock()
+	delete(p.slots, 1)
+	p.saveLocked()
+	p.mu.Unlock()
+	if got := read(); len(got) != 1 {
+		t.Fatalf("retired slot kept: %+v", got)
+	}
+
+	// The slot comes back: its owner is unknown, so it is wiped (fail closed).
+	p.mu.Lock()
+	_, known := p.restored[1]
+	p.mu.Unlock()
+	if known {
+		t.Fatal("retired slot still known")
 	}
 }

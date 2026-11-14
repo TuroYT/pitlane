@@ -1,0 +1,97 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits"
+  ],
+  "minimumReleaseAge": "3 days",
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "customManagers": [
+    {
+      "description": "Images pinned as \"name:tag@sha256:digest\" outside Dockerfiles (run-time images, setup-qemu-action input)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^internal/pool/images\\.go$/",
+        "/^\\.github/workflows/release\\.yml$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>[a-z0-9][a-z0-9./-]*):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "description": "Runner image tag used by dev builds: the latest Pitlane release",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^internal/pool/images\\.go$/"
+      ],
+      "matchStrings": [
+        "devRunnerTag = \"(?<currentValue>v[0-9][^\"]*)\""
+      ],
+      "depNameTemplate": "ghcr.io/turoyt/pitlane-runner",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Keep the runner base image and the fallback runner image on the same version",
+      "matchDepNames": [
+        "ghcr.io/actions/actions-runner"
+      ],
+      "groupName": "actions-runner",
+      "minimumReleaseAge": "1 day"
+    },
+    {
+      "description": "binfmt release tags are qemu-vX.Y.Z",
+      "matchDepNames": [
+        "tonistiigi/binfmt"
+      ],
+      "versioning": "regex:^qemu-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
+    },
+    {
+      "description": "Pitlane's own images are released from this repository",
+      "matchDepNames": [
+        "ghcr.io/turoyt/pitlane",
+        "ghcr.io/turoyt/pitlane-runner"
+      ],
+      "groupName": "pitlane release images",
+      "minimumReleaseAge": null
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest"
+      ]
+    },
+    {
+      "matchManagers": [
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "web dependencies (non-major)"
+    },
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "go modules (non-major)"
+    }
+  ]
+}

@@ -2,10 +2,7 @@ package scaler
 
 import (
 	"context"
-	"errors"
 	"time"
-
-	"github.com/actions/scaleset"
 
 	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/store"
@@ -47,10 +44,6 @@ func orphanDecision(r store.RegisteredRunner, now time.Time, live map[string]boo
 		return orphanKeep
 	}
 	return orphanRemove
-}
-
-func isNotFound(err error) bool {
-	return errors.Is(err, scaleset.NotFoundError) || errors.Is(err, scaleset.RunnerNotFoundError)
 }
 
 // forgetRunner drops the record of a runner after a successful removal (or
@@ -120,18 +113,20 @@ func (t *target) cleanupOrphans() {
 	for _, r := range recs {
 		switch orphanDecision(r, now, live, remote) {
 		case orphanVerify:
-			_, err := client.GetRunner(ctx, int(r.ID))
+			err := client.getRunner(ctx, r.ID)
 			if isNotFound(err) {
 				_ = t.m.store.DeleteRunner(r.ID)
+				t.forgetLostRunner(r.Name)
 			}
 		case orphanRemove:
-			err := client.RemoveRunner(ctx, r.ID)
+			err := client.removeRunner(ctx, r.ID)
 			if err != nil && !isNotFound(err) {
 				t.log.Warn("remove orphan runner", "runner", r.Name, "id", r.ID, "error", err)
 				continue
 			}
 			t.log.Info("removed orphan runner from GitHub", "runner", r.Name, "id", r.ID)
 			_ = t.m.store.DeleteRunner(r.ID)
+			t.forgetLostRunner(r.Name) // GitHub reports it idle: its job is over
 		}
 	}
 }

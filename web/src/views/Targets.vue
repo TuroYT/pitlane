@@ -30,10 +30,12 @@ const targets = computed(() => live.snap?.targets ?? [])
 const existing = computed(() => new Set(targets.value.map((t) => (t.kind === 'repo' ? `repo:${t.owner}/${t.repo}` : `org:${t.owner}`).toLowerCase())))
 const has = (key: string) => existing.value.has(key.toLowerCase())
 
-async function enable(kind: 'repo' | 'org', owner: string, repo: string, installationId: number, strict = false) {
+// Strict mode is left to the server: it asks GitHub whether the target is
+// public (and turns strict on when it cannot tell).
+async function enable(kind: 'repo' | 'org', owner: string, repo: string, installationId: number) {
   error.value = ''
   try {
-    await post('/api/targets', { kind, owner, repo, installationId, strict })
+    await post('/api/targets', { kind, owner, repo, installationId })
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -63,6 +65,10 @@ async function remove(t: TargetState) {
   await api(`/api/targets/${t.id}`, { method: 'DELETE' })
 }
 
+function forcedDate(t: TargetState) {
+  return t.strictForcedAt ? new Date(t.strictForcedAt * 1000).toLocaleString() : ''
+}
+
 function statusClass(s: string) {
   return { listening: 'ok', starting: 'busy', error: 'error', disabled: 'muted', 'no-credentials': 'error' }[s] ?? 'muted'
 }
@@ -89,7 +95,8 @@ function copy(text: string) {
       </p>
       <p class="muted small">
         <strong>Warm runners</strong>: each one keeps one slot reserved for that repository, so its jobs start instantly
-        (no runner start-up), but that slot cannot run jobs of other repositories.
+        (no runner start-up), but that slot cannot run jobs of other repositories. New repositories get one, strict (public)
+        ones none, so no idle runner waits for a pull request from a fork; set 0 to free its slot.
       </p>
       <div class="table-wrap">
         <table class="table">
@@ -101,7 +108,7 @@ function copy(text: string) {
               <th title="Runners kept registered and idle even when no job is queued: jobs start instantly, but each warm runner keeps one slot reserved for this target">Warm runners</th>
               <th title="Maximum parallel jobs for this target">Max parallel</th>
               <th title="A job running longer is stopped and its slot cleaned. 0 = no limit.">Job limit (min)</th>
-              <th title="Strict isolation: fresh caches and a wiped Docker daemon for every job. Recommended for public repositories (pull requests from forks).">Strict</th>
+              <th title="Strict isolation: fresh caches and a rebuilt Docker daemon for every job, so nothing leaks between jobs. Always on for public repositories. Not a sandbox: a malicious job can still take over the host, so require approval for pull requests from forks.">Strict</th>
               <th>Enabled</th>
               <th></th>
             </tr>
@@ -138,10 +145,15 @@ function copy(text: string) {
                   @change="update(t, { maxJobMinutes: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
-                <label class="switch">
-                  <input type="checkbox" :checked="t.strict" @change="update(t, { strict: ($event.target as HTMLInputElement).checked })" />
+                <label class="switch" :title="t.strictRequired ? `Required: ${t.strictRequired}` : ''">
+                  <input type="checkbox" :checked="t.strict" :disabled="!!t.strictRequired && t.strict"
+                    @change="update(t, { strict: ($event.target as HTMLInputElement).checked })" />
                   <span />
                 </label>
+                <div v-if="t.strictRequired" class="small muted">required: {{ t.strictRequired }}</div>
+                <div v-if="t.strictRequired && t.strictForcedAt" class="small warn-text" :title="`Pitlane switched this target to strict mode on ${forcedDate(t)}`">
+                  switched on automatically {{ forcedDate(t) }}
+                </div>
               </td>
               <td>
                 <label class="switch">
@@ -161,7 +173,7 @@ function copy(text: string) {
         <h2>Add repositories</h2>
         <div class="filters">
           <input v-model="search" placeholder="Filter repositories…" />
-          <button class="ghost small" @click="loadInstalls" :disabled="loading">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+          <button class="ghost small" :disabled="loading" @click="loadInstalls">{{ loading ? 'Loading…' : 'Refresh' }}</button>
           <a v-if="installUrl" class="button small" :href="installUrl" target="_blank" rel="noopener">Install on another account ↗</a>
         </div>
       </div>
@@ -181,9 +193,9 @@ function copy(text: string) {
         <ul class="repo-list">
           <li v-for="r in filteredRepos(inst)" :key="r.fullName">
             <span>{{ r.name }} <span v-if="r.private" class="muted small">private</span>
-              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners">public</span></span>
+              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners: always strict, and require approval for fork pull requests">public</span></span>
             <button class="small" :class="{ primary: !has(`repo:${r.fullName}`) }" :disabled="has(`repo:${r.fullName}`)"
-              @click="enable('repo', inst.account, r.name, inst.id, !r.private)">
+              @click="enable('repo', inst.account, r.name, inst.id)">
               {{ has(`repo:${r.fullName}`) ? 'Enabled' : 'Enable' }}
             </button>
           </li>

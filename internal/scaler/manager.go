@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 
 	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/pool"
@@ -32,6 +32,11 @@ type Credentials struct {
 	PAT         string
 }
 
+// RunnerGroupID is the runner group of every scale set Pitlane creates: the
+// default group (for an organisation, its "Allow public repositories"
+// setting decides whether public repositories can use the runners).
+const RunnerGroupID = 1
+
 // Valid reports whether credentials are usable.
 func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" && c.AppPEM != "") }
 
@@ -41,9 +46,15 @@ type Manager struct {
 	// ListRunners lists a target's self-hosted runners through the REST API
 	// (used to find orphan runners). Nil disables orphan cleanup.
 	ListRunners func(ctx context.Context, t store.Target) ([]gh.Runner, error)
+	// StrictReason asks GitHub why a target must run strict ("" when it
+	// need not). Nil disables the periodic check.
+	StrictReason func(ctx context.Context, t store.Target) (string, error)
 
-	store   *store.Store
-	pool    *pool.Pool
+	store *store.Store
+	pool  Pool
+	// connect opens the scale set API of a target (newScaleSetAPI; tests
+	// set a fake).
+	connect func(creds Credentials, t store.Target, version string) (scaleSetAPI, error)
 	log     *slog.Logger
 	logDir  string
 	creds   func() Credentials
@@ -52,28 +63,34 @@ type Manager struct {
 	mu      sync.Mutex
 	targets map[int64]*target
 	adopted map[int64][]*runner
-	ctx     context.Context
+	lost    map[int64]map[string]lostJob // found at startup, handed to targets by Sync
+	// ctx is set by Start; until then Sync does nothing (the UI is served
+	// while slots start, and runners left by a previous run are not adopted
+	// yet).
+	ctx context.Context
 }
 
 // New creates a manager. changed is called whenever visible state changes.
-func New(st *store.Store, p *pool.Pool, dataDir string, creds func() Credentials, changed func(), log *slog.Logger) *Manager {
+func New(st *store.Store, p Pool, dataDir string, creds func() Credentials, changed func(), log *slog.Logger) *Manager {
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
-	return &Manager{store: st, pool: p, log: log, logDir: logDir, creds: creds, changed: changed,
-		targets: map[int64]*target{}, adopted: map[int64][]*runner{}}
+	return &Manager{store: st, pool: p, connect: newScaleSetAPI, log: log, logDir: logDir, creds: creds, changed: changed,
+		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
 // Start adopts runners left by a previous process and starts every enabled target.
 func (m *Manager) Start(ctx context.Context) error {
-	m.ctx = ctx
 	orphans, err := m.pool.RunnerContainers(ctx)
 	if err != nil {
 		return err
 	}
+	running := map[string]*runner{}
 	for _, o := range orphans {
 		// Assume busy since the container was created: the job timeout then
 		// still applies after a restart.
-		r := &runner{name: o.Name, containerID: o.ID, lease: pool.Lease{Slot: o.Slot, Owner: o.Owner}, busy: true, startedAt: time.Now(), busySince: o.Created}
+		// The lease comes from the container's labels: a strict runner is
+		// released (slot rebuilt, throwaway caches removed) as strict.
+		r := &runner{name: o.Name, containerID: o.ID, lease: o.Lease(), busy: true, startedAt: time.Now(), busySince: o.Created}
 		if o.Created.Year() < 2000 {
 			r.busySince = time.Now()
 		}
@@ -82,10 +99,20 @@ func (m *Manager) Start(ctx context.Context) error {
 			go m.finishRunner(nil, r)
 			continue
 		}
-		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot)
+		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot, "strict", o.Strict)
+		m.mu.Lock()
 		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
+		m.mu.Unlock()
+		running[o.Name] = r
 	}
+	m.findLostJobs(ctx, running)
+	// Only now may Sync start listeners: adopted runners and lost jobs are
+	// known, so they are handed to their target.
+	m.mu.Lock()
+	m.ctx = ctx
+	m.mu.Unlock()
 	m.Sync()
+	go m.EnforceStrictAll(ctx)
 	go m.loop(ctx)
 	return nil
 }
@@ -95,7 +122,7 @@ func (m *Manager) loop(ctx context.Context) {
 	defer tick.Stop()
 	clean := time.NewTicker(time.Hour)
 	defer clean.Stop()
-	timeouts := time.NewTicker(30 * time.Second)
+	timeouts := time.NewTicker(10 * time.Second) // in memory only: cheap
 	defer timeouts.Stop()
 	orphans := time.NewTicker(orphanInterval)
 	defer orphans.Stop()
@@ -109,6 +136,7 @@ func (m *Manager) loop(ctx context.Context) {
 			m.reconcileAll()
 		case <-clean.C:
 			m.housekeeping()
+			go m.EnforceStrictAll(ctx)
 		case <-timeouts.C:
 			m.enforceTimeouts()
 		case <-orphans.C:
@@ -133,7 +161,12 @@ func (m *Manager) reconcileAll() {
 
 func (m *Manager) housekeeping() {
 	retention := time.Duration(m.store.GetInt("history_days", 30)) * 24 * time.Hour
-	_ = m.store.PruneJobs(retention)
+	if err := m.store.PruneJobs(retention); err != nil {
+		m.log.Warn("prune job history", "error", err)
+	}
+	if err := m.store.PruneSessions(); err != nil {
+		m.log.Warn("prune expired sessions", "error", err)
+	}
 	entries, _ := os.ReadDir(m.logDir)
 	for _, e := range entries {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {
@@ -142,8 +175,64 @@ func (m *Manager) housekeeping() {
 	}
 }
 
+// ApplyStrictRequirement records why a target must run strict (reason, ""
+// when it need not, as GitHub just reported it) and switches it to strict if
+// needed. It reports whether the stored target changed; the caller syncs.
+func (m *Manager) ApplyStrictRequirement(t store.Target, reason string) bool {
+	if reason == t.StrictRequired && (reason == "" || t.Strict) {
+		return false
+	}
+	flipped, err := m.store.SetStrictRequirement(t.ID, reason)
+	if err != nil {
+		m.log.Error("record strict requirement", "target", t.FullName(), "reason", reason, "error", err)
+		return false
+	}
+	if flipped {
+		m.log.Warn("target switched to strict mode", "target", t.FullName(), "reason", reason)
+	}
+	return true
+}
+
+// EnforceStrictAll asks GitHub, for every target, whether it must run strict
+// (at start, then hourly) and switches the ones that must. When GitHub
+// cannot be asked, a target keeps its current mode.
+func (m *Manager) EnforceStrictAll(ctx context.Context) {
+	if m.StrictReason == nil {
+		return
+	}
+	targets, err := m.store.Targets()
+	if err != nil {
+		m.log.Error("load targets", "error", err)
+		return
+	}
+	changed := false
+	for _, t := range targets {
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		reason, err := m.StrictReason(cctx, t)
+		cancel()
+		if err != nil {
+			m.log.Warn("cannot check whether the target must run strict, its mode is left unchanged", "target", t.FullName(), "strict", t.Strict, "error", err)
+			continue
+		}
+		if m.ApplyStrictRequirement(t, reason) {
+			changed = true
+		}
+	}
+	if changed {
+		m.Sync()
+	}
+}
+
 // Sync starts, restarts or stops listeners so they match the stored targets.
+// Before Start it only notifies the UI: Start syncs once it is ready.
 func (m *Manager) Sync() {
+	m.mu.Lock()
+	started := m.ctx != nil
+	m.mu.Unlock()
+	if !started {
+		m.changed()
+		return
+	}
 	targets, err := m.store.Targets()
 	if err != nil {
 		m.log.Error("load targets", "error", err)
@@ -160,6 +249,9 @@ func (m *Manager) Sync() {
 		w, ok := want[id]
 		if !ok || w.ScaleSetName != t.cfg().ScaleSetName || w.InstallationID != t.cfg().InstallationID {
 			delete(m.targets, id)
+			if ok {
+				m.keepLostLocked(id, t)
+			}
 			go t.stop(!ok)
 			continue
 		}
@@ -176,6 +268,10 @@ func (m *Manager) Sync() {
 			go t.watch(r)
 		}
 		delete(m.adopted, id)
+		for jobID, l := range m.lost[id] {
+			t.lost[jobID] = l
+		}
+		delete(m.lost, id)
 		m.targets[id] = t
 		go t.run(m.ctx)
 	}
@@ -188,6 +284,7 @@ func (m *Manager) Restart() {
 	m.mu.Lock()
 	for id, t := range m.targets {
 		delete(m.targets, id)
+		m.keepLostLocked(id, t)
 		go t.stop(false)
 	}
 	m.mu.Unlock()
@@ -281,6 +378,7 @@ type runner struct {
 	exited      bool
 	killed      bool      // killed for exceeding the job time limit
 	busySince   time.Time // when its job started
+	jobID       string    // GitHub job it runs, cleared on JobCompleted
 	jobName     string
 	repo        string
 	startedAt   time.Time
@@ -294,8 +392,8 @@ type target struct {
 
 	mu          sync.Mutex
 	t           store.Target
-	client      *scaleset.Client
-	lst         *listener.Listener
+	client      scaleSetAPI
+	session     jobSession
 	scaleSetID  int
 	status      string
 	err         string
@@ -303,7 +401,8 @@ type target struct {
 	waiting     int
 	waitSince   time.Time
 	runners     map[string]*runner
-	starting    int // runners being prepared/started in the background
+	lost        map[string]lostJob // jobs bound to dead runners, by job ID
+	starting    int                // runners being prepared/started in the background
 	reconcileMu sync.Mutex
 	orphanMu    sync.Mutex
 	orphanAt    time.Time // last orphan cleanup
@@ -311,7 +410,7 @@ type target struct {
 
 func newTarget(m *Manager, t store.Target) *target {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{},
+	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{}, lost: map[string]lostJob{},
 		log: m.log.With("target", t.FullName())}
 }
 
@@ -324,12 +423,18 @@ func (t *target) cfg() store.Target {
 func (t *target) update(n store.Target) {
 	t.mu.Lock()
 	t.t = n
-	lst := t.lst
+	session := t.session
 	t.mu.Unlock()
-	if lst != nil {
-		lst.SetMaxRunners(n.MaxRunners)
+	if session != nil {
+		session.setMaxRunners(n.MaxRunners)
 	}
 	go t.reconcile()
+}
+
+// staleForStrict reports whether an idle runner was started without strict
+// isolation for a target that is strict now: reconcile replaces it.
+func staleForStrict(r *runner, strict bool) bool {
+	return strict && !r.lease.Strict && !r.busy && !r.exited
 }
 
 func (t *target) waitingSince() time.Time {
@@ -380,72 +485,44 @@ func (t *target) run(parent context.Context) {
 	}
 }
 
-func (t *target) newClient() (*scaleset.Client, error) {
-	creds := t.m.creds()
-	cfg := t.cfg()
-	info := scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: cfg.ScaleSetID}
-	if creds.AppClientID != "" && creds.AppPEM != "" && cfg.InstallationID != 0 {
-		return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
-			GitHubConfigURL: cfg.URL(),
-			GitHubAppAuth:   scaleset.GitHubAppAuth{ClientID: creds.AppClientID, InstallationID: cfg.InstallationID, PrivateKey: creds.AppPEM},
-			SystemInfo:      info,
-		})
-	}
-	if creds.PAT != "" {
-		return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL: cfg.URL(), PersonalAccessToken: creds.PAT, SystemInfo: info,
-		})
-	}
-	return nil, errors.New("no GitHub credentials for this target (install the GitHub App on " + cfg.Owner + ")")
-}
-
 func (t *target) listen() error {
-	client, err := t.newClient()
+	cfg := t.cfg()
+	client, err := t.m.connect(t.m.creds(), cfg, t.m.Version)
 	if err != nil {
 		return err
 	}
-	cfg := t.cfg()
-	ss, err := client.GetRunnerScaleSet(t.ctx, 1, cfg.ScaleSetName)
+	id, created, err := client.ensureScaleSet(t.ctx, cfg.ScaleSetName)
 	if err != nil {
-		return fmt.Errorf("get scale set: %w", err)
+		return err
 	}
-	if ss == nil {
-		ss, err = client.CreateRunnerScaleSet(t.ctx, &scaleset.RunnerScaleSet{
-			Name:          cfg.ScaleSetName,
-			RunnerGroupID: 1,
-			Labels:        []scaleset.Label{{Name: cfg.ScaleSetName}},
-			RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
-		})
-		if err != nil {
-			return fmt.Errorf("create scale set: %w", err)
-		}
-		t.log.Info("scale set created", "id", ss.ID, "label", cfg.ScaleSetName)
+	if created {
+		t.log.Info("scale set created", "id", id, "label", cfg.ScaleSetName)
 	}
-	client.SetSystemInfo(scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: ss.ID})
-	if cfg.ScaleSetID != ss.ID {
-		cfg.ScaleSetID = ss.ID
-		if err := t.m.store.UpdateTarget(cfg); err != nil {
+	if cfg.ScaleSetID != id {
+		cfg.ScaleSetID = id
+		// Only that column: cfg may be stale (e.g. switched to strict since).
+		if err := t.m.store.SetScaleSetID(cfg.ID, id); err != nil {
 			t.log.Warn("save scale set id", "error", err)
 		}
 	}
 	host, _ := os.Hostname()
-	session, err := client.MessageSessionClient(t.ctx, ss.ID, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
-	if err != nil {
-		return fmt.Errorf("open session: %w", err)
-	}
-	defer session.Close(context.Background())
-	lst, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: cfg.MaxRunners, Logger: t.log.WithGroup("listener")})
+	session, err := client.openSession(t.ctx, id, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := session.close(context.Background()); err != nil {
+			t.log.Warn("close message session", "error", err)
+		}
+	}()
 	t.mu.Lock()
-	t.client, t.lst, t.scaleSetID = client, lst, ss.ID
-	t.t.ScaleSetID = ss.ID
+	t.client, t.session, t.scaleSetID = client, session, id
+	t.t.ScaleSetID = id
 	t.mu.Unlock()
 	t.setStatus("listening", "")
-	t.log.Info("listening for jobs", "scaleSet", ss.ID, "label", cfg.ScaleSetName)
+	t.log.Info("listening for jobs", "scaleSet", id, "label", cfg.ScaleSetName)
 	go t.cleanupOrphans()
-	err = lst.Run(t.ctx, &scaler{t: t, session: session})
+	err = session.run(t.ctx, id, cfg.MaxRunners, t.log.WithGroup("listener"), &scaler{t: t, session: session})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
@@ -474,7 +551,7 @@ func (t *target) stop(remove bool) {
 		t.mu.Unlock()
 		if n == 0 {
 			if client != nil && id != 0 {
-				if err := client.DeleteRunnerScaleSet(context.Background(), id); err != nil {
+				if err := client.deleteScaleSet(context.Background(), id); err != nil {
 					t.log.Warn("delete scale set", "error", err)
 				} else {
 					t.log.Info("scale set deleted", "id", id)
@@ -496,16 +573,21 @@ func (t *target) reconcile() {
 	defer t.reconcileMu.Unlock()
 
 	t.mu.Lock()
-	if t.client == nil {
+	client := t.client // replaced by listen(): read under the lock only
+	if client == nil {
 		t.mu.Unlock()
 		return
 	}
 	cfg := t.t
-	want := min(cfg.MaxRunners, cfg.MinRunners+t.desired)
+	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, time.Now())))
 	have := t.starting
-	var idle []*runner
+	var idle, stale []*runner
 	for _, r := range t.runners {
 		if r.exited {
+			continue
+		}
+		if staleForStrict(r, cfg.Strict) {
+			stale = append(stale, r) // not counted: replaced right away
 			continue
 		}
 		have++
@@ -531,6 +613,19 @@ func (t *target) reconcile() {
 	}
 	missing := max(0, want-have-started)
 
+	// The target became strict: its idle runners started without strict
+	// isolation go (retried at every reconcile until none is left).
+	for _, r := range stale {
+		if r.runnerID != 0 {
+			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
+				continue // a job was just assigned to it, or GitHub is unreachable
+			}
+			t.m.forgetRunner(r.runnerID, nil)
+		}
+		t.log.Info("replacing idle runner started without strict isolation", "runner", r.name)
+		t.m.pool.Remove(context.Background(), r.containerID)
+	}
+
 	// Scale down: idle runners beyond what is needed are deregistered first
 	// (GitHub refuses if a job was just assigned) and only then killed.
 	excess := have + started - want
@@ -539,7 +634,7 @@ func (t *target) reconcile() {
 			break
 		}
 		if r.runnerID != 0 {
-			if err := t.client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
 				continue
 			}
 			t.m.forgetRunner(r.runnerID, nil)
@@ -575,6 +670,11 @@ func (t *target) launch(lease pool.Lease) {
 		}
 		return
 	}
+	if cfg := t.cfg(); cfg.Strict && !lease.Strict {
+		// Switched to strict while the slot was being prepared.
+		t.m.pool.Release(context.Background(), lease)
+		return
+	}
 	if err := t.startRunner(lease); err != nil {
 		t.log.Error("start runner", "error", err)
 		t.m.pool.Release(context.Background(), lease)
@@ -595,27 +695,26 @@ func (t *target) startRunner(lease pool.Lease) error {
 	t.mu.Unlock()
 	name := "pitlane-" + randomSuffix()
 	lease.Runner = name
-	jit, err := client.GenerateJitRunnerConfig(t.ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name, WorkFolder: "_work"}, ssID)
+	jit, err := client.generateJIT(t.ctx, name, ssID)
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)
 	}
-	if jit.Runner != nil {
+	if jit.runnerID != 0 {
 		// Recorded before the container exists: if Pitlane dies now, the
 		// orphan cleanup still finds this registration.
-		_ = t.m.store.AddRunner(store.RegisteredRunner{ID: int64(jit.Runner.ID), TargetID: cfg.ID, Name: name})
+		if err := t.m.store.AddRunner(store.RegisteredRunner{ID: jit.runnerID, TargetID: cfg.ID, Name: name}); err != nil {
+			// Not fatal, but the orphan cleanup will never see this runner.
+			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.runnerID, "error", err)
+		}
 	}
-	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.EncodedJITConfig, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
+	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.encoded, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
 	if err != nil {
-		if jit.Runner != nil {
-			id := int64(jit.Runner.ID)
-			t.m.forgetRunner(id, client.RemoveRunner(context.Background(), id))
+		if jit.runnerID != 0 {
+			t.m.forgetRunner(jit.runnerID, client.removeRunner(context.Background(), jit.runnerID))
 		}
 		return err
 	}
-	r := &runner{name: name, containerID: id, lease: lease, startedAt: time.Now()}
-	if jit.Runner != nil {
-		r.runnerID = int64(jit.Runner.ID)
-	}
+	r := &runner{name: name, containerID: id, lease: lease, runnerID: jit.runnerID, startedAt: time.Now()}
 	t.mu.Lock()
 	t.runners[name] = r
 	t.mu.Unlock()
@@ -635,18 +734,25 @@ func (t *target) watch(r *runner) {
 func (m *Manager) finishRunner(t *target, r *runner) {
 	ctx := context.Background()
 	if f, err := os.OpenFile(m.LogFile(r.name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-		_ = m.pool.Logs(ctx, r.containerID, false, f)
-		f.Close()
+		if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
+			m.log.Warn("archive runner log", "runner", r.name, "error", err)
+		}
+		if err := f.Close(); err != nil {
+			m.log.Warn("archive runner log", "runner", r.name, "error", err)
+		}
+	} else {
+		m.log.Warn("archive runner log", "runner", r.name, "error", err)
 	}
 	m.pool.Remove(ctx, r.containerID)
 	if t != nil {
+		t.runnerGone(r)
 		t.mu.Lock()
 		r.exited = true
 		client := t.client
 		t.mu.Unlock()
 		if client != nil && r.runnerID != 0 {
 			// Usually already gone (ephemeral): NotFound also clears the record.
-			m.forgetRunner(r.runnerID, client.RemoveRunner(ctx, r.runnerID))
+			m.forgetRunner(r.runnerID, client.removeRunner(ctx, r.runnerID))
 		}
 	}
 	m.pool.Release(ctx, r.lease)
@@ -659,12 +765,65 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 	m.pool.EnsureFreeDisk(ctx) // idle slots only; skipped while another prune runs
 }
 
+// maxArchivedLog bounds the archived log of one runner (its output is
+// controlled by the job).
+const maxArchivedLog = 64 << 20
+
+var errLogFull = errors.New("log size limit reached")
+
+// capWriter passes through at most n bytes, then fails with errLogFull.
+type capWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *capWriter) Write(b []byte) (int, error) {
+	if c.n <= 0 {
+		return 0, errLogFull
+	}
+	full := int64(len(b)) > c.n
+	if full {
+		b = b[:c.n]
+	}
+	n, err := c.w.Write(b)
+	c.n -= int64(n)
+	if err == nil && full {
+		err = errLogFull
+	}
+	return n, err
+}
+
+// archiveLog copies a log through copyTo into w, keeping at most max bytes
+// followed by a truncation notice.
+func archiveLog(w io.Writer, max int64, copyTo func(io.Writer) error) error {
+	err := copyTo(&capWriter{w: w, n: max})
+	if errors.Is(err, errLogFull) {
+		_, err = fmt.Fprintf(w, "\n[pitlane] log truncated at %d MB\n", max>>20)
+	}
+	return err
+}
+
+// jobStart is when a runner's job started, for its time limit: GitHub's
+// assignment time, since the JobStarted message can arrive tens of seconds
+// later. A zero, future or impossible time (before the runner existed, e.g.
+// a skewed clock) falls back to now.
+func jobStart(assigned, runnerCreated, now time.Time) time.Time {
+	if assigned.IsZero() || assigned.After(now) || assigned.Before(runnerCreated) {
+		return now
+	}
+	return assigned
+}
+
 // timedOut reports whether a runner's job ran longer than limit (0 = no limit).
 func timedOut(r *runner, limit time.Duration, now time.Time) bool {
 	return limit > 0 && r.busy && !r.exited && !r.killed && !r.busySince.IsZero() && now.Sub(r.busySince) > limit
 }
 
-// enforceTimeouts kills the runners whose job exceeded the target's
+// timeoutStopGrace is how long a runner over its time limit has, after
+// SIGTERM, to cancel its job and report it before it is killed.
+const timeoutStopGrace = 30 * time.Second
+
+// enforceTimeouts stops the runners whose job exceeded the target's
 // max_job_minutes. The runner's watch then goes through finishRunner as for
 // any other exit (logs archived, slot cleaned and released).
 func (m *Manager) enforceTimeouts() {
@@ -687,13 +846,18 @@ func (m *Manager) enforceTimeouts() {
 		}
 		t.mu.Unlock()
 		for _, r := range kill {
-			t.log.Warn("job exceeded the time limit, killing its runner", "runner", r.name, "job", r.jobName, "limit", limit)
-			if err := m.pool.Kill(context.Background(), r.containerID); err != nil {
-				t.log.Error("kill runner", "runner", r.name, "error", err)
-				t.mu.Lock()
-				r.killed = false // retried at the next check
-				t.mu.Unlock()
-			}
+			t.log.Warn("job exceeded the time limit, stopping its runner", "runner", r.name, "job", r.jobName, "limit", limit)
+			// In the background: a graceful stop blocks up to its grace period.
+			go func(t *target, r *runner) {
+				ctx, cancel := context.WithTimeout(context.Background(), timeoutStopGrace+time.Minute)
+				defer cancel()
+				if err := m.pool.StopRunner(ctx, r.containerID, timeoutStopGrace); err != nil {
+					t.log.Error("stop runner", "runner", r.name, "error", err)
+					t.mu.Lock()
+					r.killed = false // retried at the next check
+					t.mu.Unlock()
+				}
+			}(t, r)
 		}
 	}
 }
@@ -702,7 +866,7 @@ func (m *Manager) enforceTimeouts() {
 
 type scaler struct {
 	t       *target
-	session *scaleset.MessageSessionClient
+	session jobSession
 }
 
 func unix(ts time.Time) int64 {
@@ -723,7 +887,15 @@ func shortRef(ref string) string {
 func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
 	cfg := s.t.cfg()
 	return store.Job{TargetID: cfg.ID, JobID: b.JobID, RunID: b.WorkflowRunID, Owner: b.OwnerName, Repo: b.RepositoryName,
-		WorkflowRef: shortRef(b.JobWorkflowRef), JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
+		WorkflowRef: shortRef(b.JobWorkflowRef), WorkflowFullRef: b.JobWorkflowRef, JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
+}
+
+// upsertJob records a job in the history; a failure only affects the UI and
+// the lost-job detection after a restart, so it is logged.
+func (s *scaler) upsertJob(j store.Job) {
+	if err := s.t.m.store.UpsertJob(j); err != nil {
+		s.t.log.Warn("record job", "job", j.JobID, "error", err)
+	}
 }
 
 func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
@@ -731,14 +903,13 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.t.reconcile()
 		return nil
 	}
-	st := s.t.m.store
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
 			ids = append(ids, j.RunnerRequestID)
-			_ = st.UpsertJob(s.job(j.JobMessageBase))
+			s.upsertJob(s.job(j.JobMessageBase))
 		}
-		if _, err := s.session.AcquireJobs(ctx, ids); err != nil {
+		if err := s.session.acquireJobs(ctx, ids); err != nil {
 			return fmt.Errorf("acquire jobs: %w", err)
 		}
 	}
@@ -752,13 +923,16 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.t.mu.Lock()
 		if r, ok := s.t.runners[j.RunnerName]; ok {
 			if !r.busy || r.busySince.IsZero() {
-				r.busySince = time.Now()
+				r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, time.Now())
 			}
-			r.busy, r.jobName, r.repo = true, j.JobDisplayName, j.RepositoryName
+			r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
 			job.Slot = r.lease.Slot
 		}
+		if l, ok := s.t.lost[j.JobID]; ok && l.runner != j.RunnerName {
+			delete(s.t.lost, j.JobID) // started again elsewhere: it needs a runner
+		}
 		s.t.mu.Unlock()
-		_ = st.UpsertJob(job)
+		s.upsertJob(job)
 	}
 	for _, j := range msg.JobCompletedMessages {
 		job := s.job(j.JobMessageBase)
@@ -771,7 +945,13 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		if job.Result == "" {
 			job.Result = "canceled"
 		}
-		_ = st.UpsertJob(job)
+		s.t.mu.Lock()
+		delete(s.t.lost, j.JobID)
+		if r, ok := s.t.runners[j.RunnerName]; ok && r.jobID == j.JobID {
+			r.jobID = ""
+		}
+		s.t.mu.Unlock()
+		s.upsertJob(job)
 	}
 	if msg.Statistics != nil {
 		s.t.mu.Lock()

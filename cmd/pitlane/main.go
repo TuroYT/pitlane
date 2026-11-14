@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/server"
 	"github.com/TuroYT/pitlane/internal/store"
+	"github.com/TuroYT/pitlane/internal/update"
 	"github.com/TuroYT/pitlane/web"
 )
 
@@ -43,7 +46,8 @@ func main() {
 			if len(os.Args) > 2 {
 				dir = os.Args[2]
 			}
-			b, err := os.ReadFile(filepath.Join(dir, "setup-token"))
+			// The operator's own command line chooses the directory.
+			b, err := os.ReadFile(filepath.Join(dir, "setup-token")) //nolint:gosec // G703: local CLI argument, not remote input
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "no setup token: setup is already complete (or Pitlane never started)")
 				os.Exit(1)
@@ -56,20 +60,103 @@ func main() {
 	listen := flag.String("listen", env("PITLANE_LISTEN", ":8080"), "HTTP listen address (PITLANE_LISTEN)")
 	dataDir := flag.String("data", env("PITLANE_DATA", "/var/lib/pitlane"), "data directory (PITLANE_DATA)")
 	baseURL := flag.String("base-url", env("PITLANE_BASE_URL", ""), "public URL of the UI, e.g. http://pitlane.lan:8080 (PITLANE_BASE_URL)")
+	trusted := flag.String("trusted-proxies", env("PITLANE_TRUSTED_PROXIES", ""),
+		"comma-separated IPs or CIDRs of reverse proxies whose Host and X-Forwarded-Proto headers are trusted when no base URL is set; loopback always is (PITLANE_TRUSTED_PROXIES)")
 	logLevel := flag.String("log-level", env("PITLANE_LOG_LEVEL", "info"), "debug, info, warn or error (PITLANE_LOG_LEVEL)")
-	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only)")
+	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only, loopback listen address only) (PITLANE_INSECURE_NO_AUTH)")
+	noAuthAnyAddr := flag.Bool("insecure-no-auth-any-address", env("PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS", "") == "true",
+		"allow --insecure-no-auth on a non-loopback listen address, e.g. behind an authenticating proxy (PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS)")
 	flag.Parse()
 
-	var lvl slog.Level
-	_ = lvl.UnmarshalText([]byte(*logLevel))
+	lvl, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pitlane:", err)
+		os.Exit(2)
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
-	if err := run(log, *listen, *dataDir, *baseURL, *noAuth); err != nil {
+	slog.SetDefault(log) // packages without a logger of their own (store)
+	if *noAuth {
+		if err := checkNoAuthListen(*listen, *noAuthAnyAddr); err != nil {
+			log.Error("fatal", "error", err)
+			os.Exit(1)
+		}
+		log.Warn("login is disabled (--insecure-no-auth): anyone reaching this address controls Pitlane", "addr", *listen)
+	}
+	proxies, err := server.ParseTrustedProxies(*trusted)
+	if err != nil {
+		log.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+	err = run(log, server.Config{Version: version, DataDir: *dataDir, BaseURL: *baseURL, InsecureNoAuth: *noAuth,
+		Listen: *listen, TrustedProxies: proxies, PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN"))})
+	if errors.Is(err, errRestart) {
+		reexec(log)
+	}
+	if err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
+// parseLogLevel parses --log-level (debug, info, warn or error, any case;
+// slog's "info+2" offsets are accepted too).
+func parseLogLevel(s string) (slog.Level, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
+		return 0, fmt.Errorf("invalid --log-level / PITLANE_LOG_LEVEL %q: want debug, info, warn or error", s)
+	}
+	return lvl, nil
+}
+
+// checkNoAuthListen refuses to serve without authentication on anything but
+// a loopback address, unless explicitly allowed: whoever reaches the UI can
+// register runners and read job logs.
+func checkNoAuthListen(listen string, anyAddress bool) error {
+	if anyAddress || isLoopback(listen) {
+		return nil
+	}
+	return fmt.Errorf("--insecure-no-auth needs a loopback listen address (127.0.0.1, ::1 or localhost), not %q; "+
+		"to serve it on another address behind your own authentication, also set --insecure-no-auth-any-address "+
+		"(PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS=true)", listen)
+}
+
+// isLoopback reports whether a listen address only accepts local
+// connections (":8080" listens on every interface).
+func isLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// errRestart asks main to start the (just updated) binary again.
+var errRestart = errors.New("restart requested")
+
+// reexec replaces the process with the binary now at its path, keeping the
+// PID (systemd keeps tracking it) and the arguments. Busy runners are Docker
+// containers, not children, so they keep running and are adopted on start.
+func reexec(log *slog.Logger) {
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err == nil {
+		log.Info("restarting into the updated binary", "path", exe)
+		// The path is our own binary, just replaced by a verified release.
+		err = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec // G204: own executable
+	}
+	// Exec failed: exit non-zero so the service manager starts us again.
+	log.Error("re-exec failed, exiting so the service manager restarts Pitlane", "error", err)
+	os.Exit(1)
+}
+
+func run(log *slog.Logger, cfg server.Config) error {
+	listen, dataDir := cfg.Listen, cfg.DataDir
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -77,24 +164,44 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
+	pool.SetVersion(version) // default runner image released with this binary
 	p, err := pool.New(server.LoadPoolConfig(st, dataDir), log.With("component", "pool"))
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)
 	}
-	if _, err := p.Docker().Ping(ctx); err != nil {
+	if err := p.Ping(ctx); err != nil {
 		return fmt.Errorf("cannot reach Docker (is the socket mounted / is Docker running?): %w", err)
 	}
 
-	srv := server.New(server.Config{
-		Version: version, DataDir: dataDir, BaseURL: baseURL,
-		PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN")), InsecureNoAuth: noAuth,
-	}, st, p, log.With("component", "http"), web.Dist())
+	srv := server.New(cfg, st, p, log.With("component", "http"), web.Dist())
 	mgr := scaler.New(st, p, dataDir, srv.Credentials, srv.Notify, log.With("component", "scaler"))
 	mgr.Version = version
 	mgr.ListRunners = srv.GitHubRunners
+	mgr.StrictReason = srv.StrictReason
 	srv.SetManager(mgr)
+
+	var restart atomic.Bool
+	upd := &update.Updater{
+		Version: version, Store: st, GitHub: &update.GitHub{}, Probe: update.DefaultProbe(version),
+		Images: update.DockerImages{Cli: p.Docker(), PullFunc: func(ctx context.Context, ref string) error {
+			return p.EnsureImage(ctx, ref, true)
+		}},
+		RunnerImage: func() string { return p.Config().RunnerImage },
+		Busy: func() bool {
+			for _, sl := range p.Slots() {
+				if sl.Status == "busy" {
+					return true
+				}
+			}
+			return false
+		},
+		Restart: func() { restart.Store(true); stop() },
+		Notify:  srv.Notify,
+		Log:     log.With("component", "update"),
+	}
+	srv.SetUpdates(upd.Handler())
 
 	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -116,6 +223,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 		return err
 	}
 	srv.Notify()
+	go upd.Run(ctx)
 
 	<-ctx.Done()
 	log.Info("shutting down (busy runners keep running and are adopted on restart)")
@@ -124,6 +232,9 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		_ = httpSrv.Close() // long-lived event streams (open browser tabs)
+	}
+	if restart.Load() {
+		return errRestart
 	}
 	return nil
 }

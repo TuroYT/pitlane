@@ -16,7 +16,7 @@ Pick one:
 
 | Method | Command |
 | --- | --- |
-| systemd | `curl -fsSL https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/install.sh \| sudo sh` |
+| systemd | `curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh \| sudo sh` |
 | Docker Compose | download [`deploy/compose.yaml`](../deploy/compose.yaml), set `PITLANE_BASE_URL`, `docker compose up -d` |
 | Proxmox VE | run [`deploy/proxmox/pitlane-lxc.sh`](../deploy/proxmox/pitlane-lxc.sh) on the Proxmox host |
 
@@ -70,8 +70,21 @@ Try [`examples/smoke.yml`](../examples/smoke.yml): it uses a Postgres service,
 ## Updating
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/install.sh | sudo sh   # systemd
+curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh | sudo sh   # systemd
 docker compose pull && docker compose up -d                                                    # Compose
+```
+
+With Compose, first set the new version in the `image:` tag of `compose.yaml`
+(it names an exact release, e.g. `ghcr.io/turoyt/pitlane:v0.2.0`).
+
+`install.sh` takes everything from a single release (set `PITLANE_VERSION=0.2.0`
+to choose it) and refuses a binary that does not match that release's
+`checksums.txt`. Release binaries and images also carry build provenance, which
+you can check with the GitHub CLI:
+
+```sh
+gh attestation verify pitlane_linux_amd64 --repo TuroYT/pitlane
+gh attestation verify oci://ghcr.io/turoyt/pitlane:v0.2.0 --repo TuroYT/pitlane
 ```
 
 Restarts are safe: running jobs keep running and are picked up again.

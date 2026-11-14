@@ -18,7 +18,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const apiBase = "https://api.github.com"
+var apiBase = "https://api.github.com" // tests point it at a fake server
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -263,9 +263,9 @@ func RecentJobs(ctx context.Context, token, owner, repo string, maxRuns int) ([]
 	return out, nil
 }
 
-// JobLog downloads the log of the job a given runner ran in a workflow run.
-// token is an installation token or a personal access token.
-func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {
+// RunJobID returns the ID of the job a runner ran in a workflow run (the ID
+// used in job page URLs and the jobs API).
+func RunJobID(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (int64, error) {
 	var jobs struct {
 		Jobs []struct {
 			ID         int64  `json:"id"`
@@ -274,7 +274,7 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 	}
 	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID)
 	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
-		return nil, err
+		return 0, err
 	}
 	var jobID int64
 	for _, j := range jobs.Jobs {
@@ -283,7 +283,17 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 		}
 	}
 	if jobID == 0 {
-		return nil, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+		return 0, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+	}
+	return jobID, nil
+}
+
+// JobLog downloads the log of the job a given runner ran in a workflow run.
+// token is an installation token or a personal access token.
+func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {
+	jobID, err := RunJobID(ctx, token, owner, repo, runID, runnerName)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
 	if err != nil {
@@ -373,4 +383,36 @@ func ListRunners(ctx context.Context, token, owner, repo string) ([]Runner, erro
 		}
 	}
 	return out, nil
+}
+
+// RepoPrivate reports whether a repository is private (or internal). token
+// is an installation token or a personal access token.
+func RepoPrivate(ctx context.Context, token, owner, repo string) (bool, error) {
+	var r struct {
+		Private *bool `json:"private"`
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s", apiBase, url.PathEscape(owner), url.PathEscape(repo))
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &r); err != nil {
+		return false, err
+	}
+	if r.Private == nil {
+		return false, fmt.Errorf("visibility of %s/%s not returned", owner, repo)
+	}
+	return *r.Private, nil
+}
+
+// RunnerGroupAllowsPublic reports whether an organisation runner group lets
+// public repositories use its runners.
+func RunnerGroupAllowsPublic(ctx context.Context, token, org string, groupID int) (bool, error) {
+	var g struct {
+		AllowsPublic *bool `json:"allows_public_repositories"`
+	}
+	u := fmt.Sprintf("%s/orgs/%s/actions/runner-groups/%d", apiBase, url.PathEscape(org), groupID)
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &g); err != nil {
+		return false, err
+	}
+	if g.AllowsPublic == nil {
+		return false, fmt.Errorf("runner group %d of %s: allows_public_repositories not returned", groupID, org)
+	}
+	return *g.AllowsPublic, nil
 }

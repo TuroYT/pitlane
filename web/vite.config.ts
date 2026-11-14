@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
@@ -14,4 +15,5 @@ export default defineConfig({
     },
   },
   build: { outDir: 'dist', emptyOutDir: false, chunkSizeWarningLimit: 600 },
+  test: { environment: 'happy-dom', include: ['src/**/*.test.ts'], restoreMocks: true },
 })

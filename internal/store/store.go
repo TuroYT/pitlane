@@ -8,14 +8,18 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -71,11 +75,24 @@ var migrations = []string{
 		name TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	)`,
+	// Sessions now store the SHA-256 of their token: sessions stored with a
+	// plaintext token are dropped (their users sign in again).
+	`DELETE FROM sessions`,
+	// Why the target must run strict ("" = not required or not known yet),
+	// and when Pitlane switched it to strict on its own (0 = never).
+	`ALTER TABLE targets ADD COLUMN strict_required TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE targets ADD COLUMN strict_forced_at INTEGER NOT NULL DEFAULT 0`,
+	// Full workflow reference of a job ("owner/repo/.github/workflows/ci.yml@refs/heads/main"),
+	// which keeps the branch, tag or pull request the job ran for.
+	`ALTER TABLE jobs ADD COLUMN workflow_full_ref TEXT NOT NULL DEFAULT ''`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
 func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := restrictDataDir(dataDir); err != nil {
 		return nil, err
 	}
 	key, err := loadOrCreateKey(filepath.Join(dataDir, "master.key"))
@@ -98,10 +115,61 @@ func Open(dataDir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, aead: aead}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// SQLite creates its files with the process umask.
+	for _, f := range []string{"pitlane.db", "pitlane.db-wal", "pitlane.db-shm"} {
+		if err := os.Chmod(filepath.Join(dataDir, f), 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = db.Close()
+			return nil, fmt.Errorf("restrict %s: %w", f, err)
+		}
+	}
 	return s, nil
+}
+
+// Seams for tests.
+var (
+	chmod   = os.Chmod
+	dirInfo = func(path string) (uid int, mode os.FileMode, err error) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, 0, err
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, 0, errors.New("no owner information for " + path)
+		}
+		return int(st.Uid), info.Mode(), nil
+	}
+)
+
+// restrictDataDir makes the data directory private to its owner: it holds
+// the master key, the database and job logs, and MkdirAll keeps the mode of
+// an existing directory. A directory Pitlane does not own (a volume or bind
+// mount prepared by someone else, Pitlane running as a non-root user with
+// group access) cannot be chmod'ed: that is only logged, since every file
+// Pitlane writes in it is itself created 0600 (and the database files are
+// checked below), as long as nobody else can write to it (plant or replace
+// files). Anything else fails.
+func restrictDataDir(dataDir string) error {
+	err := chmod(dataDir, 0o700) //nolint:gosec // G302: a directory needs the x bit
+	if err == nil {
+		return nil
+	}
+	uid, mode, serr := dirInfo(dataDir)
+	switch {
+	case serr != nil:
+		return fmt.Errorf("restrict data directory: %w (and cannot check its owner: %v)", err, serr)
+	case uid == os.Geteuid():
+		return fmt.Errorf("restrict data directory: %w", err)
+	case mode.Perm()&0o022 != 0:
+		return fmt.Errorf("data directory %s belongs to another user (uid %d) and is writable by its group or others (%v): "+
+			"make it owned by the user running Pitlane, or at least not group/world-writable", dataDir, uid, mode.Perm())
+	}
+	slog.Warn("cannot restrict the data directory to its owner: it belongs to another user, its files stay private (0600)",
+		"dir", dataDir, "owner", uid, "mode", mode.Perm().String(), "error", err)
+	return nil
 }
 
 // Close closes the database.
@@ -232,10 +300,43 @@ type Target struct {
 	Strict bool `json:"strict"`
 	// A runner busy for longer is killed (0 = unlimited).
 	MaxJobMinutes int `json:"maxJobMinutes"`
+	// StrictRequired says why the target must run strict (a public
+	// repository, a runner group open to public repositories); "" when it
+	// need not, or as long as GitHub could not be asked. Strict cannot be
+	// turned off while it is set.
+	StrictRequired string `json:"strictRequired,omitempty"`
+	// StrictForcedAt is when Pitlane switched the target to strict on its
+	// own (Unix time, 0 = never).
+	StrictForcedAt int64 `json:"strictForcedAt,omitempty"`
 }
+
+// StrictPublicRepo is the strict requirement of a public repository target.
+const StrictPublicRepo = "public repository"
+
+// StrictPublicRunnerGroup is the strict requirement of an organisation
+// target whose runner group accepts jobs of public repositories.
+const StrictPublicRunnerGroup = "its runner group allows public repositories"
 
 // DefaultMaxJobMinutes is GitHub's own job time limit on hosted runners.
 const DefaultMaxJobMinutes = 360
+
+// DefaultMinRunners is the number of warm runners of a new target: one idle
+// runner kept registered so a job starts in about a second. Existing targets
+// keep their own value.
+const DefaultMinRunners = 1
+
+// DefaultStrictMinRunners is the number of warm runners of a new strict
+// target: none, so a public repository has no idle runner registered and
+// waiting for a pull request from a fork.
+const DefaultStrictMinRunners = 0
+
+// DefaultWarmRunners returns the warm runner count of a new target.
+func DefaultWarmRunners(strict bool) int {
+	if strict {
+		return DefaultStrictMinRunners
+	}
+	return DefaultMinRunners
+}
 
 // FullName returns "owner/repo" or "owner".
 func (t Target) FullName() string {
@@ -248,12 +349,12 @@ func (t Target) FullName() string {
 // URL returns the GitHub URL the scale set is registered against.
 func (t Target) URL() string { return "https://github.com/" + t.FullName() }
 
-const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict, max_job_minutes`
+const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict, max_job_minutes, strict_required, strict_forced_at`
 
 func scanTarget(sc interface{ Scan(...any) error }) (Target, error) {
 	var t Target
 	var enabled, strict int
-	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict, &t.MaxJobMinutes)
+	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict, &t.MaxJobMinutes, &t.StrictRequired, &t.StrictForcedAt)
 	t.Enabled, t.Strict = enabled == 1, strict == 1
 	return t, err
 }
@@ -290,9 +391,9 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 		t.MaxRunners = 4
 	}
 	t.MaxJobMinutes = max(0, t.MaxJobMinutes)
-	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), t.MaxJobMinutes, time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, strict_required, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), t.MaxJobMinutes, t.StrictRequired, time.Now().Unix())
 	if err != nil {
 		return t, err
 	}
@@ -300,9 +401,43 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 	return t, nil
 }
 
-// UpdateTarget saves the mutable fields of a target.
+// SetScaleSetID records the scale set of a target, leaving its other fields
+// alone (they may have changed since the caller read the target).
+func (s *Store) SetScaleSetID(id int64, scaleSetID int) error {
+	_, err := s.db.Exec(`UPDATE targets SET scale_set_id = ? WHERE id = ?`, scaleSetID, id)
+	return err
+}
+
+// SetStrictRequirement records why a target must run strict ("" = it need
+// not). A requirement switches a non-strict target to strict, which is
+// reported (flipped) and timestamped; clearing it never turns strict off.
+func (s *Store) SetStrictRequirement(id int64, reason string) (flipped bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	if reason != "" {
+		res, err := tx.Exec(`UPDATE targets SET strict = 1, strict_forced_at = ? WHERE id = ? AND strict = 0`, time.Now().Unix(), id)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		flipped = n > 0
+	}
+	if _, err := tx.Exec(`UPDATE targets SET strict_required = ? WHERE id = ?`, reason, id); err != nil {
+		return false, err
+	}
+	return flipped, tx.Commit()
+}
+
+// UpdateTarget saves the mutable fields of a target (not the strict
+// requirement, see SetStrictRequirement).
 func (s *Store) UpdateTarget(t Target) error {
-	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?, strict = ?, max_job_minutes = ? WHERE id = ?`,
+	// Strict cannot be written off while it is required, whatever the caller
+	// read before (the requirement may have been set since).
+	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?,
+		strict = CASE WHEN strict_required != '' THEN 1 ELSE ? END, max_job_minutes = ? WHERE id = ?`,
 		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, boolInt(t.Strict), max(0, t.MaxJobMinutes), t.ID)
 	return err
 }
@@ -339,16 +474,34 @@ type Job struct {
 	StartedAt   int64  `json:"startedAt"`
 	FinishedAt  int64  `json:"finishedAt"`
 	Result      string `json:"result"`
+	// WorkflowFullRef is the full workflow reference GitHub sent with the job,
+	// e.g. "owner/repo/.github/workflows/ci.yml@refs/heads/main" (empty for
+	// jobs recorded before it was stored). WorkflowRef keeps the file name.
+	WorkflowFullRef string `json:"workflowFullRef"`
+	// Ref is the git ref of WorkflowFullRef: "refs/heads/main",
+	// "refs/pull/42/merge", "refs/tags/v1"… Derived, not stored.
+	Ref string `json:"ref"`
+}
+
+// WorkflowRefParts splits a full workflow reference into the workflow file
+// path ("owner/repo/.github/workflows/ci.yml") and the git ref ("refs/heads/main").
+func WorkflowRefParts(full string) (path, ref string) {
+	// Repository and workflow paths never contain "@", branch names may.
+	if i := strings.Index(full, "@"); i >= 0 {
+		return full[:i], full[i+1:]
+	}
+	return full, ""
 }
 
 // UpsertJob inserts or updates a job keyed by its GitHub job id. Zero values
 // never overwrite existing data.
 func (s *Store) UpsertJob(j Job) error {
-	_, err := s.db.Exec(`INSERT INTO jobs (target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO jobs (target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id) DO UPDATE SET
 			run_id = CASE WHEN excluded.run_id != 0 THEN excluded.run_id ELSE run_id END,
 			workflow_ref = CASE WHEN excluded.workflow_ref != '' THEN excluded.workflow_ref ELSE workflow_ref END,
+			workflow_full_ref = CASE WHEN excluded.workflow_full_ref != '' THEN excluded.workflow_full_ref ELSE workflow_full_ref END,
 			job_name = CASE WHEN excluded.job_name != '' THEN excluded.job_name ELSE job_name END,
 			runner_name = CASE WHEN excluded.runner_name != '' THEN excluded.runner_name ELSE runner_name END,
 			slot = CASE WHEN excluded.slot >= 0 THEN excluded.slot ELSE slot END,
@@ -356,7 +509,7 @@ func (s *Store) UpsertJob(j Job) error {
 			started_at = CASE WHEN excluded.started_at != 0 THEN excluded.started_at ELSE started_at END,
 			finished_at = CASE WHEN excluded.finished_at != 0 THEN excluded.finished_at ELSE finished_at END,
 			result = CASE WHEN excluded.result != '' THEN excluded.result ELSE result END`,
-		j.TargetID, j.JobID, j.RunID, j.Owner, j.Repo, j.WorkflowRef, j.JobName, j.Event, j.RunnerName, j.Slot, j.QueuedAt, j.StartedAt, j.FinishedAt, j.Result)
+		j.TargetID, j.JobID, j.RunID, j.Owner, j.Repo, j.WorkflowRef, j.JobName, j.Event, j.RunnerName, j.Slot, j.QueuedAt, j.StartedAt, j.FinishedAt, j.Result, j.WorkflowFullRef)
 	return err
 }
 
@@ -369,16 +522,20 @@ func (s *Store) SetJobSlot(runnerName string, slot int) error {
 // JobByRunner returns the job a runner picked up.
 func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
 	var j Job
-	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result
+	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
 		FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
-		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result)
+		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef)
+	_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
 	return j, err
 }
 
-// Jobs returns the most recent jobs.
-func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result
-		FROM jobs ORDER BY queued_at DESC, id DESC LIMIT ?`, limit)
+// InFlightJobs returns the jobs that started and have not finished on a
+// runner that is still recorded as registered on GitHub. Used at startup to
+// find the jobs of runners that died while Pitlane was stopped.
+func (s *Store) InFlightJobs(ctx context.Context) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT target_id, job_id, runner_name, started_at FROM jobs j
+		WHERE finished_at = 0 AND started_at > 0 AND runner_name != ''
+		AND EXISTS (SELECT 1 FROM runners r WHERE r.name = j.runner_name AND r.target_id = j.target_id)`)
 	if err != nil {
 		return nil, err
 	}
@@ -386,9 +543,100 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	var out []Job
 	for rows.Next() {
 		var j Job
-		if err := rows.Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result); err != nil {
+		if err := rows.Scan(&j.TargetID, &j.JobID, &j.RunnerName, &j.StartedAt); err != nil {
 			return nil, err
 		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// Jobs returns the most recent jobs.
+func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
+	jobs, _, err := s.JobsPage(ctx, JobFilter{}, limit, 0)
+	return jobs, err
+}
+
+const jobColumns = `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref FROM jobs`
+
+// JobFilter narrows a job listing. Empty fields match everything.
+type JobFilter struct {
+	Owner, Repo string // repository (both set) or nothing
+	Result      string // "running" (not finished yet) or a result, case-insensitive
+	Ref         string // substring of the branch, tag or pull request ref, case-insensitive
+}
+
+func (f JobFilter) where() (string, []any) {
+	var conds []string
+	var args []any
+	if f.Owner != "" && f.Repo != "" {
+		conds = append(conds, "owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE")
+		args = append(args, f.Owner, f.Repo)
+	}
+	switch r := strings.ToLower(strings.TrimSpace(f.Result)); r {
+	case "":
+	case "running":
+		conds = append(conds, "finished_at = 0")
+	default:
+		conds = append(conds, "finished_at != 0 AND lower(result) = ?")
+		args = append(args, r)
+	}
+	if ref := strings.ToLower(strings.TrimSpace(f.Ref)); ref != "" {
+		// Only the part after "@" (refs/heads/main, refs/pull/12/merge…).
+		conds = append(conds, "instr(workflow_full_ref, '@') > 0 AND instr(lower(substr(workflow_full_ref, instr(workflow_full_ref, '@') + 1)), ?) > 0")
+		args = append(args, ref)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// JobsPage returns one page of the most recent jobs matching f, and how many
+// jobs match in total.
+func (s *Store) JobsPage(ctx context.Context, f JobFilter, limit, offset int) ([]Job, int, error) {
+	where, args := f.where()
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	// where is built from constant fragments only; values are bound parameters.
+	query := jobColumns + where + ` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?` //nolint:gosec // G202: constant fragments, bound values
+	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	jobs, err := scanJobs(rows)
+	return jobs, total, err
+}
+
+// JobRepos lists the repositories ("owner/repo") that have jobs.
+func (s *Store) JobRepos(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT owner || '/' || repo FROM jobs WHERE owner != '' AND repo != '' ORDER BY 1 COLLATE NOCASE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func scanJobs(rows *sql.Rows) ([]Job, error) {
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := rows.Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef); err != nil {
+			return nil, err
+		}
+		_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
 		out = append(out, j)
 	}
 	return out, rows.Err()
@@ -402,21 +650,33 @@ func (s *Store) PruneJobs(olderThan time.Duration) error {
 
 // ---------------------------------------------------------------- sessions
 
+// sessionKey is what the database keeps of a session token: its SHA-256, so
+// a leaked database (or backup) does not leak usable sessions. Tokens are
+// random, a plain hash is enough.
+func sessionKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 // CreateSession stores a session token for login.
 func (s *Store) CreateSession(token, login string, ttl time.Duration) error {
-	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at) VALUES (?, ?, ?)`, token, login, time.Now().Add(ttl).Unix())
+	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at) VALUES (?, ?, ?)`, sessionKey(token), login, time.Now().Add(ttl).Unix())
 	return err
 }
 
 // SessionLogin returns the login of a valid session.
 func (s *Store) SessionLogin(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	key := sessionKey(token)
 	var login string
 	var exp int64
-	if err := s.db.QueryRow(`SELECT login, expires_at FROM sessions WHERE token = ?`, token).Scan(&login, &exp); err != nil {
+	if err := s.db.QueryRow(`SELECT login, expires_at FROM sessions WHERE token = ?`, key).Scan(&login, &exp); err != nil {
 		return "", false
 	}
 	if time.Now().Unix() > exp {
-		s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, key)
 		return "", false
 	}
 	return login, true
@@ -424,7 +684,13 @@ func (s *Store) SessionLogin(token string) (string, bool) {
 
 // DeleteSession removes a session.
 func (s *Store) DeleteSession(token string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, sessionKey(token))
+	return err
+}
+
+// PruneSessions removes expired sessions.
+func (s *Store) PruneSessions() error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, time.Now().Unix())
 	return err
 }
 

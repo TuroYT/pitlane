@@ -1,9 +1,14 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
 func TestValidName(t *testing.T) {
@@ -56,5 +61,59 @@ func TestCSRFRequiresHeader(t *testing.T) {
 		if w.Code != tc.want {
 			t.Errorf("%s %s header=%q: got %d want %d", tc.method, tc.path, tc.header, w.Code, tc.want)
 		}
+	}
+}
+
+func TestNewTargetDefaults(t *testing.T) {
+	tg, opts, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.MinRunners != nil || opts.Strict != nil {
+		t.Fatalf("nothing asked: %+v", opts)
+	}
+	if tg.MinRunners != store.DefaultMinRunners || tg.MaxRunners != 4 || tg.MaxJobMinutes != store.DefaultMaxJobMinutes || !tg.Enabled {
+		t.Fatalf("defaults: %+v", tg)
+	}
+	tg, _, _ = newTarget(strings.NewReader(`{"kind":"org","owner":"acme","repo":"x","minRunners":0}`), 4)
+	if tg.MinRunners != 0 || tg.Repo != "" {
+		t.Fatalf("explicit 0 warm runners not kept: %+v", tg)
+	}
+	tg, _, _ = newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api","minRunners":9,"maxRunners":2}`), 4)
+	if tg.MinRunners != 2 {
+		t.Fatalf("warm runners not capped by max parallel: %+v", tg)
+	}
+	if _, _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme"}`), 4); err == nil {
+		t.Fatal("repo target without a repository accepted")
+	}
+}
+
+func TestGitHubJobRedirect(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(Config{}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j1", RunID: 123, Owner: "acme", Repo: "api", RunnerName: "pitlane-a", Slot: -1})
+	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j2", RunID: 124, Owner: "acme", Repo: "api", RunnerName: "pitlane-b", Slot: -1})
+	s.jobIDs.Store("pitlane-b", int64(555))
+
+	get := func(name string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/runners/"+name+"/github", nil)
+		r.SetPathValue("name", name)
+		w := httptest.NewRecorder()
+		s.handleGitHubJob(w, r)
+		return w
+	}
+	// Unknown target: falls back to the run page.
+	if w := get("pitlane-a"); w.Code != http.StatusFound || w.Header().Get("Location") != "https://github.com/acme/api/actions/runs/123" {
+		t.Fatalf("fallback: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("pitlane-b"); w.Header().Get("Location") != "https://github.com/acme/api/actions/runs/124/job/555" {
+		t.Fatalf("cached: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("pitlane-none"); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown runner: %d", w.Code)
 	}
 }

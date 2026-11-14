@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandMark from '../components/BrandMark.vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { status } from '../session'
@@ -21,7 +22,7 @@ const error = computed(() => {
 <template>
   <div class="center-page">
     <div class="card narrow stack">
-      <h1 class="brand-big"><span class="logo">P</span> Pitlane</h1>
+      <h1 class="brand-big"><BrandMark :size="32" /> Pitlane</h1>
       <p class="muted">Fast, ephemeral self-hosted GitHub Actions runners.</p>
       <p v-if="error" class="alert error">{{ error }}</p>
       <p v-if="status?.mode === 'pat'" class="alert warn">

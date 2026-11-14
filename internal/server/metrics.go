@@ -37,7 +37,7 @@ func readiness(pingErr error, slots []pool.SlotState) (bool, string) {
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	_, err := s.pool.Docker().Ping(ctx)
+	err := s.pool.Ping(ctx)
 	ok, reason := readiness(err, s.pool.Slots())
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -112,7 +112,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots()}
-	_, err := s.pool.Docker().Ping(ctx)
+	err := s.pool.Ping(ctx)
 	d.DockerUp = err == nil
 	if s.mgr != nil {
 		d.Targets = s.mgr.Snapshot()

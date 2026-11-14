@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandMark from '../components/BrandMark.vue'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { post, ApiError } from '../api'
@@ -8,7 +9,7 @@ const emit = defineEmits<{ refresh: [] }>()
 const route = useRoute()
 
 const token = ref('')
-const baseUrl = ref(status.value?.baseUrl ?? location.origin)
+const baseUrl = ref(status.value?.baseUrl || location.origin)
 const org = ref('')
 const appName = ref('')
 const busy = ref(false)
@@ -17,7 +18,9 @@ const error = ref(
     ? 'GitHub did not accept the App creation. Please try again.'
     : route.query.error === 'state'
       ? 'The setup link expired. Please try again.'
-      : '',
+      : route.query.error === 'store'
+        ? 'Pitlane could not save the GitHub App it just created (see its logs). Delete that App on GitHub, then try again.'
+        : '',
 )
 
 const step = computed(() => {
@@ -73,7 +76,7 @@ async function createApp() {
 <template>
   <div class="center-page">
     <div class="card narrow">
-      <h1 class="brand-big"><span class="logo">P</span> Pitlane setup</h1>
+      <h1 class="brand-big"><BrandMark :size="32" /> Pitlane setup</h1>
 
       <ol class="steps">
         <li :class="{ done: step !== 'unlock', current: step === 'unlock' }">Unlock</li>
@@ -83,14 +86,14 @@ async function createApp() {
 
       <p v-if="error" class="alert error">{{ error }}</p>
 
-      <form v-if="step === 'unlock'" @submit.prevent="unlock" class="stack">
+      <form v-if="step === 'unlock'" class="stack" @submit.prevent="unlock">
         <p>Enter the one-time setup token. It is printed in Pitlane's logs, or run:</p>
         <pre class="code">pitlane setup-token</pre>
         <input v-model="token" placeholder="Setup token" autofocus required autocomplete="off" />
         <button class="primary" :disabled="busy || !token">Continue</button>
       </form>
 
-      <form v-else-if="step === 'create'" @submit.prevent="createApp" class="stack">
+      <form v-else-if="step === 'create'" class="stack" @submit.prevent="createApp">
         <p>
           Pitlane creates its own private GitHub App in one click. It uses it to register runners and to sign you in.
           Nothing to copy or paste.
