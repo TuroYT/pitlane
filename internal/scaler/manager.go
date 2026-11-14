@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 
 	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/pool"
@@ -51,8 +50,11 @@ type Manager struct {
 	// need not). Nil disables the periodic check.
 	StrictReason func(ctx context.Context, t store.Target) (string, error)
 
-	store   *store.Store
-	pool    *pool.Pool
+	store *store.Store
+	pool  Pool
+	// connect opens the scale set API of a target (newScaleSetAPI; tests
+	// set a fake).
+	connect func(creds Credentials, t store.Target, version string) (scaleSetAPI, error)
 	log     *slog.Logger
 	logDir  string
 	creds   func() Credentials
@@ -69,10 +71,10 @@ type Manager struct {
 }
 
 // New creates a manager. changed is called whenever visible state changes.
-func New(st *store.Store, p *pool.Pool, dataDir string, creds func() Credentials, changed func(), log *slog.Logger) *Manager {
+func New(st *store.Store, p Pool, dataDir string, creds func() Credentials, changed func(), log *slog.Logger) *Manager {
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
-	return &Manager{store: st, pool: p, log: log, logDir: logDir, creds: creds, changed: changed,
+	return &Manager{store: st, pool: p, connect: newScaleSetAPI, log: log, logDir: logDir, creds: creds, changed: changed,
 		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
@@ -390,8 +392,8 @@ type target struct {
 
 	mu          sync.Mutex
 	t           store.Target
-	client      *scaleset.Client
-	lst         *listener.Listener
+	client      scaleSetAPI
+	session     jobSession
 	scaleSetID  int
 	status      string
 	err         string
@@ -421,10 +423,10 @@ func (t *target) cfg() store.Target {
 func (t *target) update(n store.Target) {
 	t.mu.Lock()
 	t.t = n
-	lst := t.lst
+	session := t.session
 	t.mu.Unlock()
-	if lst != nil {
-		lst.SetMaxRunners(n.MaxRunners)
+	if session != nil {
+		session.setMaxRunners(n.MaxRunners)
 	}
 	go t.reconcile()
 }
@@ -483,77 +485,44 @@ func (t *target) run(parent context.Context) {
 	}
 }
 
-func (t *target) newClient() (*scaleset.Client, error) {
-	creds := t.m.creds()
-	cfg := t.cfg()
-	info := scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: cfg.ScaleSetID}
-	if creds.AppClientID != "" && creds.AppPEM != "" && cfg.InstallationID != 0 {
-		return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
-			GitHubConfigURL: cfg.URL(),
-			GitHubAppAuth:   scaleset.GitHubAppAuth{ClientID: creds.AppClientID, InstallationID: cfg.InstallationID, PrivateKey: creds.AppPEM},
-			SystemInfo:      info,
-		})
-	}
-	if creds.PAT != "" {
-		return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL: cfg.URL(), PersonalAccessToken: creds.PAT, SystemInfo: info,
-		})
-	}
-	return nil, errors.New("no GitHub credentials for this target (install the GitHub App on " + cfg.Owner + ")")
-}
-
 func (t *target) listen() error {
-	client, err := t.newClient()
+	cfg := t.cfg()
+	client, err := t.m.connect(t.m.creds(), cfg, t.m.Version)
 	if err != nil {
 		return err
 	}
-	cfg := t.cfg()
-	ss, err := client.GetRunnerScaleSet(t.ctx, RunnerGroupID, cfg.ScaleSetName)
+	id, created, err := client.ensureScaleSet(t.ctx, cfg.ScaleSetName)
 	if err != nil {
-		return fmt.Errorf("get scale set: %w", err)
+		return err
 	}
-	if ss == nil {
-		ss, err = client.CreateRunnerScaleSet(t.ctx, &scaleset.RunnerScaleSet{
-			Name:          cfg.ScaleSetName,
-			RunnerGroupID: RunnerGroupID,
-			Labels:        []scaleset.Label{{Name: cfg.ScaleSetName}},
-			RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
-		})
-		if err != nil {
-			return fmt.Errorf("create scale set: %w", err)
-		}
-		t.log.Info("scale set created", "id", ss.ID, "label", cfg.ScaleSetName)
+	if created {
+		t.log.Info("scale set created", "id", id, "label", cfg.ScaleSetName)
 	}
-	client.SetSystemInfo(scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: ss.ID})
-	if cfg.ScaleSetID != ss.ID {
-		cfg.ScaleSetID = ss.ID
+	if cfg.ScaleSetID != id {
+		cfg.ScaleSetID = id
 		// Only that column: cfg may be stale (e.g. switched to strict since).
-		if err := t.m.store.SetScaleSetID(cfg.ID, ss.ID); err != nil {
+		if err := t.m.store.SetScaleSetID(cfg.ID, id); err != nil {
 			t.log.Warn("save scale set id", "error", err)
 		}
 	}
 	host, _ := os.Hostname()
-	session, err := client.MessageSessionClient(t.ctx, ss.ID, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
-	if err != nil {
-		return fmt.Errorf("open session: %w", err)
-	}
-	defer func() {
-		if err := session.Close(context.Background()); err != nil {
-			t.log.Warn("close message session", "error", err)
-		}
-	}()
-	lst, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: cfg.MaxRunners, Logger: t.log.WithGroup("listener")})
+	session, err := client.openSession(t.ctx, id, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := session.close(context.Background()); err != nil {
+			t.log.Warn("close message session", "error", err)
+		}
+	}()
 	t.mu.Lock()
-	t.client, t.lst, t.scaleSetID = client, lst, ss.ID
-	t.t.ScaleSetID = ss.ID
+	t.client, t.session, t.scaleSetID = client, session, id
+	t.t.ScaleSetID = id
 	t.mu.Unlock()
 	t.setStatus("listening", "")
-	t.log.Info("listening for jobs", "scaleSet", ss.ID, "label", cfg.ScaleSetName)
+	t.log.Info("listening for jobs", "scaleSet", id, "label", cfg.ScaleSetName)
 	go t.cleanupOrphans()
-	err = lst.Run(t.ctx, &scaler{t: t, session: session})
+	err = session.run(t.ctx, id, cfg.MaxRunners, t.log.WithGroup("listener"), &scaler{t: t, session: session})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
@@ -582,7 +551,7 @@ func (t *target) stop(remove bool) {
 		t.mu.Unlock()
 		if n == 0 {
 			if client != nil && id != 0 {
-				if err := client.DeleteRunnerScaleSet(context.Background(), id); err != nil {
+				if err := client.deleteScaleSet(context.Background(), id); err != nil {
 					t.log.Warn("delete scale set", "error", err)
 				} else {
 					t.log.Info("scale set deleted", "id", id)
@@ -648,7 +617,7 @@ func (t *target) reconcile() {
 	// isolation go (retried at every reconcile until none is left).
 	for _, r := range stale {
 		if r.runnerID != 0 {
-			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
 				continue // a job was just assigned to it, or GitHub is unreachable
 			}
 			t.m.forgetRunner(r.runnerID, nil)
@@ -665,7 +634,7 @@ func (t *target) reconcile() {
 			break
 		}
 		if r.runnerID != 0 {
-			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
 				continue
 			}
 			t.m.forgetRunner(r.runnerID, nil)
@@ -726,30 +695,26 @@ func (t *target) startRunner(lease pool.Lease) error {
 	t.mu.Unlock()
 	name := "pitlane-" + randomSuffix()
 	lease.Runner = name
-	jit, err := client.GenerateJitRunnerConfig(t.ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name, WorkFolder: "_work"}, ssID)
+	jit, err := client.generateJIT(t.ctx, name, ssID)
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)
 	}
-	if jit.Runner != nil {
+	if jit.runnerID != 0 {
 		// Recorded before the container exists: if Pitlane dies now, the
 		// orphan cleanup still finds this registration.
-		if err := t.m.store.AddRunner(store.RegisteredRunner{ID: int64(jit.Runner.ID), TargetID: cfg.ID, Name: name}); err != nil {
+		if err := t.m.store.AddRunner(store.RegisteredRunner{ID: jit.runnerID, TargetID: cfg.ID, Name: name}); err != nil {
 			// Not fatal, but the orphan cleanup will never see this runner.
-			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.Runner.ID, "error", err)
+			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.runnerID, "error", err)
 		}
 	}
-	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.EncodedJITConfig, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
+	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.encoded, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
 	if err != nil {
-		if jit.Runner != nil {
-			id := int64(jit.Runner.ID)
-			t.m.forgetRunner(id, client.RemoveRunner(context.Background(), id))
+		if jit.runnerID != 0 {
+			t.m.forgetRunner(jit.runnerID, client.removeRunner(context.Background(), jit.runnerID))
 		}
 		return err
 	}
-	r := &runner{name: name, containerID: id, lease: lease, startedAt: time.Now()}
-	if jit.Runner != nil {
-		r.runnerID = int64(jit.Runner.ID)
-	}
+	r := &runner{name: name, containerID: id, lease: lease, runnerID: jit.runnerID, startedAt: time.Now()}
 	t.mu.Lock()
 	t.runners[name] = r
 	t.mu.Unlock()
@@ -787,7 +752,7 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 		t.mu.Unlock()
 		if client != nil && r.runnerID != 0 {
 			// Usually already gone (ephemeral): NotFound also clears the record.
-			m.forgetRunner(r.runnerID, client.RemoveRunner(ctx, r.runnerID))
+			m.forgetRunner(r.runnerID, client.removeRunner(ctx, r.runnerID))
 		}
 	}
 	m.pool.Release(ctx, r.lease)
@@ -901,7 +866,7 @@ func (m *Manager) enforceTimeouts() {
 
 type scaler struct {
 	t       *target
-	session *scaleset.MessageSessionClient
+	session jobSession
 }
 
 func unix(ts time.Time) int64 {
@@ -944,7 +909,7 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			ids = append(ids, j.RunnerRequestID)
 			s.upsertJob(s.job(j.JobMessageBase))
 		}
-		if _, err := s.session.AcquireJobs(ctx, ids); err != nil {
+		if err := s.session.acquireJobs(ctx, ids); err != nil {
 			return fmt.Errorf("acquire jobs: %w", err)
 		}
 	}

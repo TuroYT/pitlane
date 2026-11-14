@@ -301,8 +301,15 @@ func writeJSONFile(file string, v any) error {
 	return os.Rename(tmp, file)
 }
 
-// Docker exposes the Docker client (used for logs).
+// Docker exposes the Docker client. Only the updater uses it (runner image
+// inspection); everything else goes through the pool's own methods.
 func (p *Pool) Docker() *client.Client { return p.cli }
+
+// Ping checks that the Docker daemon answers.
+func (p *Pool) Ping(ctx context.Context) error {
+	_, err := p.cli.Ping(ctx)
+	return err
+}
 
 // Config returns the current configuration.
 func (p *Pool) Config() Config {

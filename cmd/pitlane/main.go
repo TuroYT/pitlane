@@ -149,7 +149,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)
 	}
-	if _, err := p.Docker().Ping(ctx); err != nil {
+	if err := p.Ping(ctx); err != nil {
 		return fmt.Errorf("cannot reach Docker (is the socket mounted / is Docker running?): %w", err)
 	}
 
