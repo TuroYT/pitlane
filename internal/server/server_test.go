@@ -63,22 +63,22 @@ func TestCSRFRequiresHeader(t *testing.T) {
 }
 
 func TestNewTargetDefaults(t *testing.T) {
-	tg, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
+	tg, _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tg.MinRunners != store.DefaultMinRunners || tg.MaxRunners != 4 || tg.MaxJobMinutes != store.DefaultMaxJobMinutes || !tg.Enabled {
 		t.Fatalf("defaults: %+v", tg)
 	}
-	tg, _ = newTarget(strings.NewReader(`{"kind":"org","owner":"acme","repo":"x","minRunners":0}`), 4)
+	tg, _, _ = newTarget(strings.NewReader(`{"kind":"org","owner":"acme","repo":"x","minRunners":0}`), 4)
 	if tg.MinRunners != 0 || tg.Repo != "" {
 		t.Fatalf("explicit 0 warm runners not kept: %+v", tg)
 	}
-	tg, _ = newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api","minRunners":9,"maxRunners":2}`), 4)
+	tg, _, _ = newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api","minRunners":9,"maxRunners":2}`), 4)
 	if tg.MinRunners != 2 {
 		t.Fatalf("warm runners not capped by max parallel: %+v", tg)
 	}
-	if _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme"}`), 4); err == nil {
+	if _, _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme"}`), 4); err == nil {
 		t.Fatal("repo target without a repository accepted")
 	}
 }

@@ -64,6 +64,7 @@ p { margin: 0; }
 .center { text-align: center; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
 .error-text { color: var(--error); }
+.warn-text { color: var(--warn); }
 .ok-text { color: var(--ok); }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .stack-lg { display: flex; flex-direction: column; gap: 28px; }

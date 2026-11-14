@@ -53,8 +53,10 @@ type Server struct {
 
 	setupToken string
 	compare    compareCache
-	mu         sync.Mutex
-	states     map[string]time.Time // OAuth / manifest states
+	// strictCheck replaces StrictReason in tests.
+	strictCheck func(ctx context.Context, t store.Target) (string, error)
+	mu          sync.Mutex
+	states      map[string]time.Time // OAuth / manifest states
 }
 
 // New creates the server. web is the built UI (may be nil).
@@ -687,8 +689,43 @@ func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
 		}(i, in.ID)
 	}
 	wg.Wait()
+	private := map[string]bool{}
+	for _, in := range list {
+		for _, rp := range in.Repos {
+			private[strings.ToLower(rp.FullName)] = rp.Private
+		}
+	}
+	s.enforcePublicRepos(private)
 	out["installations"] = list
 	writeJSON(w, out)
+}
+
+// enforcePublicRepos applies the visibility of the repositories just listed
+// (full name, lower case -> private) to their targets: a public one must run
+// strict.
+func (s *Server) enforcePublicRepos(private map[string]bool) {
+	targets, err := s.store.Targets()
+	if err != nil {
+		s.log.Error("load targets", "error", err)
+		return
+	}
+	changed := false
+	for _, t := range targets {
+		p, ok := private[strings.ToLower(t.FullName())]
+		if t.Kind != "repo" || !ok {
+			continue
+		}
+		reason := ""
+		if !p {
+			reason = store.StrictPublicRepo
+		}
+		if s.mgr.ApplyStrictRequirement(t, reason) {
+			changed = true
+		}
+	}
+	if changed {
+		s.mgr.Sync()
+	}
 }
 
 // ------------------------------------------------------------------ targets
@@ -705,33 +742,110 @@ var validName = func(s string) bool {
 	return true
 }
 
+// targetOptions are the fields of a creation request whose absence matters.
+type targetOptions struct {
+	Strict *bool // nil: decided by the server
+}
+
 // newTarget decodes a target creation request. Fields left out get their
 // defaults (one warm runner, GitHub's job time limit, one runner per slot).
-func newTarget(body io.Reader, slots int) (store.Target, error) {
-	t := store.Target{MinRunners: store.DefaultMinRunners, MaxJobMinutes: store.DefaultMaxJobMinutes}
-	if err := json.NewDecoder(body).Decode(&t); err != nil {
-		return t, err
+func newTarget(body io.Reader, slots int) (store.Target, targetOptions, error) {
+	var req struct {
+		store.Target
+		Strict *bool `json:"strict"`
 	}
+	req.MinRunners, req.MaxJobMinutes = store.DefaultMinRunners, store.DefaultMaxJobMinutes
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		return req.Target, targetOptions{}, err
+	}
+	t, opts := req.Target, targetOptions{Strict: req.Strict}
+	t.Strict, t.StrictRequired, t.StrictForcedAt = false, "", 0 // set by applyStrictPolicy
 	if (t.Kind != "repo" && t.Kind != "org") || !validName(t.Owner) || (t.Kind == "repo" && !validName(t.Repo)) {
-		return t, errors.New("invalid target")
+		return t, opts, errors.New("invalid target")
 	}
 	if t.Kind == "org" {
 		t.Repo = ""
 	}
 	if t.ScaleSetName != "" && !validName(t.ScaleSetName) {
-		return t, errors.New("invalid runner label")
+		return t, opts, errors.New("invalid runner label")
 	}
 	if t.MaxRunners <= 0 {
 		t.MaxRunners = max(1, slots)
 	}
 	t.MinRunners = min(max(0, t.MinRunners), t.MaxRunners)
 	t.Enabled = true
-	return t, nil
+	return t, opts, nil
+}
+
+// strictRequiredError rejects turning strict mode off for a target that
+// must run strict.
+type strictRequiredError struct {
+	target, reason string
+}
+
+func (e strictRequiredError) Error() string {
+	return fmt.Sprintf("%s must run in strict mode (%s): anyone can run a job on its runners, so strict mode cannot be turned off", e.target, e.reason)
+}
+
+// applyStrictPolicy decides the strict mode of a new target from what the
+// request asked (nil: nothing) and what GitHub said. A target that must run
+// strict cannot be created without it; when GitHub cannot be asked, the
+// target is strict (fail closed) and the periodic check settles it later.
+func applyStrictPolicy(t *store.Target, asked *bool, reason string, checkErr error) error {
+	switch {
+	case checkErr != nil:
+		t.Strict = true
+	case reason != "":
+		if asked != nil && !*asked {
+			return strictRequiredError{t.FullName(), reason}
+		}
+		t.Strict, t.StrictRequired = true, reason
+	default:
+		t.Strict = asked != nil && *asked
+	}
+	return nil
+}
+
+// checkStrict asks GitHub why a target must run strict.
+func (s *Server) checkStrict(ctx context.Context, t store.Target) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if s.strictCheck != nil {
+		return s.strictCheck(ctx, t)
+	}
+	return s.StrictReason(ctx, t)
+}
+
+// StrictReason asks GitHub why a target must run strict ("" when it need
+// not): a public repository runs jobs of pull requests from forks.
+func (s *Server) StrictReason(ctx context.Context, t store.Target) (string, error) {
+	tok, err := s.token(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	if t.Kind == "repo" {
+		private, err := gh.RepoPrivate(ctx, tok, t.Owner, t.Repo)
+		if err != nil {
+			return "", err
+		}
+		if !private {
+			return store.StrictPublicRepo, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	t, err := newTarget(r.Body, s.pool.Config().Slots)
+	t, opts, err := newTarget(r.Body, s.pool.Config().Slots)
 	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	reason, checkErr := s.checkStrict(r.Context(), t)
+	if checkErr != nil {
+		s.log.Warn("cannot check whether the new target must run strict: enabling strict mode", "target", t.FullName(), "error", checkErr)
+	}
+	if err := applyStrictPolicy(&t, opts.Strict, reason, checkErr); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -776,6 +890,21 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.MinRunners != nil {
 		t.MinRunners = max(0, *body.MinRunners)
+	}
+	if body.Strict != nil && !*body.Strict && t.Strict {
+		// Only once GitHub confirms the target need not run strict.
+		reason, err := s.checkStrict(r.Context(), t)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "cannot check on GitHub whether "+t.FullName()+" must run strict, strict mode stays on: "+err.Error())
+			return
+		}
+		if s.mgr.ApplyStrictRequirement(t, reason) {
+			defer s.mgr.Sync()
+		}
+		if reason != "" {
+			writeErr(w, http.StatusBadRequest, strictRequiredError{t.FullName(), reason}.Error())
+			return
+		}
 	}
 	if body.Strict != nil {
 		t.Strict = *body.Strict

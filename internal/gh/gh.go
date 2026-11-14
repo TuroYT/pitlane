@@ -374,3 +374,19 @@ func ListRunners(ctx context.Context, token, owner, repo string) ([]Runner, erro
 	}
 	return out, nil
 }
+
+// RepoPrivate reports whether a repository is private (or internal). token
+// is an installation token or a personal access token.
+func RepoPrivate(ctx context.Context, token, owner, repo string) (bool, error) {
+	var r struct {
+		Private *bool `json:"private"`
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s", apiBase, url.PathEscape(owner), url.PathEscape(repo))
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &r); err != nil {
+		return false, err
+	}
+	if r.Private == nil {
+		return false, fmt.Errorf("visibility of %s/%s not returned", owner, repo)
+	}
+	return *r.Private, nil
+}

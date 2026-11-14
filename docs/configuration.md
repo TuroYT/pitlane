@@ -26,7 +26,22 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Warm runners | 1 for new repositories | Runners kept registered and idle, so jobs start in about a second. Each one holds a slot. Set `0` to free the slot when no job runs. Targets created before this default keep their value. |
 | Max parallel | number of slots | Upper bound for this target. |
 | Job limit (min) | 360 | A runner whose job runs longer is stopped (SIGTERM, so the job is reported as failed on GitHub at once, then SIGKILL after 30 s); its slot is cleaned and released as after any job. `0` = no limit. |
-| Strict | on for public repositories | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |
+| Strict | on for public repositories (enforced, see below) | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |
+
+### Strict mode enforcement
+
+Pitlane asks GitHub for a repository's visibility (with the App installation token,
+or the personal access token) when the target is created, every hour, at start and
+whenever the repository list is shown:
+
+- A **public repository** always runs strict. Creating it with `strict: false`, or
+  turning strict off, is refused (HTTP 400). A repository that becomes public is
+  switched to strict on its own: Pitlane logs a warning, the UI shows why, and its
+  idle warm runners (started without strict isolation) are replaced.
+- When GitHub cannot be asked, a **new** target is created strict (fail closed) and an
+  **existing** target keeps its mode (the error is logged); turning strict off is
+  refused until GitHub answers.
+- A repository that becomes private stays strict until you turn strict off.
 
 ## Automatic maintenance
 

@@ -78,6 +78,10 @@ var migrations = []string{
 	// Sessions now store the SHA-256 of their token: sessions stored with a
 	// plaintext token are dropped (their users sign in again).
 	`DELETE FROM sessions`,
+	// Why the target must run strict ("" = not required or not known yet),
+	// and when Pitlane switched it to strict on its own (0 = never).
+	`ALTER TABLE targets ADD COLUMN strict_required TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE targets ADD COLUMN strict_forced_at INTEGER NOT NULL DEFAULT 0`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -293,7 +297,18 @@ type Target struct {
 	Strict bool `json:"strict"`
 	// A runner busy for longer is killed (0 = unlimited).
 	MaxJobMinutes int `json:"maxJobMinutes"`
+	// StrictRequired says why the target must run strict (a public
+	// repository, a runner group open to public repositories); "" when it
+	// need not, or as long as GitHub could not be asked. Strict cannot be
+	// turned off while it is set.
+	StrictRequired string `json:"strictRequired,omitempty"`
+	// StrictForcedAt is when Pitlane switched the target to strict on its
+	// own (Unix time, 0 = never).
+	StrictForcedAt int64 `json:"strictForcedAt,omitempty"`
 }
+
+// StrictPublicRepo is the strict requirement of a public repository target.
+const StrictPublicRepo = "public repository"
 
 // DefaultMaxJobMinutes is GitHub's own job time limit on hosted runners.
 const DefaultMaxJobMinutes = 360
@@ -314,12 +329,12 @@ func (t Target) FullName() string {
 // URL returns the GitHub URL the scale set is registered against.
 func (t Target) URL() string { return "https://github.com/" + t.FullName() }
 
-const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict, max_job_minutes`
+const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict, max_job_minutes, strict_required, strict_forced_at`
 
 func scanTarget(sc interface{ Scan(...any) error }) (Target, error) {
 	var t Target
 	var enabled, strict int
-	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict, &t.MaxJobMinutes)
+	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict, &t.MaxJobMinutes, &t.StrictRequired, &t.StrictForcedAt)
 	t.Enabled, t.Strict = enabled == 1, strict == 1
 	return t, err
 }
@@ -356,9 +371,9 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 		t.MaxRunners = 4
 	}
 	t.MaxJobMinutes = max(0, t.MaxJobMinutes)
-	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), t.MaxJobMinutes, time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, strict_required, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), t.MaxJobMinutes, t.StrictRequired, time.Now().Unix())
 	if err != nil {
 		return t, err
 	}
@@ -366,7 +381,38 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 	return t, nil
 }
 
-// UpdateTarget saves the mutable fields of a target.
+// SetScaleSetID records the scale set of a target, leaving its other fields
+// alone (they may have changed since the caller read the target).
+func (s *Store) SetScaleSetID(id int64, scaleSetID int) error {
+	_, err := s.db.Exec(`UPDATE targets SET scale_set_id = ? WHERE id = ?`, scaleSetID, id)
+	return err
+}
+
+// SetStrictRequirement records why a target must run strict ("" = it need
+// not). A requirement switches a non-strict target to strict, which is
+// reported (flipped) and timestamped; clearing it never turns strict off.
+func (s *Store) SetStrictRequirement(id int64, reason string) (flipped bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	if reason != "" {
+		res, err := tx.Exec(`UPDATE targets SET strict = 1, strict_forced_at = ? WHERE id = ? AND strict = 0`, time.Now().Unix(), id)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		flipped = n > 0
+	}
+	if _, err := tx.Exec(`UPDATE targets SET strict_required = ? WHERE id = ?`, reason, id); err != nil {
+		return false, err
+	}
+	return flipped, tx.Commit()
+}
+
+// UpdateTarget saves the mutable fields of a target (not the strict
+// requirement, see SetStrictRequirement).
 func (s *Store) UpdateTarget(t Target) error {
 	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?, strict = ?, max_job_minutes = ? WHERE id = ?`,
 		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, boolInt(t.Strict), max(0, t.MaxJobMinutes), t.ID)

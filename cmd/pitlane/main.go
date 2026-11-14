@@ -132,6 +132,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	mgr := scaler.New(st, p, dataDir, srv.Credentials, srv.Notify, log.With("component", "scaler"))
 	mgr.Version = version
 	mgr.ListRunners = srv.GitHubRunners
+	mgr.StrictReason = srv.StrictReason
 	srv.SetManager(mgr)
 
 	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}

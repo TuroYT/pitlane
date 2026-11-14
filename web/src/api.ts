@@ -24,6 +24,10 @@ export interface Target {
   scaleSetId: number
   strict: boolean
   maxJobMinutes: number
+  /** Why the target must run strict (set by the server from GitHub). */
+  strictRequired?: string
+  /** When Pitlane switched the target to strict on its own (Unix time). */
+  strictForcedAt?: number
 }
 
 export interface RunnerState {

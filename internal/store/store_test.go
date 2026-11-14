@@ -277,3 +277,47 @@ func TestOpenDataDirOwnedByAnotherUser(t *testing.T) {
 		}
 	}
 }
+
+func TestStrictRequirement(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tg, err := s.CreateTarget(Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flipped, err := s.SetStrictRequirement(tg.ID, "public repository"); err != nil || !flipped {
+		t.Fatalf("flipped=%v err=%v", flipped, err)
+	}
+	got, _ := s.Target(tg.ID)
+	if !got.Strict || got.StrictRequired != "public repository" || got.StrictForcedAt == 0 {
+		t.Fatalf("not switched to strict: %+v", got)
+	}
+	if flipped, _ := s.SetStrictRequirement(tg.ID, "public repository"); flipped {
+		t.Fatal("already strict: not flipped again")
+	}
+	if _, err := s.SetStrictRequirement(tg.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Target(tg.ID)
+	if !got.Strict || got.StrictRequired != "" {
+		t.Fatalf("clearing the requirement must keep strict on: %+v", got)
+	}
+	// Other writers do not touch the requirement.
+	if _, err := s.SetStrictRequirement(tg.ID, "public repository"); err != nil {
+		t.Fatal(err)
+	}
+	got.MaxRunners = 7
+	if err := s.UpdateTarget(got); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetScaleSetID(tg.ID, 42); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Target(tg.ID)
+	if got.StrictRequired != "public repository" || got.ScaleSetID != 42 || got.MaxRunners != 7 || !got.Strict {
+		t.Fatalf("%+v", got)
+	}
+}

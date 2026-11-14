@@ -42,6 +42,9 @@ type Manager struct {
 	// ListRunners lists a target's self-hosted runners through the REST API
 	// (used to find orphan runners). Nil disables orphan cleanup.
 	ListRunners func(ctx context.Context, t store.Target) ([]gh.Runner, error)
+	// StrictReason asks GitHub why a target must run strict ("" when it
+	// need not). Nil disables the periodic check.
+	StrictReason func(ctx context.Context, t store.Target) (string, error)
 
 	store   *store.Store
 	pool    *pool.Pool
@@ -102,6 +105,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.ctx = ctx
 	m.mu.Unlock()
 	m.Sync()
+	go m.EnforceStrictAll(ctx)
 	go m.loop(ctx)
 	return nil
 }
@@ -125,6 +129,7 @@ func (m *Manager) loop(ctx context.Context) {
 			m.reconcileAll()
 		case <-clean.C:
 			m.housekeeping()
+			go m.EnforceStrictAll(ctx)
 		case <-timeouts.C:
 			m.enforceTimeouts()
 		case <-orphans.C:
@@ -160,6 +165,54 @@ func (m *Manager) housekeeping() {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {
 			_ = os.Remove(filepath.Join(m.logDir, e.Name()))
 		}
+	}
+}
+
+// ApplyStrictRequirement records why a target must run strict (reason, ""
+// when it need not, as GitHub just reported it) and switches it to strict if
+// needed. It reports whether the stored target changed; the caller syncs.
+func (m *Manager) ApplyStrictRequirement(t store.Target, reason string) bool {
+	if reason == t.StrictRequired && (reason == "" || t.Strict) {
+		return false
+	}
+	flipped, err := m.store.SetStrictRequirement(t.ID, reason)
+	if err != nil {
+		m.log.Error("record strict requirement", "target", t.FullName(), "reason", reason, "error", err)
+		return false
+	}
+	if flipped {
+		m.log.Warn("target switched to strict mode", "target", t.FullName(), "reason", reason)
+	}
+	return true
+}
+
+// EnforceStrictAll asks GitHub, for every target, whether it must run strict
+// (at start, then hourly) and switches the ones that must. When GitHub
+// cannot be asked, a target keeps its current mode.
+func (m *Manager) EnforceStrictAll(ctx context.Context) {
+	if m.StrictReason == nil {
+		return
+	}
+	targets, err := m.store.Targets()
+	if err != nil {
+		m.log.Error("load targets", "error", err)
+		return
+	}
+	changed := false
+	for _, t := range targets {
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		reason, err := m.StrictReason(cctx, t)
+		cancel()
+		if err != nil {
+			m.log.Warn("cannot check whether the target must run strict, its mode is left unchanged", "target", t.FullName(), "strict", t.Strict, "error", err)
+			continue
+		}
+		if m.ApplyStrictRequirement(t, reason) {
+			changed = true
+		}
+	}
+	if changed {
+		m.Sync()
 	}
 }
 
@@ -362,13 +415,52 @@ func (t *target) cfg() store.Target {
 
 func (t *target) update(n store.Target) {
 	t.mu.Lock()
+	wasStrict := t.t.Strict
 	t.t = n
 	lst := t.lst
 	t.mu.Unlock()
 	if lst != nil {
 		lst.SetMaxRunners(n.MaxRunners)
 	}
+	if n.Strict && !wasStrict {
+		// Idle runners were started without strict isolation: replace them.
+		go func() {
+			t.recycleIdle()
+			t.reconcile()
+		}()
+		return
+	}
 	go t.reconcile()
+}
+
+// recycleIdle removes the idle runners (deregistered first: GitHub refuses
+// when a job was just assigned, the runner then stays). reconcile starts
+// their replacements.
+func (t *target) recycleIdle() {
+	t.reconcileMu.Lock()
+	defer t.reconcileMu.Unlock()
+	t.mu.Lock()
+	client := t.client
+	var idle []*runner
+	for _, r := range t.runners {
+		if !r.busy && !r.exited {
+			idle = append(idle, r)
+		}
+	}
+	t.mu.Unlock()
+	for _, r := range idle {
+		if r.runnerID != 0 {
+			if client == nil {
+				continue
+			}
+			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+				continue
+			}
+			t.m.forgetRunner(r.runnerID, nil)
+		}
+		t.log.Info("replacing idle runner started without strict isolation", "runner", r.name)
+		t.m.pool.Remove(context.Background(), r.containerID)
+	}
 }
 
 func (t *target) waitingSince() time.Time {
@@ -463,7 +555,8 @@ func (t *target) listen() error {
 	client.SetSystemInfo(scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: ss.ID})
 	if cfg.ScaleSetID != ss.ID {
 		cfg.ScaleSetID = ss.ID
-		if err := t.m.store.UpdateTarget(cfg); err != nil {
+		// Only that column: cfg may be stale (e.g. switched to strict since).
+		if err := t.m.store.SetScaleSetID(cfg.ID, ss.ID); err != nil {
 			t.log.Warn("save scale set id", "error", err)
 		}
 	}

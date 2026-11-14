@@ -1,6 +1,8 @@
 package scaler
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -32,5 +34,36 @@ func TestSyncBeforeStartIsDeferred(t *testing.T) {
 	}
 	if notified == 0 {
 		t.Fatal("the UI must still be notified")
+	}
+}
+
+func TestEnforceStrictAll(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	pub, _ := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "pub", Enabled: true})
+	unknown, _ := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "unknown", Enabled: true})
+	priv, _ := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "priv", Enabled: true, Strict: true, StrictRequired: store.StrictPublicRepo})
+	m := New(st, nil, t.TempDir(), func() Credentials { return Credentials{} }, func() {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.StrictReason = func(_ context.Context, tg store.Target) (string, error) {
+		switch tg.ID {
+		case pub.ID:
+			return store.StrictPublicRepo, nil
+		case priv.ID:
+			return "", nil
+		}
+		return "", errors.New("github unreachable")
+	}
+	m.EnforceStrictAll(context.Background())
+	if got, _ := st.Target(pub.ID); !got.Strict || got.StrictRequired != store.StrictPublicRepo || got.StrictForcedAt == 0 {
+		t.Errorf("public repository not switched: %+v", got)
+	}
+	if got, _ := st.Target(unknown.ID); got.Strict {
+		t.Errorf("a failed check must keep the current mode: %+v", got)
+	}
+	if got, _ := st.Target(priv.ID); !got.Strict || got.StrictRequired != "" {
+		t.Errorf("a repository made private keeps strict, without the requirement: %+v", got)
 	}
 }
