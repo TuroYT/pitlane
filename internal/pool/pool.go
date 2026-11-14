@@ -73,6 +73,7 @@ type Config struct {
 	KeepBuildGB int    // buildx cache kept per slot after each job
 	ImageOS     string // value of ImageOS for setup-* actions
 	StateFile   string // where slot ownership is persisted (outside any slot's reach)
+	NoQEMU      bool   // disable multi-arch emulation (binfmt_misc + QEMU)
 }
 
 func (c *Config) defaults() {
@@ -140,6 +141,7 @@ type Pool struct {
 	externals map[int]string // slot -> runner image ID copied into its externals volume
 	released  chan struct{}
 	restored  map[int]persistedSlot
+	binfmt    map[string]string // binfmt_misc entries registered by Pitlane (name -> content)
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -461,9 +463,11 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 // as soon as its helper container exits. Pitlane keeps it mounted and
 // registers the QEMU emulators once at start.
 func (p *Pool) ensureQEMU(ctx context.Context) {
-	const mnt = "/proc/sys/fs/binfmt_misc"
-	if _, err := os.Stat(mnt + "/register"); err != nil {
-		if err := syscall.Mount("binfmt_misc", mnt, "binfmt_misc", 0, ""); err != nil {
+	if p.Config().NoQEMU {
+		return
+	}
+	if _, err := os.Stat(binfmtDir + "/register"); err != nil {
+		if err := syscall.Mount("binfmt_misc", binfmtDir, "binfmt_misc", 0, ""); err != nil {
 			p.log.Info("binfmt_misc not mountable, multi-arch builds (QEMU) unavailable", "error", err)
 			return
 		}
@@ -482,7 +486,65 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 	}
 	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err == nil && p.Wait(ctx, c.ID) == 0 {
-		p.log.Info("QEMU emulators registered: multi-arch builds are available")
+		base := readBinfmt()
+		p.mu.Lock()
+		p.binfmt = base
+		p.mu.Unlock()
+		p.log.Info("QEMU emulators registered: multi-arch builds are available", "handlers", len(base))
+	}
+}
+
+const binfmtDir = "/proc/sys/fs/binfmt_misc"
+
+// readBinfmt returns the registered binfmt_misc handlers (name -> definition).
+func readBinfmt() map[string]string {
+	out := map[string]string{}
+	entries, err := os.ReadDir(binfmtDir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.Name() == "register" || e.Name() == "status" {
+			continue
+		}
+		if b, err := os.ReadFile(binfmtDir + "/" + e.Name()); err == nil {
+			out[e.Name()] = string(b)
+		}
+	}
+	return out
+}
+
+// auditBinfmt runs after every job. Slot daemons are privileged, so a job
+// could register its own binfmt_misc handler, which would then apply to every
+// later job. Unknown or modified handlers are removed, and Pitlane's QEMU
+// handlers are registered again if they were tampered with.
+func (p *Pool) auditBinfmt(ctx context.Context) {
+	p.mu.Lock()
+	base := p.binfmt
+	p.mu.Unlock()
+	if base == nil {
+		return
+	}
+	cur := readBinfmt()
+	tampered := false
+	for name, def := range cur {
+		if want, ok := base[name]; ok && want == def {
+			continue
+		}
+		p.log.Warn("removing unexpected binfmt_misc handler", "handler", name)
+		_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
+		if _, ok := base[name]; ok {
+			tampered = true
+		}
+	}
+	for name := range base {
+		if _, ok := cur[name]; !ok {
+			tampered = true
+		}
+	}
+	if tampered {
+		p.log.Warn("QEMU handlers were modified by a job, registering them again")
+		p.ensureQEMU(ctx)
 	}
 }
 
@@ -660,6 +722,7 @@ true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 		_ = p.cli.ContainerRestart(ctx, slotName(l.Slot), container.StopOptions{})
 		_ = p.waitDind(ctx, slotName(l.Slot))
 	}
+	p.auditBinfmt(ctx)
 	p.mu.Lock()
 	s, ok := p.slots[l.Slot]
 	retire := ok && s.retire
@@ -1022,10 +1085,16 @@ func (p *Pool) ensureVolume(ctx context.Context, name string) error {
 // it to _diag/pages/*.log (4 KB pages) before uploading it to GitHub; pages
 // are read as they grow, oldest first, until the runner exits.
 func (p *Pool) TailJobOutput(ctx context.Context, id string, w io.Writer) error {
-	const dir = "/home/runner/_diag/pages"
+	const (
+		dir      = "/home/runner/_diag/pages"
+		chunkMax = 64 << 10 // bytes read per file and per poll
+		totalMax = 64 << 20 // bytes streamed per request
+	)
 	offsets := map[string]int{}
+	total := 0
 	for {
-		listing, code, err := p.exec(ctx, id, `cd `+dir+` 2>/dev/null && ls -tr | while read f; do echo "$f $(wc -c < "$f")"; done`)
+		// Regular files only (no symlinks), oldest first.
+		listing, code, err := p.exec(ctx, id, `cd `+dir+` 2>/dev/null && find . -maxdepth 1 -type f -name '*.log' -printf '%T@ %s %f\n' | sort -n | head -n 500`)
 		if err != nil || code != 0 {
 			if info, ierr := p.cli.ContainerInspect(ctx, id); ierr != nil || info.State == nil || !info.State.Running {
 				return nil // runner finished
@@ -1033,21 +1102,31 @@ func (p *Pool) TailJobOutput(ctx context.Context, id string, w io.Writer) error 
 		}
 		for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
 			f := strings.Fields(line)
-			if len(f) != 2 || !strings.HasSuffix(f[0], ".log") || strings.ContainsAny(f[0], "/'\"$`") {
+			if len(f) != 3 || !strings.HasSuffix(f[2], ".log") || strings.ContainsAny(f[2], "/'\"$`\\") {
 				continue
 			}
+			name := f[2]
 			size, _ := strconv.Atoi(f[1])
-			off := offsets[f[0]]
+			off := offsets[name]
 			if size <= off {
 				continue
 			}
-			chunk, _, err := p.exec(ctx, id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, dir, f[0], size-off))
+			n := min(size-off, chunkMax)
+			chunk, _, err := p.exec(ctx, id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, dir, name, n))
 			if err != nil {
 				continue
 			}
-			offsets[f[0]] = off + len(chunk)
+			if len(chunk) > n {
+				chunk = chunk[:n]
+			}
+			offsets[name] = off + len(chunk)
+			total += len(chunk)
 			if _, err := io.WriteString(w, chunk); err != nil {
 				return err
+			}
+			if total >= totalMax {
+				_, _ = io.WriteString(w, "\n[pitlane] output truncated: open the GitHub run page for the full log\n")
+				return nil
 			}
 		}
 		select {
@@ -1070,7 +1149,8 @@ func (p *Pool) exec(ctx context.Context, name, script string) (string, int, erro
 	}
 	defer att.Close()
 	var buf bytes.Buffer
-	_, _ = stdcopy.StdCopy(&buf, &buf, att.Reader)
+	// Bounded: some of these containers are controlled by jobs.
+	_, _ = stdcopy.StdCopy(&buf, &buf, io.LimitReader(att.Reader, 4<<20))
 	ins, err := p.cli.ContainerExecInspect(ctx, ex.ID)
 	if err != nil {
 		return buf.String(), -1, err

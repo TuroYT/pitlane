@@ -93,6 +93,7 @@ export interface Settings {
   memoryMb: number
   cacheScope: 'owner' | 'shared'
   mirror: boolean
+  qemu: boolean
   keepBuildGb: number
   allowedUsers: string
   historyDays: number

@@ -72,6 +72,9 @@ async function save() {
       <label class="inline">
         <input type="checkbox" v-model="s.mirror" /> Local Docker Hub mirror (faster pulls, no rate limits)
       </label>
+      <label class="inline">
+        <input type="checkbox" v-model="s.qemu" /> Multi-architecture builds (QEMU emulation, applied at next restart)
+      </label>
       <label>
         Docker build cache kept per slot (GB)
         <input type="number" min="1" v-model.number="s.keepBuildGb" />

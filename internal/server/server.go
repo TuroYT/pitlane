@@ -841,6 +841,7 @@ type Settings struct {
 	MemoryMB     int64  `json:"memoryMb"`
 	CacheScope   string `json:"cacheScope"`
 	Mirror       bool   `json:"mirror"`
+	QEMU         bool   `json:"qemu"`
 	KeepBuildGB  int    `json:"keepBuildGb"`
 	AllowedUsers string `json:"allowedUsers"`
 	HistoryDays  int    `json:"historyDays"`
@@ -858,6 +859,7 @@ func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 		MemoryMB:    int64(st.GetInt("memory_mb", 0)),
 		CacheScope:  st.Get("cache_scope", "owner"),
 		Mirror:      st.Get("mirror", "true") == "true",
+		NoQEMU:      st.Get("qemu", "true") != "true",
 		KeepBuildGB: st.GetInt("keep_build_gb", 20),
 	}
 }
@@ -869,7 +871,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.pool.Config()
 	writeJSON(w, Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
-		CacheScope: c.CacheScope, Mirror: c.Mirror, KeepBuildGB: c.KeepBuildGB,
+		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB,
 		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.baseURL(r),
 	})
 }
@@ -896,7 +898,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	kv := map[string]string{
 		"slots": strconv.Itoa(in.Slots), "runner_image": strings.TrimSpace(in.RunnerImage), "dind_image": strings.TrimSpace(in.DindImage),
 		"cpu_shares": strconv.FormatInt(max(0, in.CPUShares), 10), "memory_mb": strconv.FormatInt(max(0, in.MemoryMB), 10),
-		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
+		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "qemu": strconv.FormatBool(in.QEMU), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
 		"allowed_users": in.AllowedUsers, "history_days": strconv.Itoa(max(1, in.HistoryDays)),
 	}
 	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
