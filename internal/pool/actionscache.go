@@ -27,6 +27,8 @@ type CacheBroker interface {
 	// Evict frees at least n bytes, least recently used entries first, and
 	// returns the bytes freed.
 	Evict(n int64) int64
+	// Dir is where the entries are stored.
+	Dir() string
 }
 
 // SetCache attaches the actions cache server, listening on port on the

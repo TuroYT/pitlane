@@ -33,6 +33,9 @@ type diskOps interface {
 	execSlot(ctx context.Context, slot int, script string) error
 	volumes(ctx context.Context) ([]volInfo, error)
 	removeVolume(ctx context.Context, name string) error
+	// onDisk reports whether dir is on the watched filesystem (evicting
+	// files elsewhere would free nothing there).
+	onDisk(dir string) bool
 }
 
 // DiskPath returns the filesystem whose free space Pitlane watches: Docker's
@@ -124,7 +127,7 @@ func (p *Pool) reclaimDisk(ctx context.Context, minFree int64, ops diskOps) int6
 
 	// Actions cache entries, least recently used first: they cost one
 	// download each, less than a per-owner volume.
-	if b, _ := p.cacheBroker(); b != nil {
+	if b, _ := p.cacheBroker(); b != nil && ops.onDisk(b.Dir()) {
 		before := free
 		if b.Evict(minFree-free) > 0 && !measure("actions cache entries", before) {
 			return done()
@@ -269,6 +272,11 @@ func (d dockerDiskOps) volumes(ctx context.Context) ([]volInfo, error) {
 		out = append(out, volInfo{Name: v.Name, Size: size, InUse: inUse})
 	}
 	return out, nil
+}
+
+func (d dockerDiskOps) onDisk(dir string) bool {
+	var a, b syscall.Stat_t
+	return syscall.Stat(dir, &a) == nil && syscall.Stat(d.p.DiskPath(), &b) == nil && a.Dev == b.Dev
 }
 
 func (d dockerDiskOps) removeVolume(ctx context.Context, name string) error {

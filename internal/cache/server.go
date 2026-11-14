@@ -85,6 +85,9 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 	return s, nil
 }
 
+// Dir returns the directory holding the entries.
+func (s *Server) Dir() string { return s.dir }
+
 // Stats is a snapshot for the UI and metrics.
 type Stats struct {
 	Entries    int   `json:"entries"`

@@ -38,6 +38,8 @@ func (b *fakeBroker) Revoke(runner string) {
 
 func (b *fakeBroker) SetLimit(n int64) { b.limit = n }
 
+func (b *fakeBroker) Dir() string { return "/cache" }
+
 func (b *fakeBroker) Evict(n int64) int64 {
 	freed := min(n, b.stored)
 	b.stored -= freed
@@ -175,6 +177,15 @@ func TestReclaimDiskEvictsActionsCache(t *testing.T) {
 	b := newBroker()
 	b.stored = 30 * gib
 	f := newFake(p, 10*gib)
+	f.freed["0/build"] = 2 * gib
+	f.vols = []volInfo{{Name: "pitlane-cache-acme", Size: 50 * gib}}
+	p.SetCache(&diskBroker{fakeBroker: b, f: f}, 8091)
+	f.otherFS = true // the cache lives on another filesystem: nothing to gain
+	p.reclaimDisk(context.Background(), 20*gib, f)
+	if b.stored != 30*gib {
+		t.Fatalf("evicted entries on another filesystem: stored=%d", b.stored>>30)
+	}
+	f = newFake(p, 10*gib)
 	f.freed["0/build"] = 2 * gib
 	f.vols = []volInfo{{Name: "pitlane-cache-acme", Size: 50 * gib}}
 	p.SetCache(&diskBroker{fakeBroker: b, f: f}, 8091)
