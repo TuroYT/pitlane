@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import Updates from './Updates.vue'
 
 const state = {
-  pitlane: { current: '0.1.0', latest: 'v0.1.0', updateAvailable: false, capability: { mode: 'systemd', canSelfUpdate: true } },
+  pitlane: { current: '0.1.0', latest: 'v0.1.0', updateAvailable: false, capability: { mode: 'systemd', canSelfUpdate: true }, attestation: true },
   runner: { image: 'ghcr.io/turoyt/pitlane-runner:v0.1.0', version: '2.338.2', latest: 'v2.338.2', status: 'current', pulling: false },
   settings: { autoUpdate: false, window: { start: 3, end: 5 }, autoPull: true },
 }

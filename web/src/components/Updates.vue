@@ -26,6 +26,7 @@ interface UpdatesState {
     phase?: string
     applyError?: string
     lastUpdate?: string
+    attestation: boolean
   }
   runner: {
     image: string
@@ -161,8 +162,13 @@ onUnmounted(() => window.clearTimeout(timer))
           Update now to {{ p.latest }}
         </button>
         <small class="muted">Downloads the release binary, checks its SHA-256 against the release's
-          <code>checksums.txt</code>, keeps the current one as <code>{{ p.capability.executable }}.prev</code>, then restarts.</small>
+          <code>checksums.txt</code><template v-if="p.attestation"> and its GitHub build attestation (signed by the
+          release workflow, through Sigstore)</template>, keeps the current one as <code>{{ p.capability.executable }}.prev</code>, then restarts.</small>
       </div>
+      <p v-if="!p.attestation" class="alert warn small">
+        Build attestations are not verified (<code>PITLANE_UPDATE_SKIP_ATTESTATION=true</code>): updates rely on the
+        checksum only, which does not protect against a compromised release.
+      </p>
     </template>
     <div v-else class="stack">
       <p class="muted small">{{ p.capability.reason }}. To update, run:</p>
