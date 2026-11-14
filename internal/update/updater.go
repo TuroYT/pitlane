@@ -57,6 +57,9 @@ type PitlaneState struct {
 	Phase           string     `json:"phase,omitempty"` // non-empty while an update runs
 	ApplyError      string     `json:"applyError,omitempty"`
 	LastUpdate      string     `json:"lastUpdate,omitempty"`
+	// Attestation says whether a release binary's build attestation is
+	// verified before it is installed (false: checksum only).
+	Attestation bool `json:"attestation"`
 }
 
 // RunnerImageState is what the UI shows about the runner image.
@@ -95,8 +98,10 @@ type Updater struct {
 	Notify      func()        // UI state changed
 	Probe       Probe
 	Verify      Verifier
-	Log         *slog.Logger
-	Now         func() time.Time
+	// Attested reports that Verify checks build attestations (shown in the UI).
+	Attested bool
+	Log      *slog.Logger
+	Now      func() time.Time
 
 	mu         sync.Mutex
 	cap        Capability
@@ -182,7 +187,7 @@ func (u *Updater) State() State {
 	defer u.mu.Unlock()
 	ps := PitlaneState{
 		Current: u.Version, Capability: c, CheckError: u.checkErr, Phase: u.phase, ApplyError: u.applyErr,
-		AutoStatus: u.autoStatus, LastUpdate: u.Store.Get(keyLastUpdate, ""),
+		AutoStatus: u.autoStatus, LastUpdate: u.Store.Get(keyLastUpdate, ""), Attestation: u.Verify != nil && u.Attested,
 	}
 	if !u.checkedAt.IsZero() {
 		ps.CheckedAt = u.checkedAt.Unix()

@@ -96,6 +96,7 @@ type metricsData struct {
 	Results   map[string]int64
 	Durations []float64 // seconds, jobs finished in the window
 	Waits     []float64 // seconds, jobs started in the window
+	MemPeaks  []float64 // bytes, measured jobs finished in the last 7 days
 	DiskTotal int64
 	DiskFree  int64
 	DiskOK    bool
@@ -119,6 +120,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	d.Results, _ = s.store.JobResultCounts(ctx)
 	d.Durations, d.Waits, _ = s.store.JobTimings(ctx, time.Now().Add(-metricsWindow).Unix())
+	d.MemPeaks, _ = s.store.JobMemoryPeaks(ctx, time.Now().Add(-memoryWindow).Unix())
 	if total, free, err := s.pool.DiskSpace(); err == nil {
 		d.DiskTotal, d.DiskFree, d.DiskOK = total, free, true
 	}
@@ -255,6 +257,7 @@ func writeMetrics(w io.Writer, d metricsData) {
 
 	p.summary("pitlane_job_duration_seconds", "Run time of the jobs finished in the last 24 hours.", d.Durations)
 	p.summary("pitlane_job_wait_seconds", "Queue time (queued to started) of the jobs started in the last 24 hours.", d.Waits)
+	p.summary("pitlane_job_memory_peak_bytes", "Peak memory (runner plus slot, page cache included) of the measured jobs finished in the last 7 days.", d.MemPeaks)
 
 	if d.DiskOK {
 		p.head("pitlane_disk_free_bytes", "gauge", "Free bytes on Docker's filesystem.")

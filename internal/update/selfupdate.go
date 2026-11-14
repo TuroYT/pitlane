@@ -117,11 +117,11 @@ func ManualCommand(mode, version string) string {
 	return "curl -fsSL https://raw.githubusercontent.com/" + Repo + "/main/deploy/install.sh | sudo" + env + " sh"
 }
 
-// Verifier is the hook for an authenticity check of a downloaded release
-// binary beyond its checksum (a signature or a GitHub build attestation).
-// The checksum only proves the binary matches checksums.txt of the same
-// release, i.e. it protects against corrupted or swapped downloads, not
-// against a compromised release.
+// Verifier checks the authenticity of a downloaded release binary beyond its
+// checksum (AttestationVerifier: its GitHub build attestation). The checksum
+// only proves the binary matches checksums.txt of the same release, i.e. it
+// protects against corrupted or swapped downloads, not against a
+// compromised release. An error refuses the installation.
 type Verifier func(ctx context.Context, rel Release, binaryPath string) error
 
 // Installer downloads, verifies and installs a release binary in place.
@@ -217,7 +217,7 @@ func (in *Installer) Install(ctx context.Context, rel Release, want Version, pha
 	log.Info("update: checksum verified", "release", rel.Tag, "bytes", n, "sha256", fmt.Sprintf("%x", got))
 
 	if in.Verify != nil {
-		phase("verifying signature")
+		phase("verifying the build attestation")
 		if err := in.Verify(ctx, rel, tmp.Name()); err != nil {
 			return fmt.Errorf("release verification: %w", err)
 		}
