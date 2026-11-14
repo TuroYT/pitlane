@@ -263,9 +263,9 @@ func RecentJobs(ctx context.Context, token, owner, repo string, maxRuns int) ([]
 	return out, nil
 }
 
-// JobLog downloads the log of the job a given runner ran in a workflow run.
-// token is an installation token or a personal access token.
-func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {
+// RunJobID returns the ID of the job a runner ran in a workflow run (the ID
+// used in job page URLs and the jobs API).
+func RunJobID(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (int64, error) {
 	var jobs struct {
 		Jobs []struct {
 			ID         int64  `json:"id"`
@@ -274,7 +274,7 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 	}
 	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID)
 	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
-		return nil, err
+		return 0, err
 	}
 	var jobID int64
 	for _, j := range jobs.Jobs {
@@ -283,7 +283,17 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 		}
 	}
 	if jobID == 0 {
-		return nil, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+		return 0, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+	}
+	return jobID, nil
+}
+
+// JobLog downloads the log of the job a given runner ran in a workflow run.
+// token is an installation token or a personal access token.
+func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {
+	jobID, err := RunJobID(ctx, token, owner, repo, runID, runnerName)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
 	if err != nil {

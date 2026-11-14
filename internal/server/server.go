@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -51,6 +52,7 @@ type Server struct {
 
 	setupToken string
 	compare    compareCache
+	jobIDs     sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
 	mu         sync.Mutex
 	states     map[string]time.Time // OAuth / manifest states
 }
@@ -140,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/jobs", s.auth(s.handleJobs))
 	mux.Handle("GET /api/runners/{name}/logs", s.auth(s.handleLogs))
 	mux.Handle("GET /api/runners/{name}/job-log", s.auth(s.handleJobLog))
+	mux.Handle("GET /api/runners/{name}/github", s.auth(s.handleGitHubJob))
 	mux.Handle("GET /api/settings", s.auth(s.handleGetSettings))
 	mux.Handle("GET /api/compare", s.auth(s.handleCompare))
 	mux.Handle("PUT /api/settings", s.auth(s.handlePutSettings))
@@ -841,6 +844,44 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	_, _ = io.Copy(w, rc)
+}
+
+// handleGitHubJob redirects to the page of the job a runner ran on GitHub.
+// GitHub's scale set messages do not carry the job's numeric ID, so it is
+// looked up once in the run's job list (by runner name) and cached. When it
+// cannot be found, it falls back to the run page.
+func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !validName(name) {
+		writeErr(w, http.StatusBadRequest, "invalid runner name")
+		return
+	}
+	job, err := s.store.JobByRunner(r.Context(), name)
+	if err != nil || job.RunID == 0 || !validName(job.Owner) || !validName(job.Repo) {
+		writeErr(w, http.StatusNotFound, "no job recorded for this runner")
+		return
+	}
+	runURL := fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", job.Owner, job.Repo, job.RunID)
+	if v, ok := s.jobIDs.Load(name); ok {
+		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, v.(int64)), http.StatusFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	t, err := s.store.Target(job.TargetID)
+	if err == nil {
+		var tok string
+		if tok, err = s.token(ctx, t); err == nil {
+			var id int64
+			if id, err = gh.RunJobID(ctx, tok, job.Owner, job.Repo, job.RunID, name); err == nil {
+				s.jobIDs.Store(name, id)
+				http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
+				return
+			}
+		}
+	}
+	s.log.Debug("github job page not found, opening the run", "runner", name, "err", err)
+	http.Redirect(w, r, runURL, http.StatusFound)
 }
 
 // ------------------------------------------------------------------ compare
