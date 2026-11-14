@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/network"
 
 	"github.com/TuroYT/pitlane/internal/cache"
@@ -72,7 +74,7 @@ func (p *Pool) cacheEnv(ctx context.Context, cfg Config, spec RunnerSpec) string
 	if b == nil || port == 0 || !cfg.ActionsCache || spec.Lease.Strict {
 		return ""
 	}
-	host, err := p.slotGateway(ctx, spec.Lease.Slot)
+	host, err := p.cacheHost(ctx, spec.Lease.Slot)
 	if err != nil {
 		p.log.Warn("actions cache unavailable for this job (it uses GitHub's cache)", "slot", spec.Lease.Slot, "error", err)
 		return ""
@@ -101,6 +103,53 @@ func (p *Pool) adoptCache(o Orphan, repo string) {
 	if b, _ := p.cacheBroker(); b != nil {
 		b.Register(o.Name, cache.Identity{Owner: o.Owner, Repo: repo})
 	}
+}
+
+// cacheHost returns the address where a slot's runners reach Pitlane's
+// cache listener: when Pitlane itself runs in a container (Compose), its own
+// address on the slot network, which it joins like the mirror does (a
+// published port would not be reachable from another bridge network);
+// otherwise the slot network's gateway, i.e. the host.
+func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
+	self := p.selfContainer(ctx)
+	if self == "" {
+		return p.slotGateway(ctx, slot)
+	}
+	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), self, nil)
+	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
+		return "", err
+	}
+	info, err := p.cli.ContainerInspect(ctx, self)
+	if err != nil {
+		return "", err
+	}
+	if info.NetworkSettings != nil {
+		if n := info.NetworkSettings.Networks[slotNetwork(slot)]; n != nil && n.IPAddress != "" {
+			return n.IPAddress, nil
+		}
+	}
+	return "", errors.New("pitlane has no address on " + slotNetwork(slot))
+}
+
+// selfContainer returns the ID of the container Pitlane runs in, "" when it
+// runs on the host. It is looked up once.
+func (p *Pool) selfContainer(ctx context.Context) string {
+	p.selfOnce.Do(func() {
+		if _, err := os.Stat("/.dockerenv"); err != nil {
+			return
+		}
+		host, err := os.Hostname()
+		if err != nil {
+			return
+		}
+		info, err := p.cli.ContainerInspect(ctx, host)
+		if err != nil {
+			p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
+			return
+		}
+		p.self = info.ID
+	})
+	return p.self
 }
 
 // slotGateway returns the address of the host on a slot's network (its
