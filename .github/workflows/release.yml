@@ -3,56 +3,151 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-  packages: write
+# Release jobs always run on GitHub-hosted runners, never on the shared
+# self-hosted pool: a job there could tamper with the artifacts or steal the
+# publishing tokens. Each job gets only the permissions it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ${{ vars.PITLANE_RUNNER || 'ubuntu-latest' }}
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # build provenance
+      attestations: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - id: version
+        name: Check the tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.?[0-9]+)?)?$' \
+            || { echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z[-rc.N]"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: pnpm/action-setup@v4
+          cache: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 10
-      - uses: actions/setup-node@v4
+          package_json_file: web/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Build binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           make web
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
-              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME#v}" -o dist/pitlane_linux_$arch ./cmd/pitlane
+              -ldflags "-s -w -X main.version=$VERSION" -o dist/pitlane_linux_$arch ./cmd/pitlane
           done
-          (cd dist && sha256sum pitlane_linux_* > checksums.txt)
-      - uses: softprops/action-gh-release@v2
+          # The installers are release assets too, so that everything a
+          # user downloads comes from the same tag.
+          cp deploy/install.sh deploy/proxmox/pitlane-lxc.sh dist/
+          (cd dist && sha256sum pitlane_linux_* install.sh pitlane-lxc.sh > checksums.txt && cat checksums.txt)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          files: dist/*
-          generate_release_notes: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+          subject-path: |
+            dist/pitlane_linux_*
+            dist/install.sh
+            dist/pitlane-lxc.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # build provenance
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: ghcr.io/turoyt/pitlane
+            context: .
+          - image: ghcr.io/turoyt/pitlane-runner
+            context: images/runner
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: "tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pitlane image
-        uses: docker/build-push-action@v6
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: VERSION=${{ github.ref_name }}
+          images: ${{ matrix.image }}
+          flavor: latest=false
+          # vX.Y.Z and vX.Y; latest only for final releases (pre-releases
+          # only get vX.Y.Z-rc.N).
           tags: |
-            ghcr.io/turoyt/pitlane:${{ github.ref_name }}
-            ghcr.io/turoyt/pitlane:latest
-      - name: Runner image
-        uses: docker/build-push-action@v6
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: images/runner
+          context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/turoyt/pitlane-runner:latest
+          build-args: VERSION=${{ needs.binaries.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    # Published last: install.sh and the default runner image of the new
+    # binary rely on the images being there.
+    needs: [binaries, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c checksums.txt
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" dist/pitlane_linux_* dist/install.sh dist/pitlane-lxc.sh dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG" $pre

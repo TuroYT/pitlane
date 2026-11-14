@@ -144,6 +144,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	}
 	defer func() { _ = st.Close() }()
 
+	pool.SetVersion(version) // default runner image released with this binary
 	p, err := pool.New(server.LoadPoolConfig(st, dataDir), log.With("component", "pool"))
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)

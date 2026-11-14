@@ -18,8 +18,9 @@ Lower **Build cache kept per slot**, or reduce the number of slots. To reset a
 slot's cache entirely: `docker rm -f pitlane-slot-N && docker volume rm pitlane-slot-N-docker`, then restart Pitlane.
 
 **The runner version is too old.**
-GitHub refuses runners that are too old. Pull the latest runner image
-(`docker pull ghcr.io/actions/actions-runner:latest`) and restart Pitlane.
+GitHub refuses runners that are too old. Upgrade Pitlane: each release pins a
+recent runner image. With a custom runner image, rebuild it on a recent
+`ghcr.io/actions/actions-runner` and update **Runner image** in the settings.
 
 **Sign-in fails with a redirect error.**
 The **Public URL** must match the GitHub App's callback URL
