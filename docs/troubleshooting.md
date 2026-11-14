@@ -27,3 +27,11 @@ The **Public URL** must match the GitHub App's callback URL
 
 **Logs.** `journalctl -u pitlane -f` (systemd) or `docker compose logs -f pitlane`.
 Use `PITLANE_LOG_LEVEL=debug` for more detail.
+
+**Multi-architecture builds (`docker/setup-qemu-action`) fail with `exec format error`.**
+QEMU emulation needs `binfmt_misc`, which an unprivileged LXC container cannot
+register. Run Pitlane in a VM or a privileged container for multi-arch builds,
+or keep those jobs on GitHub-hosted runners (`runs-on: ubuntu-latest`).
+
+**Windows or macOS jobs.** Pitlane only provides Linux runners; keep
+`windows-latest` / `macos-latest` jobs on GitHub-hosted runners.
