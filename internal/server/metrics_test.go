@@ -81,6 +81,7 @@ func TestWriteMetrics(t *testing.T) {
 		}},
 		Results:   map[string]int64{"succeeded": 3, "failed": 1},
 		Durations: []float64{10, 20, 30, 40},
+		MemPeaks:  []float64{1 << 30, 2 << 30, 3 << 30},
 		DiskFree:  5 << 30, DiskTotal: 100 << 30, DiskOK: true,
 	})
 	out := b.String()
@@ -100,6 +101,10 @@ func TestWriteMetrics(t *testing.T) {
 		"pitlane_job_duration_seconds_count 4",
 		`pitlane_job_wait_seconds{quantile="0.5"} NaN`,
 		"pitlane_job_wait_seconds_count 0",
+		"# TYPE pitlane_job_memory_peak_bytes summary",
+		`pitlane_job_memory_peak_bytes{quantile="0.5"} 2147483648`,
+		`pitlane_job_memory_peak_bytes{quantile="0.9"} 3221225472`,
+		"pitlane_job_memory_peak_bytes_count 3",
 		"pitlane_disk_free_bytes 5368709120",
 	} {
 		if !strings.Contains(out, want+"\n") {
