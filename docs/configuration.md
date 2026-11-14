@@ -110,7 +110,7 @@ scrape_configs:
 | `PITLANE_DATA` | `--data` | `/var/lib/pitlane` | Database, master key, logs. **Back it up.** |
 | `PITLANE_BASE_URL` | `--base-url` | saved by the setup | URL you open in the browser (see [Base URL](#base-url)). |
 | `PITLANE_TRUSTED_PROXIES` | `--trusted-proxies` | | Comma-separated IPs or CIDRs of reverse proxies allowed to set the `Host` and `X-Forwarded-Proto` headers the base URL is derived from (loopback always is). |
-| `PITLANE_LOG_LEVEL` | `--log-level` | `info` | |
+| `PITLANE_LOG_LEVEL` | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; anything else stops Pitlane at start. |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |
 | `PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS` | `--insecure-no-auth-any-address` | `false` | Allows `--insecure-no-auth` on any listen address. Only behind your own authentication (an authenticating reverse proxy that is the only thing able to reach Pitlane). |

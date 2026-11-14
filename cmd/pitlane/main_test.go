@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+)
 
 func TestCheckNoAuthListen(t *testing.T) {
 	for _, tc := range []struct {
@@ -23,6 +26,19 @@ func TestCheckNoAuthListen(t *testing.T) {
 	} {
 		if err := checkNoAuthListen(tc.listen, tc.any); (err == nil) != tc.ok {
 			t.Errorf("%q any=%v: err=%v, want ok=%v", tc.listen, tc.any, err, tc.ok)
+		}
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	for in, want := range map[string]slog.Level{"debug": slog.LevelDebug, "INFO": slog.LevelInfo, " warn ": slog.LevelWarn, "error": slog.LevelError, "info+2": slog.LevelInfo + 2} {
+		if got, err := parseLogLevel(in); err != nil || got != want {
+			t.Errorf("%q: got %v %v, want %v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "verbose", "warning", "3"} {
+		if _, err := parseLogLevel(bad); err == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

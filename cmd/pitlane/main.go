@@ -68,8 +68,11 @@ func main() {
 		"allow --insecure-no-auth on a non-loopback listen address, e.g. behind an authenticating proxy (PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS)")
 	flag.Parse()
 
-	var lvl slog.Level
-	_ = lvl.UnmarshalText([]byte(*logLevel))
+	lvl, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pitlane:", err)
+		os.Exit(2)
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	slog.SetDefault(log) // packages without a logger of their own (store)
 	if *noAuth {
@@ -93,6 +96,16 @@ func main() {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// parseLogLevel parses --log-level (debug, info, warn or error, any case;
+// slog's "info+2" offsets are accepted too).
+func parseLogLevel(s string) (slog.Level, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
+		return 0, fmt.Errorf("invalid --log-level / PITLANE_LOG_LEVEL %q: want debug, info, warn or error", s)
+	}
+	return lvl, nil
 }
 
 // checkNoAuthListen refuses to serve without authentication on anything but
