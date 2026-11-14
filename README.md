@@ -58,6 +58,33 @@ Then:
 
 That's it. See [Getting started](docs/getting-started.md) for details.
 
+## Faster than GitHub-hosted runners
+
+Measured on a real-world private monorepo CI (pnpm workspace, Nuxt + Prisma, Postgres/Redis
+service containers, three Docker image builds), all jobs running in parallel, warm caches.
+Pitlane ran in an unprivileged Proxmox LXC container with 12 vCPU and a modest RAID disk.
+
+| | GitHub-hosted (`ubuntu-latest`) | Pitlane |
+| --- | --- | --- |
+| **Whole CI (longest job)** | **~6 min 30** | **~3 min** |
+| Job pickup | queue + VM boot | 6 s |
+| Docker images & smoke test | 393 s | **127 s** (3.1×) |
+| Dependency install (`setup` step) | 30–40 s | **21–26 s** |
+| Prisma migrations | 77 s | **59 s** |
+| Lint & format | 40 s | **38 s** |
+| Unit tests | 161 s | **159 s** |
+
+The biggest wins come from what stays warm between jobs: Docker layers and `services:`
+images in each slot, one hardlinked pnpm store per owner, the tool cache and a local Docker
+Hub mirror. CPU-bound steps (type-checking, bundling) depend on your hardware: a job on a
+saturated host is not faster than on a 4-vCPU GitHub runner.
+
+On a project that previously used fixed self-hosted runners, the same jobs went from
+705 s → 250 s (lint), 417 s → 210 s (tests) and 376 s → 165 s (build).
+
+The **Jobs** page of the UI compares, for each of your jobs, the median duration on Pitlane
+with the same job on GitHub-hosted runners, so you can check on your own workloads.
+
 ## How it works
 
 ```
