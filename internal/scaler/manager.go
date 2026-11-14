@@ -1014,6 +1014,9 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			if !r.busy || r.busySince.IsZero() {
 				r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, time.Now())
 			}
+			if !r.busy {
+				r.meter.Begin() // usage counts from the job's start, not the warm runner's
+			}
 			r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
 			job.Slot = r.lease.Slot
 		}

@@ -203,6 +203,7 @@ type cgTracker struct {
 	max   int64    // highest memory.current seen
 	peak  *os.File // memory.peak, when it tells the job's peak
 	peakV int64    // highest value read from peak (-1: none)
+	fresh bool     // created for the job (a runner), not a long-lived slot
 }
 
 // newTracker starts following the cgroup in dir. fresh means the cgroup was
@@ -213,7 +214,7 @@ type cgTracker struct {
 // through the same open file. On older kernels the write fails and the peak
 // is the highest memory.current sampled during the job.
 func newTracker(dir string, fresh bool) *cgTracker {
-	t := &cgTracker{dir: dir, max: -1, peakV: -1}
+	t := &cgTracker{dir: dir, max: -1, peakV: -1, fresh: fresh}
 	file := filepath.Join(dir, "memory.peak")
 	if fresh {
 		if f, err := os.Open(file); err == nil { //nolint:gosec // G304: a file of a cgroup Pitlane located
@@ -267,6 +268,29 @@ func (t *cgTracker) record(s cgSample) {
 }
 
 func (t *cgTracker) sample() { t.record(readSample(t.dir)) }
+
+// rebase restarts the measurement when the job actually starts (a warm
+// runner can wait a long time for its job). CPU and pressure deltas start
+// from now. A runner keeps its peak since its creation (memory.peak cannot
+// be reset on every kernel, and an idle runner uses little memory); a
+// slot's peak is reset again.
+func (t *cgTracker) rebase() {
+	s := readSample(t.dir)
+	if !s.known() {
+		return
+	}
+	t.base, t.last, t.seen = s, s, true
+	if !t.fresh {
+		t.max, t.peakV = s.memCurrent, -1
+		if t.peak != nil {
+			if _, err := t.peak.WriteAt([]byte("reset\n"), 0); err != nil {
+				_ = t.peak.Close()
+				t.peak = nil
+			}
+		}
+	}
+	t.record(s)
+}
 
 func (t *cgTracker) close() {
 	if t.peak != nil {
@@ -342,6 +366,25 @@ func newMeter(runnerDir, slotDir string, interval time.Duration) *Meter {
 		}
 	}()
 	return m
+}
+
+// Begin marks the start of the runner's job: the wall time, CPU time and
+// pressure are counted from now on, and the slot's memory peak too.
+// Without it (a job whose start was not seen) the whole runner lifetime is
+// measured.
+func (m *Meter) Begin() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.start = time.Now()
+	if m.runner != nil {
+		m.runner.rebase()
+	}
+	if m.slot != nil {
+		m.slot.rebase()
+	}
 }
 
 func (m *Meter) sample() {

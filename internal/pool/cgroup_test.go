@@ -237,3 +237,31 @@ func TestPressureTotal(t *testing.T) {
 		t.Errorf("missing = %d", got)
 	}
 }
+
+// A warm runner waits before its job: Begin restarts the deltas (and the
+// slot's peak) at the job's start.
+func TestMeterBegin(t *testing.T) {
+	fs := fakeRoot(t)
+	runner := filepath.Join(fs.root, "docker", runnerCID)
+	slot := filepath.Join(fs.root, "docker", slotCID)
+	fakeCgroup(t, runner, 10, 10, 0, 0, 0, 0)
+	fakeCgroup(t, slot, 1000, 1000, 5_000_000, 0, 0, 0)
+	m := newMeter(runner, slot, 0)
+	// Idle wait: the slot did something else (a previous cleanup's tail).
+	setCgroup(t, runner, 50, 60, 1_000_000, 10, 0, 0)
+	setCgroup(t, slot, 4000, 4000, 6_000_000, 0, 0, 0)
+	m.sample()
+	setCgroup(t, slot, 1500, 4000, 6_000_000, 0, 0, 0)
+	m.Begin()
+	setCgroup(t, runner, 500, 900, 3_000_000, 30, 0, 0)
+	setCgroup(t, slot, 2000, 2000, 6_500_000, 0, 0, 0)
+	u := m.Stop()
+	if u.Runner.CPUUsec != 2_000_000 || u.Runner.CPUSomeUsec != 20 || u.Runner.MemPeak != 900 {
+		t.Errorf("runner: %+v", u.Runner)
+	}
+	if u.Slot.CPUUsec != 500_000 || u.Slot.MemPeak != 2000 {
+		t.Errorf("slot: %+v", u.Slot)
+	}
+	var nilMeter *Meter
+	nilMeter.Begin() // no-op
+}
