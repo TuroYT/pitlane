@@ -23,6 +23,12 @@ jobs:
         with:
           node-version: 22
       - run: make web
+      - name: web tests
+        run: pnpm test
+        working-directory: web
+      - name: web lint
+        run: pnpm lint
+        working-directory: web
       - run: test -z "$(gofmt -l ./cmd ./internal ./web)"
       - run: go vet ./...
       - name: go.mod and go.sum are tidy
