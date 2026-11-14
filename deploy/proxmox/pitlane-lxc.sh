@@ -4,14 +4,15 @@
 #
 #   bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"
 #
-# Overrides: CTID, HOSTNAME, CORES, MEMORY (MB), DISK (GB), STORAGE, BRIDGE,
+# Overrides: CTID, CT_HOSTNAME, CORES, MEMORY (MB), DISK (GB), STORAGE, BRIDGE,
 # PITLANE_VERSION (default: latest, or e.g. 0.2.0).
 # The container is unprivileged with nesting + keyctl, which is what Docker
 # (and Pitlane's Docker-in-Docker slots) need.
 set -euo pipefail
 
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
-HOSTNAME="${HOSTNAME:-pitlane}"
+# Not $HOSTNAME: bash always sets it (to the Proxmox host name).
+CT_HOSTNAME="${CT_HOSTNAME:-pitlane}"
 CORES="${CORES:-8}"
 MEMORY="${MEMORY:-16384}"
 DISK="${DISK:-150}"
@@ -47,9 +48,9 @@ TEMPLATE="$(pveam available --section system | awk '/debian-13-standard/ {print 
 [ -n "$TEMPLATE" ] || TEMPLATE="$(pveam available --section system | awk '/debian-12-standard/ {print $2}' | sort -V | tail -1)"
 pveam list "$TEMPLATE_STORAGE" | grep -q "$TEMPLATE" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
 
-echo "==> Creating CT $CTID ($HOSTNAME): ${CORES} cores, ${MEMORY} MB RAM, ${DISK} GB disk on $STORAGE"
+echo "==> Creating CT $CTID ($CT_HOSTNAME): ${CORES} cores, ${MEMORY} MB RAM, ${DISK} GB disk on $STORAGE"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
-  --hostname "$HOSTNAME" --cores "$CORES" --memory "$MEMORY" --swap 512 \
+  --hostname "$CT_HOSTNAME" --cores "$CORES" --memory "$MEMORY" --swap 512 \
   --rootfs "$STORAGE:$DISK" --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" \
   --unprivileged 1 --features nesting=1,keyctl=1 --onboot 1 --start 1
 
