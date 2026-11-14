@@ -56,7 +56,7 @@ const (
 	dindAddr = "tcp://127.0.0.1:2375"
 	// Bumped whenever the slot container definition changes: older slots are
 	// recreated (their volumes, hence their cache, are kept).
-	slotSpecVersion = "3"
+	slotSpecVersion = "4"
 	LabelSpec       = "dev.pitlane.spec"
 )
 
@@ -521,6 +521,12 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 		hc := &container.HostConfig{
 			Privileged:    true,
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+			// /run (= /var/run) on tmpfs: emptied on every start. After an
+			// unclean stop (host out of memory, power loss) a docker.pid left
+			// in the container's filesystem made dockerd refuse to start
+			// ("process with PID 1 is still running") and the slot restarted
+			// in a loop.
+			Tmpfs: map[string]string{"/run": "rw,nosuid,nodev,mode=755"},
 			Mounts: []mount.Mount{
 				{Type: mount.TypeVolume, Source: slotDocker(i), Target: "/var/lib/docker"},
 				{Type: mount.TypeVolume, Source: slotWork(i), Target: workDir},
