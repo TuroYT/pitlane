@@ -47,7 +47,7 @@ const (
 	dindAddr = "tcp://127.0.0.1:2375"
 	// Bumped whenever the slot container definition changes: older slots are
 	// recreated (their volumes, hence their cache, are kept).
-	slotSpecVersion = "2"
+	slotSpecVersion = "3"
 	LabelSpec       = "dev.pitlane.spec"
 )
 
@@ -105,7 +105,8 @@ type SlotState struct {
 
 type slot struct {
 	SlotState
-	retire bool
+	retire  bool
+	upgrade bool // recreate the slot container once its current job is done
 	// dirty marks a slot that may still hold another owner's data (a wipe or
 	// rebuild failed). It is never handed out; the retry loop rebuilds it.
 	dirty bool
@@ -116,11 +117,12 @@ type Pool struct {
 	cli *client.Client
 	log *slog.Logger
 
-	mu       sync.Mutex
-	cfg      Config
-	slots    map[int]*slot
-	chowned  map[string]bool
-	released chan struct{}
+	mu        sync.Mutex
+	cfg       Config
+	slots     map[int]*slot
+	chowned   map[string]bool
+	externals map[int]string // slot -> runner image ID copied into its externals volume
+	released  chan struct{}
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -130,7 +132,7 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, released: make(chan struct{}, 1)}, nil
+	return &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, externals: map[int]string{}, released: make(chan struct{}, 1)}, nil
 }
 
 // Docker exposes the Docker client (used for logs).
@@ -273,6 +275,13 @@ func slotNetwork(i int) string { return fmt.Sprintf("pitlane-slot-%d", i) }
 func slotDocker(i int) string  { return fmt.Sprintf("pitlane-slot-%d-docker", i) }
 func slotWork(i int) string    { return fmt.Sprintf("pitlane-slot-%d-work", i) }
 
+// slotExternals holds a copy of the runner's /home/runner/externals (the Node
+// runtimes used by JavaScript actions). Job containers (`container:`) get it
+// mounted at /__e, so it must exist on the slot daemon's side too.
+func slotExternals(i int) string { return fmt.Sprintf("pitlane-slot-%d-externals", i) }
+
+const externalsDir = "/home/runner/externals"
+
 func (p *Pool) setStatus(i int, status, errMsg string) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
@@ -313,7 +322,7 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 	if err := p.ensureNetwork(ctx, slotNetwork(i), false); err != nil {
 		return err
 	}
-	for _, v := range []string{slotDocker(i), slotWork(i)} {
+	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
 		if err := p.ensureVolume(ctx, v); err != nil {
 			return err
 		}
@@ -333,6 +342,7 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 			Mounts: []mount.Mount{
 				{Type: mount.TypeVolume, Source: slotDocker(i), Target: "/var/lib/docker"},
 				{Type: mount.TypeVolume, Source: slotWork(i), Target: workDir},
+				{Type: mount.TypeVolume, Source: slotExternals(i), Target: externalsDir, ReadOnly: true},
 			},
 		}
 		if cfg.MemoryMB > 0 {
@@ -353,10 +363,18 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 		}
 	case err != nil:
 		return err
+	case info.Config.Labels[LabelSpec] != slotSpecVersion && p.slotHasRunner(ctx, i):
+		// Outdated, but a job is running in it: upgrade once the job is done.
+		p.mu.Lock()
+		if s, ok := p.slots[i]; ok {
+			s.upgrade = true
+		}
+		p.mu.Unlock()
+		return p.waitDind(ctx, name)
 	case info.Config.Labels[LabelSpec] != slotSpecVersion:
-		// Slot created by an older Pitlane (Docker API on all interfaces):
-		// recreate it, its volumes (and cache) are kept.
-		p.log.Info("recreating slot with hardened settings", "slot", i)
+		// Slot created by an older Pitlane: recreate it, its volumes (and
+		// cache) are kept.
+		p.log.Info("recreating slot with the current definition", "slot", i)
 		if err := p.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
 			return err
 		}
@@ -438,13 +456,15 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	}
 	delete(p.chowned, slotDocker(i))
 	delete(p.chowned, slotWork(i))
+	delete(p.chowned, slotExternals(i))
+	delete(p.externals, i)
 	p.mu.Unlock()
 	p.startSlot(ctx, i)
 }
 
 // DropSlotCache deletes a retired slot's volumes (frees disk).
 func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
-	for _, v := range []string{slotDocker(i), slotWork(i)} {
+	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
 		if err := p.cli.VolumeRemove(ctx, v, true); err != nil && !errdefs.IsNotFound(err) {
 			return fmt.Errorf("remove volume %s: %w", v, err)
 		}
@@ -535,13 +555,67 @@ true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 	p.mu.Lock()
 	s, ok := p.slots[l.Slot]
 	retire := ok && s.retire
+	upgrade := ok && s.upgrade
+	if upgrade {
+		s.upgrade = false
+	}
 	p.mu.Unlock()
 	if retire {
 		p.removeSlot(ctx, l.Slot)
 		p.signal()
 		return
 	}
+	if upgrade {
+		p.log.Info("upgrading slot after its job", "slot", l.Slot)
+		_ = p.cli.ContainerRemove(ctx, slotName(l.Slot), container.RemoveOptions{Force: true})
+		if err := p.ensureSlot(ctx, l.Slot); err != nil {
+			p.setStatus(l.Slot, "error", err.Error())
+			return
+		}
+	}
 	p.setStatus(l.Slot, "ready", "")
+}
+
+// slotHasRunner reports whether a runner container is running in a slot.
+func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(
+		filters.Arg("label", LabelRole+"=runner"), filters.Arg("label", LabelSlot+"="+strconv.Itoa(i)))})
+	return err != nil || len(list) > 0 // when unsure, do not kill anything
+}
+
+// ensureExternals copies the runner image's externals into the slot volume
+// (once per slot and image version).
+func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
+	info, err := p.cli.ImageInspect(ctx, img)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	done := p.externals[i] == info.ID
+	p.mu.Unlock()
+	if done {
+		return nil
+	}
+	script := `[ "$(cat /x/.pitlane-image 2>/dev/null)" = "$IMAGE_ID" ] && exit 0
+find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/ && echo "$IMAGE_ID" > /x/.pitlane-image`
+	c, err := p.cli.ContainerCreate(ctx, &container.Config{
+		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script}, Env: []string{"IMAGE_ID=" + info.ID},
+		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
+	}, &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: slotExternals(i), Target: "/x"}}}, nil, nil, "")
+	if err != nil {
+		return err
+	}
+	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
+	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
+		return err
+	}
+	if code := p.Wait(ctx, c.ID); code != 0 {
+		return fmt.Errorf("copy runner externals into slot %d: exit code %d", i, code)
+	}
+	p.mu.Lock()
+	p.externals[i] = info.ID
+	p.mu.Unlock()
+	return nil
 }
 
 // MarkRunner records which runner occupies a slot (for the UI).
@@ -612,6 +686,9 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		}
 	}
 	slotIdx := spec.Lease.Slot
+	if err := p.ensureExternals(ctx, slotIdx, cfg.RunnerImage); err != nil {
+		return "", err
+	}
 	env := []string{
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=" + spec.JITConfig,
 		"DOCKER_HOST=tcp://127.0.0.1:2375",
@@ -637,6 +714,7 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
 		Mounts: []mount.Mount{
 			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
+			{Type: mount.TypeVolume, Source: slotExternals(slotIdx), Target: externalsDir, ReadOnly: true},
 			{Type: mount.TypeVolume, Source: toolVol, Target: "/opt/hostedtoolcache"},
 			{Type: mount.TypeVolume, Source: cacheVol, Target: "/home/runner/.cache"},
 		},
