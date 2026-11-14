@@ -17,7 +17,9 @@ const error = ref(
     ? 'GitHub did not accept the App creation. Please try again.'
     : route.query.error === 'state'
       ? 'The setup link expired. Please try again.'
-      : '',
+      : route.query.error === 'store'
+        ? 'Pitlane could not save the GitHub App it just created (see its logs). Delete that App on GitHub, then try again.'
+        : '',
 )
 
 const step = computed(() => {

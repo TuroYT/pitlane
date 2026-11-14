@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -304,7 +305,11 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "base URL must start with http:// or https://")
 		return
 	}
-	_ = s.store.Set("base_url", base)
+	if err := s.store.Set("base_url", base); err != nil {
+		s.log.Error("save base URL", "error", err)
+		writeErr(w, http.StatusInternalServerError, "cannot save the base URL: "+err.Error())
+		return
+	}
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = "Pitlane " + randomHex(3)
@@ -342,21 +347,45 @@ func (s *Server) handleSetupCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup?error=conversion", http.StatusFound)
 		return
 	}
-	for k, v := range map[string]string{
-		"app_id": strconv.FormatInt(app.ID, 10), "app_slug": app.Slug, "app_name": app.Name,
-		"app_client_id": app.ClientID, "app_html_url": app.HTMLURL, "app_owner": app.Owner.Login,
-	} {
-		_ = s.store.Set(k, v)
+	if err := saveApp(s.store, app); err != nil {
+		// The manifest code is single use: the App exists on GitHub but its
+		// credentials are lost. Setup must start over.
+		s.log.Error("cannot save the GitHub App: delete it on GitHub and run the setup again", "app", app.Slug, "url", app.HTMLURL, "error", err)
+		http.Redirect(w, r, "/setup?error=store", http.StatusFound)
+		return
 	}
-	_ = s.store.SetSecret("app_pem", app.PEM)
-	_ = s.store.SetSecret("app_client_secret", app.ClientSecret)
-	_ = s.store.SetSecret("app_webhook_secret", app.WebhookSecret)
 	s.setCookie(w, r, stateCookie, "", -1)
 	s.log.Info("GitHub App created", "app", app.Slug)
 	if s.mgr != nil {
 		s.mgr.Restart()
 	}
 	http.Redirect(w, r, "/setup?step=install", http.StatusFound)
+}
+
+// settingsStore is the part of the store saveApp needs.
+type settingsStore interface {
+	Set(key, value string) error
+	SetSecret(key, value string) error
+}
+
+// saveApp stores a newly created GitHub App. Secrets go first and the client
+// ID, which marks the App as configured, last: a failure midway leaves the
+// App unconfigured rather than half configured.
+func saveApp(st settingsStore, app *gh.App) error {
+	for _, kv := range [][2]string{{"app_pem", app.PEM}, {"app_client_secret", app.ClientSecret}, {"app_webhook_secret", app.WebhookSecret}} {
+		if err := st.SetSecret(kv[0], kv[1]); err != nil {
+			return fmt.Errorf("save %s: %w", kv[0], err)
+		}
+	}
+	for _, kv := range [][2]string{
+		{"app_id", strconv.FormatInt(app.ID, 10)}, {"app_slug", app.Slug}, {"app_name", app.Name},
+		{"app_html_url", app.HTMLURL}, {"app_owner", app.Owner.Login}, {"app_client_id", app.ClientID},
+	} {
+		if err := st.Set(kv[0], kv[1]); err != nil {
+			return fmt.Errorf("save %s: %w", kv[0], err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +415,11 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	// The first person to sign in with the setup token becomes the admin.
 	if s.store.Get("allowed_users", "") == "" && s.hasSetupCookie(r) {
-		_ = s.store.Set("allowed_users", login)
+		if err := s.store.Set("allowed_users", login); err != nil {
+			s.log.Error("register first admin", "login", login, "error", err)
+			writeErr(w, http.StatusInternalServerError, "cannot register the first admin: "+err.Error())
+			return
+		}
 		s.EnsureSetupToken() // deletes the token file
 		s.setupToken = ""
 		s.log.Info("first admin registered", "login", login)

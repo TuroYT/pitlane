@@ -633,7 +633,10 @@ func (t *target) startRunner(lease pool.Lease) error {
 	if jit.Runner != nil {
 		// Recorded before the container exists: if Pitlane dies now, the
 		// orphan cleanup still finds this registration.
-		_ = t.m.store.AddRunner(store.RegisteredRunner{ID: int64(jit.Runner.ID), TargetID: cfg.ID, Name: name})
+		if err := t.m.store.AddRunner(store.RegisteredRunner{ID: int64(jit.Runner.ID), TargetID: cfg.ID, Name: name}); err != nil {
+			// Not fatal, but the orphan cleanup will never see this runner.
+			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.Runner.ID, "error", err)
+		}
 	}
 	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.EncodedJITConfig, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
 	if err != nil {
@@ -767,17 +770,24 @@ func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
 		WorkflowRef: shortRef(b.JobWorkflowRef), JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
 }
 
+// upsertJob records a job in the history; a failure only affects the UI and
+// the lost-job detection after a restart, so it is logged.
+func (s *scaler) upsertJob(j store.Job) {
+	if err := s.t.m.store.UpsertJob(j); err != nil {
+		s.t.log.Warn("record job", "job", j.JobID, "error", err)
+	}
+}
+
 func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
 	if msg == nil {
 		s.t.reconcile()
 		return nil
 	}
-	st := s.t.m.store
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
 			ids = append(ids, j.RunnerRequestID)
-			_ = st.UpsertJob(s.job(j.JobMessageBase))
+			s.upsertJob(s.job(j.JobMessageBase))
 		}
 		if _, err := s.session.AcquireJobs(ctx, ids); err != nil {
 			return fmt.Errorf("acquire jobs: %w", err)
@@ -802,7 +812,7 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			delete(s.t.lost, j.JobID) // started again elsewhere: it needs a runner
 		}
 		s.t.mu.Unlock()
-		_ = st.UpsertJob(job)
+		s.upsertJob(job)
 	}
 	for _, j := range msg.JobCompletedMessages {
 		job := s.job(j.JobMessageBase)
@@ -821,7 +831,7 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			r.jobID = ""
 		}
 		s.t.mu.Unlock()
-		_ = st.UpsertJob(job)
+		s.upsertJob(job)
 	}
 	if msg.Statistics != nil {
 		s.t.mu.Lock()
