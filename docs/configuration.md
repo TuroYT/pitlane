@@ -42,6 +42,15 @@ whenever the repository list is shown:
   **existing** target keeps its mode (the error is logged); turning strict off is
   refused until GitHub answers.
 - A repository that becomes private stays strict until you turn strict off.
+- An **organization** target serves every repository its runner group lets in.
+  Pitlane registers its scale sets in the organization's **Default** runner group
+  and reads that group's *Allow public repositories* setting (Organization settings →
+  Actions → Runner groups → Default). While it is on, the organization target is
+  enforced strict exactly like a public repository. **Keep it off** (GitHub's
+  default): public repositories of the organization then cannot use the runners at
+  all, and fork pull requests never reach them. To run a public repository on
+  Pitlane, enable that repository as its own target (always strict) rather than
+  opening the runner group.
 
 ## Automatic maintenance
 

@@ -18,7 +18,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const apiBase = "https://api.github.com"
+var apiBase = "https://api.github.com" // tests point it at a fake server
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -389,4 +389,20 @@ func RepoPrivate(ctx context.Context, token, owner, repo string) (bool, error) {
 		return false, fmt.Errorf("visibility of %s/%s not returned", owner, repo)
 	}
 	return *r.Private, nil
+}
+
+// RunnerGroupAllowsPublic reports whether an organisation runner group lets
+// public repositories use its runners.
+func RunnerGroupAllowsPublic(ctx context.Context, token, org string, groupID int) (bool, error) {
+	var g struct {
+		AllowsPublic *bool `json:"allows_public_repositories"`
+	}
+	u := fmt.Sprintf("%s/orgs/%s/actions/runner-groups/%d", apiBase, url.PathEscape(org), groupID)
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &g); err != nil {
+		return false, err
+	}
+	if g.AllowsPublic == nil {
+		return false, fmt.Errorf("runner group %d of %s: allows_public_repositories not returned", groupID, org)
+	}
+	return *g.AllowsPublic, nil
 }

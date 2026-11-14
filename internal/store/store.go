@@ -310,6 +310,10 @@ type Target struct {
 // StrictPublicRepo is the strict requirement of a public repository target.
 const StrictPublicRepo = "public repository"
 
+// StrictPublicRunnerGroup is the strict requirement of an organisation
+// target whose runner group accepts jobs of public repositories.
+const StrictPublicRunnerGroup = "its runner group allows public repositories"
+
 // DefaultMaxJobMinutes is GitHub's own job time limit on hosted runners.
 const DefaultMaxJobMinutes = 360
 

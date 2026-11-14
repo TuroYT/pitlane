@@ -817,20 +817,31 @@ func (s *Server) checkStrict(ctx context.Context, t store.Target) (string, error
 }
 
 // StrictReason asks GitHub why a target must run strict ("" when it need
-// not): a public repository runs jobs of pull requests from forks.
+// not): a public repository runs jobs of pull requests from forks. An
+// organisation target serves every repository its runner group allows: the
+// group's "Allow public repositories" setting (off by default) decides
+// whether public repositories, hence forks, can use the runners at all.
 func (s *Server) StrictReason(ctx context.Context, t store.Target) (string, error) {
 	tok, err := s.token(ctx, t)
 	if err != nil {
 		return "", err
 	}
-	if t.Kind == "repo" {
-		private, err := gh.RepoPrivate(ctx, tok, t.Owner, t.Repo)
+	if t.Kind == "org" {
+		public, err := gh.RunnerGroupAllowsPublic(ctx, tok, t.Owner, scaler.RunnerGroupID)
 		if err != nil {
 			return "", err
 		}
-		if !private {
-			return store.StrictPublicRepo, nil
+		if public {
+			return store.StrictPublicRunnerGroup, nil
 		}
+		return "", nil
+	}
+	private, err := gh.RepoPrivate(ctx, tok, t.Owner, t.Repo)
+	if err != nil {
+		return "", err
+	}
+	if !private {
+		return store.StrictPublicRepo, nil
 	}
 	return "", nil
 }

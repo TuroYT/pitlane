@@ -33,6 +33,11 @@ type Credentials struct {
 	PAT         string
 }
 
+// RunnerGroupID is the runner group of every scale set Pitlane creates: the
+// default group (for an organisation, its "Allow public repositories"
+// setting decides whether public repositories can use the runners).
+const RunnerGroupID = 1
+
 // Valid reports whether credentials are usable.
 func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" && c.AppPEM != "") }
 
@@ -536,14 +541,14 @@ func (t *target) listen() error {
 		return err
 	}
 	cfg := t.cfg()
-	ss, err := client.GetRunnerScaleSet(t.ctx, 1, cfg.ScaleSetName)
+	ss, err := client.GetRunnerScaleSet(t.ctx, RunnerGroupID, cfg.ScaleSetName)
 	if err != nil {
 		return fmt.Errorf("get scale set: %w", err)
 	}
 	if ss == nil {
 		ss, err = client.CreateRunnerScaleSet(t.ctx, &scaleset.RunnerScaleSet{
 			Name:          cfg.ScaleSetName,
-			RunnerGroupID: 1,
+			RunnerGroupID: RunnerGroupID,
 			Labels:        []scaleset.Label{{Name: cfg.ScaleSetName}},
 			RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
 		})

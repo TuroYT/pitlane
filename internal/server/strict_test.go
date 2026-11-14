@@ -117,3 +117,19 @@ func TestInstallationListingSwitchesPublicReposToStrict(t *testing.T) {
 		t.Fatalf("repository made public not switched to strict: %+v", got)
 	}
 }
+
+func TestOrgTargetStrictWhenRunnerGroupAllowsPublic(t *testing.T) {
+	s := newStrictServer(t, fakeGitHub{"open": store.StrictPublicRunnerGroup, "closed": ""})
+	if code, tg, body := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"org","owner":"open"}`); code != 200 || !tg.Strict || tg.StrictRequired == "" {
+		t.Fatalf("org open to public repositories: %d %+v %s", code, tg, body)
+	}
+	if code, tg, _ := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"org","owner":"open2","strict":false}`); code != 200 || !tg.Strict {
+		t.Fatal("unknown runner group: created strict (fail closed)")
+	}
+	if code, tg, _ := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"org","owner":"closed"}`); code != 200 || tg.Strict {
+		t.Fatalf("org closed to public repositories must not be forced strict: %+v", tg)
+	}
+	if code, _, body := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/1", "1", `{"strict":false}`); code != http.StatusBadRequest {
+		t.Fatalf("strict turned off on an org open to public repositories: %d %s", code, body)
+	}
+}
