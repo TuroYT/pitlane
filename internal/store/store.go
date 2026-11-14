@@ -85,6 +85,20 @@ var migrations = []string{
 	// Full workflow reference of a job ("owner/repo/.github/workflows/ci.yml@refs/heads/main"),
 	// which keeps the branch, tag or pull request the job ran for.
 	`ALTER TABLE jobs ADD COLUMN workflow_full_ref TEXT NOT NULL DEFAULT ''`,
+	// Resources a job used, from the cgroups of its runner container and of
+	// its slot (NULL: not measured). Wall time in milliseconds, memory peaks
+	// in bytes, CPU time and pressure stall totals in microseconds.
+	`ALTER TABLE jobs ADD COLUMN usage_wall_ms INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN runner_mem_peak INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN runner_cpu_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN runner_cpu_some_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN runner_io_full_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN runner_mem_full_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN slot_mem_peak INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN slot_cpu_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN slot_cpu_some_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN slot_io_full_usec INTEGER`,
+	`ALTER TABLE jobs ADD COLUMN slot_mem_full_usec INTEGER`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -481,6 +495,134 @@ type Job struct {
 	// Ref is the git ref of WorkflowFullRef: "refs/heads/main",
 	// "refs/pull/42/merge", "refs/tags/v1"… Derived, not stored.
 	Ref string `json:"ref"`
+	// Usage is what the job used (nil: not measured).
+	Usage *JobUsage `json:"usage"`
+}
+
+// JobUsage is what a job used, measured from the cgroups of its runner
+// container and of its slot over the runner's lifetime.
+type JobUsage struct {
+	WallMs int64 `json:"wallMs"`
+	// MemPeak is the runner's peak plus the slot's (bytes): an upper bound
+	// of the memory the job needed (both peaks need not coincide). Nil
+	// when neither is known. Derived, not stored.
+	MemPeak *int64         `json:"memPeak"`
+	Runner  ContainerUsage `json:"runner"`
+	Slot    ContainerUsage `json:"slot"`
+}
+
+// ContainerUsage is what one container used during a job. Nil: unknown.
+type ContainerUsage struct {
+	MemPeak     *int64 `json:"memPeak"`     // bytes, page cache included
+	CPUUsec     *int64 `json:"cpuUsec"`     // CPU time
+	CPUSomeUsec *int64 `json:"cpuSomeUsec"` // cpu.pressure "some" stall time
+	IOFullUsec  *int64 `json:"ioFullUsec"`  // io.pressure "full" stall time
+	MemFullUsec *int64 `json:"memFullUsec"` // memory.pressure "full" stall time
+	// Stall times as a percentage of the wall time. Derived, not stored.
+	CPUPressure *float64 `json:"cpuPressurePct"`
+	IOPressure  *float64 `json:"ioPressurePct"`
+	MemPressure *float64 `json:"memPressurePct"`
+}
+
+func (c *ContainerUsage) derive(wallMs int64) {
+	pct := func(v *int64) *float64 {
+		if v == nil || wallMs <= 0 {
+			return nil
+		}
+		p := min(100, float64(*v)/float64(wallMs*1000)*100)
+		return &p
+	}
+	c.CPUPressure, c.IOPressure, c.MemPressure = pct(c.CPUSomeUsec), pct(c.IOFullUsec), pct(c.MemFullUsec)
+}
+
+func (u *JobUsage) derive() {
+	u.Runner.derive(u.WallMs)
+	u.Slot.derive(u.WallMs)
+	u.MemPeak = nil
+	if u.Runner.MemPeak != nil || u.Slot.MemPeak != nil {
+		var n int64
+		for _, v := range []*int64{u.Runner.MemPeak, u.Slot.MemPeak} {
+			if v != nil {
+				n += *v
+			}
+		}
+		u.MemPeak = &n
+	}
+}
+
+// usageColumns are the stored fields of a JobUsage, in column order.
+const usageColumns = `usage_wall_ms, runner_mem_peak, runner_cpu_usec, runner_cpu_some_usec, runner_io_full_usec, runner_mem_full_usec,
+	slot_mem_peak, slot_cpu_usec, slot_cpu_some_usec, slot_io_full_usec, slot_mem_full_usec`
+
+// usageScan holds the nullable usage columns of a row.
+type usageScan [11]sql.NullInt64
+
+func (u *usageScan) dest() []any {
+	out := make([]any, len(u))
+	for i := range u {
+		out[i] = &u[i]
+	}
+	return out
+}
+
+func (u *usageScan) usage() *JobUsage {
+	if !u[0].Valid {
+		return nil
+	}
+	v := func(i int) *int64 {
+		if !u[i].Valid {
+			return nil
+		}
+		n := u[i].Int64
+		return &n
+	}
+	j := &JobUsage{WallMs: u[0].Int64,
+		Runner: ContainerUsage{MemPeak: v(1), CPUUsec: v(2), CPUSomeUsec: v(3), IOFullUsec: v(4), MemFullUsec: v(5)},
+		Slot:   ContainerUsage{MemPeak: v(6), CPUUsec: v(7), CPUSomeUsec: v(8), IOFullUsec: v(9), MemFullUsec: v(10)}}
+	j.derive()
+	return j
+}
+
+// SetJobUsage records what the job a runner picked up used. It returns
+// false when no job with that runner is recorded (yet).
+func (s *Store) SetJobUsage(ctx context.Context, runner string, u JobUsage) (bool, error) {
+	n := func(v *int64) any {
+		if v == nil {
+			return nil
+		}
+		return *v
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET usage_wall_ms = ?,
+		runner_mem_peak = ?, runner_cpu_usec = ?, runner_cpu_some_usec = ?, runner_io_full_usec = ?, runner_mem_full_usec = ?,
+		slot_mem_peak = ?, slot_cpu_usec = ?, slot_cpu_some_usec = ?, slot_io_full_usec = ?, slot_mem_full_usec = ?
+		WHERE id = (SELECT id FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1)`,
+		u.WallMs, n(u.Runner.MemPeak), n(u.Runner.CPUUsec), n(u.Runner.CPUSomeUsec), n(u.Runner.IOFullUsec), n(u.Runner.MemFullUsec),
+		n(u.Slot.MemPeak), n(u.Slot.CPUUsec), n(u.Slot.CPUSomeUsec), n(u.Slot.IOFullUsec), n(u.Slot.MemFullUsec), runner)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	return rows > 0, err
+}
+
+// JobMemoryPeaks returns the memory peak (runner plus slot, bytes) of the
+// measured jobs finished since the given Unix time.
+func (s *Store) JobMemoryPeaks(ctx context.Context, since int64) ([]float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(runner_mem_peak, 0) + COALESCE(slot_mem_peak, 0) FROM jobs
+		WHERE finished_at >= ? AND (runner_mem_peak IS NOT NULL OR slot_mem_peak IS NOT NULL)`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []float64{}
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, float64(v))
+	}
+	return out, rows.Err()
 }
 
 // WorkflowRefParts splits a full workflow reference into the workflow file
@@ -522,10 +664,11 @@ func (s *Store) SetJobSlot(runnerName string, slot int) error {
 // JobByRunner returns the job a runner picked up.
 func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
 	var j Job
-	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
-		FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
-		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef)
+	var u usageScan
+	err := s.db.QueryRowContext(ctx, jobColumns+` WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
+		Scan(append(j.dest(), u.dest()...)...)
 	_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
+	j.Usage = u.usage()
 	return j, err
 }
 
@@ -557,7 +700,12 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	return jobs, err
 }
 
-const jobColumns = `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref FROM jobs`
+const jobColumns = `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref, ` + usageColumns + ` FROM jobs`
+
+// dest returns the scan destinations of jobColumns before the usage ones.
+func (j *Job) dest() []any {
+	return []any{&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef}
+}
 
 // JobFilter narrows a job listing. Empty fields match everything.
 type JobFilter struct {
@@ -633,10 +781,12 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 	var out []Job
 	for rows.Next() {
 		var j Job
-		if err := rows.Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef); err != nil {
+		var u usageScan
+		if err := rows.Scan(append(j.dest(), u.dest()...)...); err != nil {
 			return nil, err
 		}
 		_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
+		j.Usage = u.usage()
 		out = append(out, j)
 	}
 	return out, rows.Err()
