@@ -33,6 +33,24 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 - **Orphan runners.** A runner container that dies before deregistering (out of memory, host reboot) leaves an offline runner on GitHub. Pitlane records the ID of every runner it registers and, at start and every 10 minutes, removes those that GitHub reports offline and not busy, that have no Pitlane container and that were registered more than 15 minutes ago. Online, busy or unknown runners are never removed. It needs the REST runner list (`administration` permission of the GitHub App, or `repo` / `admin:org` for a token); runners registered by Pitlane versions before this feature are not tracked.
 - **Lost jobs.** When a busy runner disappears before its job completes (killed by the job limit, out of memory, removed while Pitlane was stopped), GitHub keeps the job in progress and the runner offline and busy for several minutes, and still counts the job as assigned. Pitlane does not start a replacement runner for such a job: it is subtracted from the demand until GitHub reports it completed, it starts on another runner, the orphan cleanup sees its runner idle, or 30 minutes have passed.
 
+## Updates
+
+**Settings → Updates** (signed-in users only; the actions are CSRF-protected like every other change). The same data is served by `GET /api/updates`; actions are `POST /api/updates/check`, `POST /api/updates/apply`, `POST /api/updates/pull-runner` and `PUT /api/updates/settings`.
+
+**Pitlane.** Every 6 hours (and on **Check now**) Pitlane asks the GitHub API, without a token, for the releases of `TuroYT/pitlane`, and shows the latest stable release next to the running version, with a link to its release notes. If the repository is private or unreachable, the check fails with a message and nothing else changes.
+
+**Update now** is offered when Pitlane runs as a plain binary (systemd, the Proxmox LXC script). It downloads `pitlane_linux_<arch>` and `checksums.txt` from the **same** release, over HTTPS from `github.com` and GitHub's release storage hosts only, with a 200 MB limit, and refuses to install when the checksum does not match or the file has no entry. It then runs `<new binary> version`, writes the binary next to the current one, fsyncs it, keeps the current one as `pitlane.prev` and renames the new one into place. Pitlane then shuts down like on `systemctl stop` (busy runners keep running and are adopted) and re-executes itself; if that fails it exits and systemd's `Restart=always` starts it again. Every step is logged (`journalctl -u pitlane`) and errors show in the UI; on any failure the current binary is left untouched.
+
+Rollback: `sudo mv /usr/local/bin/pitlane.prev /usr/local/bin/pitlane && sudo systemctl restart pitlane`.
+
+Self-update is not offered, and the exact command is shown instead, when Pitlane runs in a container (`docker compose pull && docker compose up -d`), when its binary's directory is not writable (re-run `install.sh` with `PITLANE_VERSION`), for a development build, or when `PITLANE_SELF_UPDATE=false` is set.
+
+**Install updates automatically** (off by default) installs, inside a daily window (local time, default 03:00-05:00), the highest patch or minor release of the running major version, never a pre-release, and only while no job runs. A failed automatic attempt is retried the next day. New major versions are always manual.
+
+The checksum only proves that the binary is the one listed in its release. A future step should also verify a signature or a GitHub build attestation of the release (see the release workflow): the `update.Verifier` hook in `internal/update` runs after the checksum check, before anything is installed.
+
+**Runner image.** Pitlane reads the GitHub runner version inside the configured runner image (from `/home/runner/bin/Runner.Listener.deps.json` of a created, never started, container) and compares it with the latest `actions/runner` release. GitHub stops accepting a runner that does not update itself about 30 days after a newer version is released: the UI warns a week before that date and after it. **Pull latest** pulls the configured tag again; with **Pull the runner image automatically** (on by default) this happens every day. Runners already started (idle warm runners included) keep their image; runners started after the pull use the new one. The pull runs in the background, so no job waits for it. The image digest in use and the time of the last pull are shown.
+
 ## Health and metrics
 
 - `GET /healthz` returns 200 as long as the process serves HTTP.
@@ -70,6 +88,7 @@ scrape_configs:
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Only behind your own authentication. |
+| `PITLANE_SELF_UPDATE` | | | `false` disables self-update (for packaged installs). |
 | `DOCKER_HOST` | | local socket | Standard Docker client variables are honored. |
 
 ### Personal access token mode
