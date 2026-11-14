@@ -15,6 +15,7 @@ type fakeDisk struct {
 	vols    []volInfo
 	calls   []string
 	freeErr error
+	otherFS bool // actions cache on another filesystem
 	p       *Pool
 	// observed slot states while a slot is being pruned
 	statusDuring map[int]string
@@ -35,6 +36,8 @@ func (f *fakeDisk) execSlot(_ context.Context, slot int, script string) error {
 	f.free += f.freed[key]
 	return nil
 }
+
+func (f *fakeDisk) onDisk(string) bool { return !f.otherFS }
 
 func (f *fakeDisk) volumes(context.Context) ([]volInfo, error) { return f.vols, nil }
 

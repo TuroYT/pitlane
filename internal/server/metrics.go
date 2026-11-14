@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TuroYT/pitlane/internal/cache"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
 )
@@ -100,6 +101,8 @@ type metricsData struct {
 	DiskTotal int64
 	DiskFree  int64
 	DiskOK    bool
+	// ActionsCache is nil when the actions cache server is not running.
+	ActionsCache *cache.Stats
 }
 
 const metricsWindow = 24 * time.Hour
@@ -123,6 +126,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	d.MemPeaks, _ = s.store.JobMemoryPeaks(ctx, time.Now().Add(-memoryWindow).Unix())
 	if total, free, err := s.pool.DiskSpace(); err == nil {
 		d.DiskTotal, d.DiskFree, d.DiskOK = total, free, true
+	}
+	if s.cache != nil {
+		st := s.cache.Stats()
+		d.ActionsCache = &st
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -264,5 +271,17 @@ func writeMetrics(w io.Writer, d metricsData) {
 		p.sample("pitlane_disk_free_bytes", nil, float64(d.DiskFree))
 		p.head("pitlane_disk_total_bytes", "gauge", "Size of Docker's filesystem in bytes.")
 		p.sample("pitlane_disk_total_bytes", nil, float64(d.DiskTotal))
+	}
+	if c := d.ActionsCache; c != nil {
+		p.head("pitlane_actions_cache_bytes", "gauge", "Bytes stored by the actions cache.")
+		p.sample("pitlane_actions_cache_bytes", nil, float64(c.Bytes))
+		p.head("pitlane_actions_cache_entries", "gauge", "Entries stored by the actions cache.")
+		p.sample("pitlane_actions_cache_entries", nil, float64(c.Entries))
+		p.head("pitlane_actions_cache_requests_total", "counter", "Actions cache restores (hit or miss) and saves since start.")
+		p.sample("pitlane_actions_cache_requests_total", []string{"result", "hit"}, float64(c.Hits))
+		p.sample("pitlane_actions_cache_requests_total", []string{"result", "miss"}, float64(c.Misses))
+		p.sample("pitlane_actions_cache_requests_total", []string{"result", "save"}, float64(c.Saves))
+		p.head("pitlane_actions_cache_evictions_total", "counter", "Actions cache entries evicted since start.")
+		p.sample("pitlane_actions_cache_evictions_total", nil, float64(c.Evictions))
 	}
 }

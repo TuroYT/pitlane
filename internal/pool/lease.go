@@ -208,6 +208,7 @@ left=$(docker ps -aq) && test -z "$left"`, keepBuildGB, clearDir(workDir, "_acti
 // Fail closed: when the cleanup fails the slot is marked dirty, so it is never
 // handed out again until it has been rebuilt from scratch.
 func (p *Pool) Release(ctx context.Context, l Lease) {
+	p.revokeCache(l.Runner)
 	if l.Strict {
 		p.releaseStrict(ctx, l)
 		return

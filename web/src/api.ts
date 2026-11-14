@@ -147,6 +147,28 @@ export interface Settings {
   allowedUsers: string
   historyDays: number
   baseUrl: string
+  actionsCache: boolean
+  actionsCacheGb: number
+  // Read-only; missing when the cache listener is not running.
+  actionsCacheStats?: ActionsCacheStats
+}
+
+export interface ActionsCacheStats {
+  entries: number
+  bytes: number
+  limitBytes: number
+  hits: number
+  misses: number
+  saves: number
+  evictions: number
+}
+
+// One line for Settings: what the actions cache stores and how it is used.
+export function cacheSummary(st: ActionsCacheStats): string {
+  const lookups = st.hits + st.misses
+  const rate = lookups ? ` (${Math.round((100 * st.hits) / lookups)}% hits)` : ''
+  return `${bytes(st.bytes)} in ${st.entries} ${st.entries === 1 ? 'entry' : 'entries'}. ` +
+    `Since start: ${st.hits} restored, ${st.misses} missed${rate}, ${st.saves} saved, ${st.evictions} evicted.`
 }
 
 export interface Installation {

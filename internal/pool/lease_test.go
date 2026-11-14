@@ -76,7 +76,7 @@ func TestLeaseOwnerChangeMatrix(t *testing.T) {
 			p := newTestPool(tc.scope, SlotState{Index: 0, Status: "ready", Owner: pr.owner, TargetID: pr.target})
 			p.sops = ops
 			p.cfg.StateFile = filepath.Join(t.TempDir(), "slots.json")
-			p.externals[0] = "sha256:runner" // copied for the previous owner
+			p.externals[0] = externalsKey("sha256:runner") // copied for the previous owner
 
 			l, ok := p.Acquire(context.Background(), owner, target, tc.strict)
 			if !ok {
@@ -238,11 +238,11 @@ func TestEnsureExternalsTracksImage(t *testing.T) {
 	if err := p.ensureExternals(context.Background(), 0, "runner:2"); err != nil {
 		t.Fatal(err)
 	}
-	if ops.copies != 2 || p.externals[0] != "sha256:v2" {
+	if ops.copies != 2 || p.externals[0] != externalsKey("sha256:v2") {
 		t.Fatalf("copies=%d externals=%q", ops.copies, p.externals[0])
 	}
 	ops.image, ops.copyErr = "sha256:v3", errors.New("disk full")
-	if err := p.ensureExternals(context.Background(), 0, "runner:3"); err == nil || p.externals[0] != "sha256:v2" {
+	if err := p.ensureExternals(context.Background(), 0, "runner:3"); err == nil || p.externals[0] != externalsKey("sha256:v2") {
 		t.Fatalf("failed copy recorded: %v %q", err, p.externals[0])
 	}
 }

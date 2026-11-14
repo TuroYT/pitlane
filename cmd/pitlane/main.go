@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TuroYT/pitlane/internal/cache"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/server"
@@ -41,6 +42,21 @@ func main() {
 		case "version", "--version", "-v":
 			fmt.Println("pitlane", version)
 			return
+		case "cache-forward":
+			// Run by Pitlane itself, in the actions cache forwarder container
+			// (see internal/pool/actionscache.go): cache-forward <listen> <target>.
+			if len(os.Args) != 4 {
+				fmt.Fprintln(os.Stderr, "usage: pitlane cache-forward <listen> <target>")
+				os.Exit(2)
+			}
+			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := cache.Forward(ctx, os.Args[2], os.Args[3], log); err != nil {
+				log.Error("fatal", "error", err)
+				os.Exit(1)
+			}
+			return
 		case "setup-token":
 			dir := env("PITLANE_DATA", "/var/lib/pitlane")
 			if len(os.Args) > 2 {
@@ -58,6 +74,8 @@ func main() {
 	}
 
 	listen := flag.String("listen", env("PITLANE_LISTEN", ":8080"), "HTTP listen address (PITLANE_LISTEN)")
+	cacheListen := flag.String("cache-listen", env("PITLANE_CACHE_LISTEN", ":8091"),
+		"listen address of the actions cache that runners reach on the slot networks' gateway, \"off\" to disable (PITLANE_CACHE_LISTEN)")
 	dataDir := flag.String("data", env("PITLANE_DATA", "/var/lib/pitlane"), "data directory (PITLANE_DATA)")
 	baseURL := flag.String("base-url", env("PITLANE_BASE_URL", ""), "public URL of the UI, e.g. http://pitlane.lan:8080 (PITLANE_BASE_URL)")
 	trusted := flag.String("trusted-proxies", env("PITLANE_TRUSTED_PROXIES", ""),
@@ -88,7 +106,7 @@ func main() {
 		os.Exit(1)
 	}
 	err = run(log, server.Config{Version: version, DataDir: *dataDir, BaseURL: *baseURL, InsecureNoAuth: *noAuth,
-		Listen: *listen, TrustedProxies: proxies, PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN"))})
+		Listen: *listen, TrustedProxies: proxies, PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN"))}, *cacheListen)
 	if errors.Is(err, errRestart) {
 		reexec(log)
 	}
@@ -155,7 +173,39 @@ func reexec(log *slog.Logger) {
 	os.Exit(1)
 }
 
-func run(log *slog.Logger, cfg server.Config) error {
+// startActionsCache opens the actions cache and starts its listener. On any
+// failure Pitlane runs without it: jobs use GitHub's cache.
+func startActionsCache(log *slog.Logger, dataDir, listen string) (*cache.Server, *http.Server, int) {
+	if listen == "" || listen == "off" {
+		return nil, nil, 0
+	}
+	port := pool.CachePort(listen)
+	if port == 0 {
+		log.Error("invalid --cache-listen address, actions cache disabled (jobs use GitHub's cache)", "addr", listen)
+		return nil, nil, 0
+	}
+	cs, err := cache.Open(filepath.Join(dataDir, "actions-cache"), log)
+	if err != nil {
+		log.Error("actions cache disabled (jobs use GitHub's cache)", "error", err)
+		return nil, nil, 0
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		log.Error("actions cache disabled (jobs use GitHub's cache)", "error", err)
+		return nil, nil, 0
+	}
+	// No write timeout: archives can take minutes to stream.
+	hs := &http.Server{Handler: cs.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	go func() {
+		log.Info("actions cache listening", "addr", listen)
+		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("actions cache server", "error", err)
+		}
+	}()
+	return cs, hs, port
+}
+
+func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 	listen, dataDir := cfg.Listen, cfg.DataDir
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -175,7 +225,15 @@ func run(log *slog.Logger, cfg server.Config) error {
 		return fmt.Errorf("cannot reach Docker (is the socket mounted / is Docker running?): %w", err)
 	}
 
+	// Before the scaler adopts runners left by a previous run: they keep
+	// their actions cache token.
+	cs, cacheSrv, cachePort := startActionsCache(log.With("component", "cache"), dataDir, cacheListen)
+	if cs != nil {
+		p.SetCache(cs, cachePort)
+	}
+
 	srv := server.New(cfg, st, p, log.With("component", "http"), web.Dist())
+	srv.SetActionsCache(cs)
 	mgr := scaler.New(st, p, dataDir, srv.Credentials, srv.Notify, log.With("component", "scaler"))
 	mgr.Version = version
 	mgr.ListRunners = srv.GitHubRunners
@@ -238,6 +296,11 @@ func run(log *slog.Logger, cfg server.Config) error {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		_ = httpSrv.Close() // long-lived event streams (open browser tabs)
+	}
+	if cacheSrv != nil {
+		// Busy runners keep running: their transfers are retried by the
+		// client (or the step goes on without the cache).
+		_ = cacheSrv.Close()
 	}
 	if restart.Load() {
 		return errRestart

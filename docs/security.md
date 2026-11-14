@@ -20,6 +20,16 @@ What Pitlane does to keep honest jobs from stepping on each other:
   daemon, and a job only controls that daemon. The slot daemon's API listens on
   loopback only and is reachable only by the runner that shares the slot's
   network namespace. Slots never share a network with each other.
+- The actions cache (`actions/cache` served by Pitlane) never crosses GitHub
+  owners, whatever the cache scope: each runner gets a token, signed by
+  Pitlane and valid until its job ends, that opens only its target owner's
+  entries (one repository for a repository target). Within an owner, the
+  repository and branch come from the job (`GITHUB_REPOSITORY` and the scopes
+  of GitHub's job token, which Pitlane cannot verify), so a malicious job could
+  read or poison another repository's or branch's entries of the same owner, as
+  it already can with the owner's other caches. Strict jobs get no Pitlane
+  cache (they use GitHub's). The token travels in the cache URL: it can show
+  in a job's debug log, and is useless once the job has ended.
 - With the default cache scope (`owner`), caches never cross GitHub owners: a slot
   that switches to another user or organization is wiped first (images, build
   cache, downloaded actions), and package/toolchain caches are separate volumes
@@ -96,12 +106,19 @@ for net in $(docker network ls -q --filter label=dev.pitlane.managed=true --filt
     for d in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16; do
       iptables -A PITLANE-SLOTS -s "$s" -d "$d" -j DROP
     done
-    iptables -A PITLANE-SLOTS-IN -s "$s" -j DROP     # the host's own ports (SSH, Pitlane UI…)
+    iptables -A PITLANE-SLOTS-IN -s "$s" -p tcp --dport 8091 -j RETURN  # Pitlane's actions cache (--cache-listen)
+    iptables -A PITLANE-SLOTS-IN -s "$s" -j DROP     # the host's other ports (SSH, Pitlane UI…)
   done
 done
 iptables -C DOCKER-USER -j PITLANE-SLOTS 2>/dev/null || iptables -I DOCKER-USER -j PITLANE-SLOTS
 iptables -C INPUT -j PITLANE-SLOTS-IN 2>/dev/null || iptables -I INPUT -j PITLANE-SLOTS-IN
 ```
+
+The actions cache port is the one exception on the host: every request needs a
+per-job token. When Pitlane runs in a container, runners reach the cache
+through `pitlane-cache-forward`, a container on the slot networks that only
+relays that port (covered by the first rule), and the exception is not needed.
+Pitlane's own container never joins the slot networks.
 
 `DOCKER-USER` only sees forwarded traffic (to the LAN and to other containers'
 published ports); connections to the host's own addresses go through `INPUT`,
