@@ -8,6 +8,7 @@ import JobSource from '../components/JobSource.vue'
 import JobLinks from '../components/JobLinks.vue'
 import TrendCharts from '../components/TrendCharts.vue'
 import CompareChart from '../components/CompareChart.vue'
+import MemoryPanel from '../components/MemoryPanel.vue'
 
 // Recent jobs are refreshed with the live state; the longer history behind the
 // charts only once a minute.
@@ -172,6 +173,8 @@ function level(p: number) {
     </section>
 
     <TrendCharts :jobs="history" :slots="slots.length" :limit="HISTORY" :now="now" />
+
+    <MemoryPanel />
 
     <CompareChart />
 

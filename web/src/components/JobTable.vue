@@ -3,6 +3,7 @@ import { duration, type Job } from '../api'
 import JobStatus from './JobStatus.vue'
 import JobSource from './JobSource.vue'
 import JobLinks from './JobLinks.vue'
+import { cpuTime, cpuTimeTitle, peakRam, peakRamTitle, pressure, pressureTitle } from '../usage'
 
 defineProps<{ jobs: Job[]; compact?: boolean; empty?: string }>()
 
@@ -36,13 +37,18 @@ function whenShort(j: Job) {
           <th class="right" title="Time between the job being queued and a runner picking it up">Wait</th>
           <th class="right">Duration</th>
           <th v-if="!compact" class="right">Slot</th>
+          <template v-if="!compact">
+            <th class="right" title="Peak memory of the runner plus its slot (services, docker build), page cache included">Peak RAM</th>
+            <th class="right" title="CPU time used by the runner and its slot">CPU time</th>
+            <th class="right" title="Share of the job's time stalled waiting for CPU, I/O or memory (worse of runner and slot)">Pressure</th>
+          </template>
           <th class="right">Queued</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
         <tr v-if="!jobs.length">
-          <td colspan="7" class="muted center">{{ empty ?? 'No jobs yet. They appear here as soon as GitHub assigns one to Pitlane.' }}</td>
+          <td :colspan="compact ? 6 : 10" class="muted center">{{ empty ?? 'No jobs yet. They appear here as soon as GitHub assigns one to Pitlane.' }}</td>
         </tr>
         <tr v-for="j in jobs" :key="j.id">
           <td><JobStatus :job="j" /></td>
@@ -54,6 +60,11 @@ function whenShort(j: Job) {
           <td class="right">{{ wait(j) }}</td>
           <td class="right">{{ runTime(j) }}</td>
           <td v-if="!compact" class="right mono">{{ j.slot >= 0 ? '#' + j.slot : '—' }}</td>
+          <template v-if="!compact">
+            <td class="right num" :title="peakRamTitle(j)">{{ peakRam(j) }}</td>
+            <td class="right num" :title="cpuTimeTitle(j)">{{ cpuTime(j) }}</td>
+            <td class="right small muted num nowrap" :title="pressureTitle(j)">{{ pressure(j) }}</td>
+          </template>
           <td class="right small muted" :title="when(j)">{{ whenShort(j) }}</td>
           <td class="actions"><JobLinks :job="j" /></td>
         </tr>
