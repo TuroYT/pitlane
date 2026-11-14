@@ -258,3 +258,42 @@ func TestAdoptedStrictRunnerKeepsStrictRelease(t *testing.T) {
 		})
 	}
 }
+
+// A runner container whose target label is missing or invalid (older
+// version, label lost) is untrusted: adopted as strict for no target, so its
+// slot is rebuilt. Without a valid slot label no slot is touched.
+func TestAdoptedRunnerWithoutTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+	}{{"missing", ""}, {"invalid", "x"}, {"zero", "0"}, {"negative", "-3"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newTestPool("shared", SlotState{Index: 0, Status: "ready"})
+			labels := map[string]string{LabelSlot: "0", LabelRunner: "pitlane-abc", LabelOwner: "acme", LabelStrict: "false"}
+			if tc.target != "" {
+				labels[LabelTarget] = tc.target
+			}
+			o := p.adoptContainer("cid", labels, "running", 0)
+			l := o.Lease()
+			if !o.Untrusted || !o.Strict || o.TargetID != 0 || !l.Strict || l.Owner != StrictOwner || l.TargetID != 0 {
+				t.Fatalf("orphan %+v lease %+v", o, l)
+			}
+			if s := p.slots[0]; s.Status != "busy" || s.Owner != StrictOwner {
+				t.Fatalf("slot of an untrusted runner must stay busy for the strict owner: %+v", s.SlotState)
+			}
+		})
+	}
+	t.Run("valid target", func(t *testing.T) {
+		p := newTestPool("shared", SlotState{Index: 0, Status: "ready"})
+		o := p.adoptContainer("cid", map[string]string{LabelSlot: "0", LabelTarget: "7", LabelStrict: "false"}, "running", 0)
+		if o.Untrusted || o.Strict || o.TargetID != 7 {
+			t.Fatalf("orphan %+v", o)
+		}
+	})
+	t.Run("no slot label", func(t *testing.T) {
+		p := newTestPool("shared", SlotState{Index: 0, Status: "ready"})
+		o := p.adoptContainer("cid", map[string]string{LabelTarget: "7"}, "running", 0)
+		if o.Slot != -1 || p.slots[0].Status != "ready" || len(p.slots) != 1 {
+			t.Fatalf("orphan %+v slots %+v", o, p.slots)
+		}
+	})
+}

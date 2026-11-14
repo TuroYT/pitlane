@@ -84,6 +84,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	targets, err := m.store.Targets()
+	if err != nil {
+		return fmt.Errorf("load targets: %w", err)
+	}
+	enabled := map[int64]bool{}
+	for _, t := range targets {
+		enabled[t.ID] = t.Enabled
+	}
 	running := map[string]*runner{}
 	for _, o := range orphans {
 		// Assume busy since the container was created: the job timeout then
@@ -95,6 +103,15 @@ func (m *Manager) Start(ctx context.Context) error {
 			r.busySince = time.Now()
 		}
 		r.runnerID = m.store.RunnerIDByName(o.Name)
+		if o.Untrusted || !enabled[o.TargetID] {
+			// No listener would ever watch it: stop it now. Its owner cannot
+			// be trusted, so its slot is rebuilt.
+			r.lease = untrustedLease(r.lease)
+			m.log.Warn("runner container from a previous run has no known enabled target, stopping it",
+				"container", o.Name, "id", o.ID, "target", o.TargetID, "slot", o.Slot, "running", o.Running)
+			go m.stopUntracked(r, o.Running)
+			continue
+		}
 		if !o.Running {
 			go m.finishRunner(nil, r)
 			continue
@@ -115,6 +132,29 @@ func (m *Manager) Start(ctx context.Context) error {
 	go m.EnforceStrictAll(ctx)
 	go m.loop(ctx)
 	return nil
+}
+
+// untrustedLease turns the lease of a runner whose target is unknown into a
+// strict one: its slot is rebuilt and handed to nobody before that.
+func untrustedLease(l pool.Lease) pool.Lease {
+	l.Strict, l.Owner, l.TargetID = true, pool.StrictOwner, 0
+	return l
+}
+
+// stopUntracked stops a runner container left by a previous run that no
+// target will adopt (target label missing or invalid, target deleted or
+// disabled), the same way as a job over its time limit, then finishes it:
+// logs archived, container removed (forcibly if the graceful stop failed),
+// slot released as strict.
+func (m *Manager) stopUntracked(r *runner, running bool) {
+	if running {
+		ctx, cancel := context.WithTimeout(context.Background(), timeoutStopGrace+time.Minute)
+		if err := m.pool.StopRunner(ctx, r.containerID, timeoutStopGrace); err != nil {
+			m.log.Error("stop untracked runner, removing it forcibly", "container", r.name, "id", r.containerID, "error", err)
+		}
+		cancel()
+	}
+	m.finishRunner(nil, r)
 }
 
 func (m *Manager) loop(ctx context.Context) {
@@ -755,7 +795,9 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 			m.forgetRunner(r.runnerID, client.removeRunner(ctx, r.runnerID))
 		}
 	}
-	m.pool.Release(ctx, r.lease)
+	if r.lease.Slot >= 0 { // -1: the container had no valid slot label
+		m.pool.Release(ctx, r.lease)
+	}
 	if t != nil {
 		t.mu.Lock()
 		delete(t.runners, r.name)
