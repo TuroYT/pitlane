@@ -28,7 +28,7 @@ jobs:
 
 ## Why Pitlane
 
-- **A fresh runner for every job, with warm caches.** Each job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs.
+- **A fresh runner for every job, with warm caches.** Each job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs, and `actions/cache` restores and saves from the Pitlane host instead of GitHub's cache, with no workflow change.
 - **Docker works as on GitHub.** `services:`, `container:` jobs and `docker build` work out of the box. Each slot has its own Docker-in-Docker daemon, and jobs never touch the host's Docker.
 - **Jobs start within seconds, with no public URL.** Pitlane long-polls GitHub through the official scale set API, the one GitHub's Kubernetes controller uses. There is no webhook to expose.
 - **A web UI to see what runs where.** Live slots and runners, every job traced back to its repository, workflow, branch or pull request and run on GitHub, wait and duration trends, runner logs, one-click repository enablement, settings applied live.

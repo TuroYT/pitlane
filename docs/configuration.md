@@ -11,8 +11,10 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | CPU weight per job | 0 (Docker default) | `cpu-shares`. It only matters when the host is saturated; a lone job uses every core. |
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`, pinned by digest) used by every slot. |
+| Actions cache | on | Serves `actions/cache` (and `setup-*` actions with `cache:`) from the Pitlane host, for non-strict jobs; strict jobs keep GitHub's cache. Entries are kept per repository and branch, never across owners. Turning it off applies to the next jobs and keeps the stored entries. See [How it works](how-it-works.md#actions-cache). |
+| Actions cache size | 20 GB | Total size of the stored entries; beyond it the least recently restored go first. Settings shows the current size and the hit/miss counters since start. |
 | Build cache kept per slot | 20 GB | `docker builder prune --keep-storage` after each job. |
-| Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
+| Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the least recently used actions cache entries, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
 | Runner image | `ghcr.io/turoyt/pitlane-runner:v<version>` | The runner image released with this Pitlane version: GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). It follows Pitlane upgrades, including when the settings page saved it; to stay on one image, give a digest (`name:tag@sha256:…`). Any image based on `ghcr.io/actions/actions-runner` works. |
 | Docker-in-Docker image | `docker:28-dind@sha256:…` | Pinned by digest ([images.go](../internal/pool/images.go)). |
 | Allowed GitHub users | first admin | Comma-separated logins. |
@@ -92,6 +94,9 @@ The checksum only proves that the binary is the one listed in its release. A fut
 | `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
 | `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |
 | `pitlane_disk_free_bytes`, `pitlane_disk_total_bytes` | gauge | filesystem of `/var/lib/docker` (or the data directory) |
+| `pitlane_actions_cache_bytes`, `pitlane_actions_cache_entries` | gauge | what the actions cache stores |
+| `pitlane_actions_cache_requests_total` | counter | `result` (hit, miss, save), since start |
+| `pitlane_actions_cache_evictions_total` | counter | entries evicted (size limit, low disk) since start |
 
 Access to `/metrics`: when a **metrics token** is set (Settings → Access), only `Authorization: Bearer <token>` is accepted. Without a token, signed-in users and clients connecting from the loopback address can read it. Requests carrying `X-Forwarded-For`, `X-Real-IP` or `Forwarded` never count as loopback, so a reverse proxy on the same host does not open it to everyone. With `--insecure-no-auth`, `/metrics` is open like the rest of the UI unless a token is set.
 
@@ -110,6 +115,7 @@ scrape_configs:
 | `PITLANE_DATA` | `--data` | `/var/lib/pitlane` | Database, master key, logs. **Back it up.** |
 | `PITLANE_BASE_URL` | `--base-url` | saved by the setup | URL you open in the browser (see [Base URL](#base-url)). |
 | `PITLANE_TRUSTED_PROXIES` | `--trusted-proxies` | | Comma-separated IPs or CIDRs of reverse proxies allowed to set the `Host` and `X-Forwarded-Proto` headers the base URL is derived from (loopback always is). |
+| `PITLANE_CACHE_LISTEN` | `--cache-listen` | `:8091` | Address of the actions cache. Runners reach it on the slot network's gateway (the host), or on Pitlane's own address on the slot network when Pitlane runs in a container. `off` disables it; if it cannot listen, Pitlane logs an error and jobs use GitHub's cache. Each request needs a per-job token. |
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; anything else stops Pitlane at start. |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |
@@ -147,6 +153,7 @@ and make sure nothing else can reach that port. Add targets manually in **Reposi
   pitlane.db      SQLite database (settings, targets, job history)
   master.key      encrypts the GitHub App private key and secrets: keep it with the db
   logs/           runner logs
+  actions-cache/  actions/cache entries (entries/<id>.bin + .json) and the key signing per-job tokens
   setup-token     only until the first admin signs in
 ```
 

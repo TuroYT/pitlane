@@ -1,6 +1,6 @@
 # Design: serving `actions/cache` from the Pitlane host
 
-Status: implemented in v0.3 (`internal/cache`). Sources checked on 2026-11-15
+Status: implemented in v0.3 (`internal/cache`, `internal/pool/actionscache.go`). Sources checked on 2026-11-15
 against `actions/runner` v2.338.2 (the version pinned in
 `images/runner/Dockerfile`) and `@actions/cache` 6.3.0 (`actions/toolkit` main).
 
@@ -149,11 +149,17 @@ already recommends the slot's local build cache instead.
 - Built into the Pitlane process, on its own listener (`--cache-listen`,
   default `:8091`), separate from the UI (no session auth, no reverse proxy).
 - The runner reaches it at the slot network's gateway (the host) on that port:
-  `PITLANE_CACHE_URL=http://<gateway>:8091/<token>/`. The shim appends
-  `$GITHUB_REPOSITORY/`.
+  `PITLANE_CACHE_URL=http://<gateway>:8091/<token>/`. When Pitlane itself runs
+  in a container (Compose), a published port is not reachable from another
+  bridge network (Docker's inter-network isolation), so Pitlane joins each
+  slot network, like the mirror, and advertises its address there. The shim
+  appends `$GITHUB_REPOSITORY/`.
 - Storage: `<data dir>/actions-cache/`, one `<id>.json` (metadata) and one
   `<id>.tgz` (archive) per entry, uploads in `tmp/`. The index is rebuilt by
   scanning at start; no database table, no migration.
+- Reservations must declare their size; unfinished uploads together stay
+  within the size limit (32 per runner at most) and are dropped when their
+  runner is revoked or after 24 hours.
 - Lookup semantics as GitHub (scopes from the `ac` claim, then exact key,
   key prefix, each restore key prefix, newest first). Entries are immutable,
   a reserve on an existing or pending key returns 409.
@@ -165,8 +171,9 @@ already recommends the slot's local build cache instead.
 
 - **Per-job credential.** For each non-strict runner, the pool registers the
   runner with the cache server and gets a token
-  `<runner name>.<HMAC-SHA256(key, runner name)>`; the key is random, kept in
-  the data directory (jobs cannot read it). The token is in the runner
+  `<runner name>.<HMAC-SHA256(key, runner name, owner, repository restriction)>`;
+  the key is random, kept in the data directory (jobs cannot read it), and the
+  runner name is random and used for one job only. The token is in the runner
   container's environment only. It is valid while the runner is registered:
   `Release` revokes it, and a runner adopted after a restart is re-registered
   from its container labels (owner, target), so tokens survive restarts.
@@ -197,3 +204,18 @@ already recommends the slot's local build cache instead.
 - Turning it off stops injecting `PITLANE_CACHE_URL` for new runners (the shim
   stays, inert) and keeps the stored entries until they are evicted or the
   directory is removed.
+
+## Tests
+
+- `internal/cache`: protocol handlers, matching rules, branch scopes, owner
+  and repository isolation, tokens (revocation, identity binding, restarts),
+  upload limits, LRU eviction, index reload; `TestNodeShim` runs the shim.
+- `PITLANE_E2E=1 go test ./internal/cache -run Toolkit` drives the real
+  `@actions/cache` client (6.3.0 by default; `PITLANE_E2E_TOOLKIT=4.1.0` or
+  `5.3.0` for the versions bundled in `actions/cache@v4`/`v5`) through the
+  shim, with the variables the runner sets on github.com
+  (`ACTIONS_CACHE_SERVICE_V2=True`, GitHub URLs): 40 MB save in two chunks,
+  restore by `restore-keys`, miss.
+- `PITLANE_E2E_DOCKER=1 go test ./internal/pool -run PinnedRunner` installs
+  the shim into the externals of the runner image pinned in
+  `images/runner/Dockerfile` and runs each Node runtime through it.
