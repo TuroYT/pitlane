@@ -105,12 +105,24 @@ jobs:
         with:
           images: ${{ matrix.image }}
           flavor: latest=false
-          # vX.Y.Z and vX.Y; latest only for final releases (pre-releases
-          # only get vX.Y.Z-rc.N).
-          tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          # Only for the labels: the tags are computed below (metadata-action
+          # dropped the literal "v" of its semver patterns).
+          tags: type=raw,value=unused
+      - id: tags
+        name: Image tags
+        env:
+          IMAGE: ${{ matrix.image }}
+          VERSION: ${{ needs.binaries.outputs.version }}
+        # vX.Y.Z (what Pitlane pulls by default for its own version), plus vX.Y
+        # and latest for final releases only.
+        run: |
+          tags="$IMAGE:v$VERSION"
+          case "$VERSION" in
+            *-*) ;;
+            *) tags="$tags,$IMAGE:v${VERSION%.*},$IMAGE:latest" ;;
+          esac
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "$tags"
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -118,7 +130,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: VERSION=${{ needs.binaries.outputs.version }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
           provenance: mode=max
