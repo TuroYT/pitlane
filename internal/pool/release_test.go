@@ -20,6 +20,14 @@ type fakeSlotOps struct {
 	err     error
 	wipes   int
 	wipeErr error
+	removed []string
+}
+
+func (f *fakeSlotOps) removeVolume(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, name)
+	return nil
 }
 
 func (f *fakeSlotOps) exec(_ context.Context, _, script string) (string, int, error) {
@@ -163,5 +171,52 @@ func TestReleaseSuccess(t *testing.T) {
 	}
 	if strings.Contains(ops.scripts[0], "\ntrue") {
 		t.Fatal("the cleanup result must not be masked")
+	}
+}
+
+// A runner adopted after a restart must be released the way it was started:
+// a strict one (or one from an older version, without the label) rebuilds
+// its slot even with the shared cache scope, and its slot is never handed
+// to another owner meanwhile.
+func TestAdoptedStrictRunnerKeepsStrictRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		strict bool
+	}{
+		{"strict", map[string]string{LabelStrict: "true"}, true},
+		{"older version without label", map[string]string{}, true},
+		{"unreadable label", map[string]string{LabelStrict: "yes"}, true},
+		{"not strict", map[string]string{LabelStrict: "false"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeSlotOps{}
+			p := newTestPool("shared", SlotState{Index: 0, Status: "ready"}, SlotState{Index: 1, Status: "ready", Owner: "other"})
+			p.sops = ops
+			tc.labels[LabelSlot], tc.labels[LabelTarget], tc.labels[LabelRunner], tc.labels[LabelOwner] = "0", "7", "pitlane-abc", "acme"
+			o := p.adoptContainer("cid", tc.labels, "running", 0)
+			l := o.Lease()
+			if o.Strict != tc.strict || l.Strict != tc.strict || l.Runner != "pitlane-abc" || l.TargetID != 7 {
+				t.Fatalf("orphan %+v lease %+v", o, l)
+			}
+			wantOwner := "acme"
+			if tc.strict {
+				wantOwner = StrictOwner
+			}
+			if s := p.slots[0]; s.Owner != wantOwner || s.Status != "busy" || l.Owner != wantOwner {
+				t.Fatalf("adopted slot %+v lease owner %q, want owner %q", s.SlotState, l.Owner, wantOwner)
+			}
+			if !tc.strict {
+				return // normal Release (covered elsewhere; its pnpm sync needs Docker)
+			}
+			p.Release(context.Background(), l)
+			if ops.wipes != 1 || len(ops.scripts) != 0 || p.slots[0].Owner != "" {
+				t.Fatalf("strict runner must rebuild its slot: wipes=%d scripts=%d owner=%q", ops.wipes, len(ops.scripts), p.slots[0].Owner)
+			}
+			cache, tools := strictVolumes("pitlane-abc")
+			if strings.Join(ops.removed, ",") != cache+","+tools {
+				t.Fatalf("throwaway caches not removed: %v", ops.removed)
+			}
+		})
 	}
 }

@@ -41,6 +41,11 @@ const (
 	LabelTarget  = "dev.pitlane.target"
 	LabelRunner  = "dev.pitlane.runner"
 	LabelOwner   = "dev.pitlane.owner"
+	// LabelStrict records on a runner container whether its job runs in
+	// strict isolation ("true" or "false"), so a runner adopted after a
+	// restart is released the same way. Missing (containers of older
+	// versions) counts as strict: fail closed.
+	LabelStrict = "dev.pitlane.strict"
 
 	mirrorName    = "pitlane-mirror"
 	mirrorNetwork = "pitlane-mirror"
@@ -171,6 +176,8 @@ type slotOps interface {
 	// wipe deletes the slot container and its volumes from the host side
 	// and recreates them empty.
 	wipe(ctx context.Context, slot int) error
+	// removeVolume deletes a Docker volume (nil when it does not exist).
+	removeVolume(ctx context.Context, name string) error
 }
 
 func (p *Pool) ops() slotOps {
@@ -188,6 +195,13 @@ func (d dockerSlotOps) exec(ctx context.Context, container, script string) (stri
 }
 
 func (d dockerSlotOps) auditBinfmt(ctx context.Context) { d.p.auditBinfmt(ctx) }
+
+func (d dockerSlotOps) removeVolume(ctx context.Context, name string) error {
+	if err := d.p.cli.VolumeRemove(ctx, name, true); err != nil && !cerrdefs.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
 
 func (d dockerSlotOps) wipe(ctx context.Context, slot int) error {
 	if err := d.p.resetSlot(ctx, slot); err != nil {
@@ -964,7 +978,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	if l.Runner != "" {
 		c, t := strictVolumes(l.Runner)
 		for _, v := range []string{c, t} {
-			if rerr := p.cli.VolumeRemove(ctx, v, true); rerr != nil && !cerrdefs.IsNotFound(rerr) && err == nil {
+			if rerr := p.ops().removeVolume(ctx, v); rerr != nil && err == nil {
 				err = rerr
 			}
 			p.mu.Lock()
@@ -1267,6 +1281,7 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		Labels: map[string]string{
 			LabelManaged: "true", LabelRole: "runner", LabelSlot: strconv.Itoa(slotIdx),
 			LabelTarget: strconv.FormatInt(spec.TargetID, 10), LabelRunner: spec.Name, LabelOwner: spec.Owner,
+			LabelStrict: strconv.FormatBool(spec.Lease.Strict),
 		},
 	}, hc, nil, nil, spec.Name)
 	if err != nil {
@@ -1332,9 +1347,21 @@ type Orphan struct {
 	Name     string
 	Slot     int
 	TargetID int64
-	Owner    string
+	Owner    string // GitHub owner of the target
+	Strict   bool   // strict isolation (also for containers without the label)
 	Running  bool
 	Created  time.Time
+}
+
+// Lease returns the lease of the slot an adopted runner holds, so that its
+// release goes through the same path as if Pitlane had not restarted: a
+// strict runner's slot is rebuilt and its throwaway caches removed.
+func (o Orphan) Lease() Lease {
+	l := Lease{Slot: o.Slot, Owner: o.Owner, TargetID: o.TargetID, Strict: o.Strict, Runner: o.Name}
+	if o.Strict {
+		l.Owner = StrictOwner
+	}
+	return l
 }
 
 // RunnerContainers lists runner containers left by a previous run and marks
@@ -1347,19 +1374,29 @@ func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
 	}
 	var out []Orphan
 	for _, c := range list {
-		slotIdx, _ := strconv.Atoi(c.Labels[LabelSlot])
-		tid, _ := strconv.ParseInt(c.Labels[LabelTarget], 10, 64)
-		o := Orphan{ID: c.ID, Name: c.Labels[LabelRunner], Slot: slotIdx, TargetID: tid, Owner: c.Labels[LabelOwner], Running: c.State == "running", Created: time.Unix(c.Created, 0)}
-		out = append(out, o)
-		p.mu.Lock()
-		if s, ok := p.slots[slotIdx]; ok {
-			s.Status, s.Owner, s.TargetID, s.Runner = "busy", o.Owner, tid, o.Name
-		} else {
-			p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: "busy", Owner: o.Owner, TargetID: tid, Runner: o.Name, Since: time.Now().Unix()}}
-		}
-		p.mu.Unlock()
+		out = append(out, p.adoptContainer(c.ID, c.Labels, c.State, c.Created))
 	}
 	return out, nil
+}
+
+// adoptContainer marks the slot of a runner container left by a previous
+// run as busy and returns it. A strict runner's slot gets the strict owner
+// back (the label carries the target's real owner): nobody else may get the
+// slot without a rebuild.
+func (p *Pool) adoptContainer(id string, labels map[string]string, state string, created int64) Orphan {
+	slotIdx, _ := strconv.Atoi(labels[LabelSlot])
+	tid, _ := strconv.ParseInt(labels[LabelTarget], 10, 64)
+	o := Orphan{ID: id, Name: labels[LabelRunner], Slot: slotIdx, TargetID: tid, Owner: labels[LabelOwner],
+		Strict: labels[LabelStrict] != "false", Running: state == "running", Created: time.Unix(created, 0)}
+	owner := o.Lease().Owner
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s, ok := p.slots[slotIdx]; ok {
+		s.Status, s.Owner, s.TargetID, s.Runner = "busy", owner, tid, o.Name
+	} else {
+		p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: "busy", Owner: owner, TargetID: tid, Runner: o.Name, Since: time.Now().Unix()}}
+	}
+	return o
 }
 
 // EnsureImage pulls an image if missing (or always when force is set).

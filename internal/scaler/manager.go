@@ -78,7 +78,9 @@ func (m *Manager) Start(ctx context.Context) error {
 	for _, o := range orphans {
 		// Assume busy since the container was created: the job timeout then
 		// still applies after a restart.
-		r := &runner{name: o.Name, containerID: o.ID, lease: pool.Lease{Slot: o.Slot, Owner: o.Owner}, busy: true, startedAt: time.Now(), busySince: o.Created}
+		// The lease comes from the container's labels: a strict runner is
+		// released (slot rebuilt, throwaway caches removed) as strict.
+		r := &runner{name: o.Name, containerID: o.ID, lease: o.Lease(), busy: true, startedAt: time.Now(), busySince: o.Created}
 		if o.Created.Year() < 2000 {
 			r.busySince = time.Now()
 		}
@@ -87,7 +89,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			go m.finishRunner(nil, r)
 			continue
 		}
-		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot)
+		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot, "strict", o.Strict)
 		m.mu.Lock()
 		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
 		m.mu.Unlock()
