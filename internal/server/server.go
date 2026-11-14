@@ -56,9 +56,11 @@ type Server struct {
 	compare    compareCache
 	// strictCheck replaces StrictReason in tests.
 	strictCheck func(ctx context.Context, t store.Target) (string, error)
-	jobIDs      sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
-	mu          sync.Mutex
-	states      map[string]time.Time // OAuth / manifest states
+	// exchangeCode replaces gh.ExchangeCode (OAuth code -> login) in tests.
+	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error)
+	jobIDs       sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
+	mu           sync.Mutex
+	states       map[string]time.Time // OAuth / manifest states
 }
 
 // New creates the server. web is the built UI (may be nil).
@@ -453,7 +455,11 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, _ := s.store.GetSecret("app_client_secret")
-	login, err := gh.ExchangeCode(r.Context(), s.store.Get("app_client_id", ""), secret, r.URL.Query().Get("code"), s.baseURL(r)+"/auth/callback")
+	exchange := gh.ExchangeCode
+	if s.exchangeCode != nil {
+		exchange = s.exchangeCode
+	}
+	login, err := exchange(r.Context(), s.store.Get("app_client_id", ""), secret, r.URL.Query().Get("code"), s.baseURL(r)+"/auth/callback")
 	if err != nil {
 		s.log.Error("oauth", "error", err)
 		http.Redirect(w, r, "/login?error=oauth", http.StatusFound)
