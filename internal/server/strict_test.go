@@ -152,3 +152,45 @@ func TestWarmRunnerDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestDuplicateRepoAndOrgTargets(t *testing.T) {
+	s := newStrictServer(t, fakeGitHub{"acme": "", "acme/api": "", "acme/web": "", "other/api": ""})
+	if code, _, _ := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"org","owner":"acme"}`); code != 200 {
+		t.Fatal("org target")
+	}
+	code, _, body := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"repo","owner":"ACME","repo":"api"}`)
+	if code != http.StatusConflict || !strings.Contains(body, "only one of them") {
+		t.Fatalf("repository with its organization's label accepted: %d %s", code, body)
+	}
+	for _, ok := range []string{
+		`{"kind":"repo","owner":"acme","repo":"api","scaleSetName":"api-runners"}`, // another label
+		`{"kind":"repo","owner":"other","repo":"api"}`,                             // another owner
+	} {
+		if code, _, body := call(t, s.handleCreateTarget, "POST", "/api/targets", "", ok); code != 200 {
+			t.Errorf("%s: %d %s", ok, code, body)
+		}
+	}
+	// Disabled org: a repository may take the label; re-enabling the org
+	// or relabelling the repository onto it is then refused.
+	if code, _, _ := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/1", "1", `{"enabled":false}`); code != 200 {
+		t.Fatal("disable org")
+	}
+	if code, _, body := call(t, s.handleCreateTarget, "POST", "/api/targets", "", `{"kind":"repo","owner":"acme","repo":"web"}`); code != 200 {
+		t.Fatalf("org disabled: %d %s", code, body)
+	}
+	if code, _, _ := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/1", "1", `{"enabled":true}`); code != http.StatusConflict {
+		t.Fatalf("re-enabling the org over a repository with its label: %d", code)
+	}
+	for _, step := range []struct{ id, body string }{{"4", `{"enabled":false}`}, {"1", `{"enabled":true}`}} {
+		if code, _, body := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/"+step.id, step.id, step.body); code != 200 {
+			t.Fatalf("%s %s: %d %s", step.id, step.body, code, body)
+		}
+	}
+	if code, _, _ := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/2", "2", `{"scaleSetName":"Pitlane"}`); code != http.StatusConflict {
+		t.Fatalf("relabelling acme/api onto its organization's label: %d", code)
+	}
+	// Unrelated changes of an existing target stay possible.
+	if code, _, body := call(t, s.handleUpdateTarget, "PATCH", "/api/targets/1", "1", `{"maxRunners":3}`); code != 200 {
+		t.Fatalf("%d %s", code, body)
+	}
+}

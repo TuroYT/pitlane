@@ -784,6 +784,51 @@ func newTarget(body io.Reader, slots int) (store.Target, targetOptions, error) {
 	return t, opts, nil
 }
 
+// duplicateTarget returns an enabled target that would compete with t for
+// the same jobs: a repository and its organisation both serving the same
+// label. GitHub then routes the jobs to one scale set only; the other holds
+// slots for nothing.
+func duplicateTarget(t store.Target, all []store.Target) (store.Target, bool) {
+	if !t.Enabled {
+		return store.Target{}, false
+	}
+	for _, o := range all {
+		if o.ID != t.ID && o.Enabled && o.Kind != t.Kind && strings.EqualFold(o.Owner, t.Owner) &&
+			strings.EqualFold(scaleSetName(o), scaleSetName(t)) {
+			return o, true
+		}
+	}
+	return store.Target{}, false
+}
+
+func scaleSetName(t store.Target) string {
+	if t.ScaleSetName == "" {
+		return "pitlane" // store default
+	}
+	return t.ScaleSetName
+}
+
+// checkDuplicate writes a 409 and returns false when t would duplicate an
+// enabled target.
+func (s *Server) checkDuplicate(w http.ResponseWriter, t store.Target) bool {
+	all, err := s.store.Targets()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if o, dup := duplicateTarget(t, all); dup {
+		repo, org := t, o
+		if t.Kind == "org" {
+			repo, org = o, t
+		}
+		writeErr(w, http.StatusConflict, fmt.Sprintf("the repository %s and the organization %s would both serve the label %q: "+
+			"GitHub sends each job to only one of them, the other just holds slots. Give one of them another label, or disable one",
+			repo.FullName(), org.FullName(), scaleSetName(t)))
+		return false
+	}
+	return true
+}
+
 // strictRequiredError rejects turning strict mode off for a target that
 // must run strict.
 type strictRequiredError struct {
@@ -873,6 +918,9 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !s.checkDuplicate(w, t) {
+		return
+	}
 	created, err := s.store.CreateTarget(t)
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -909,6 +957,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	wasEnabled, oldLabel := t.Enabled, t.ScaleSetName
 	if body.Enabled != nil {
 		t.Enabled = *body.Enabled
 	}
@@ -947,6 +996,9 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		t.ScaleSetName, t.ScaleSetID = *body.ScaleSetName, 0
 	}
 	t.MinRunners = min(t.MinRunners, t.MaxRunners)
+	if t.Enabled && (!wasEnabled || !strings.EqualFold(t.ScaleSetName, oldLabel)) && !s.checkDuplicate(w, t) {
+		return
+	}
 	if err := s.store.UpdateTarget(t); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
