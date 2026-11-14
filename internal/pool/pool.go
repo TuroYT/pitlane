@@ -121,8 +121,10 @@ type slot struct {
 	dirty bool
 }
 
-// UnknownOwner marks a slot whose previous owner is not known; it is wiped
-// before its first job. Parentheses never appear in GitHub logins.
+// UnknownOwner marks a slot whose previous owner is not known (no or lost
+// persisted state): it is wiped before its first job, whatever the cache
+// scope, since it may hold a strict job's data. Parentheses never appear in
+// GitHub logins.
 const UnknownOwner = "(unknown)"
 
 // StrictOwner marks a slot running a strict-isolation job: it is wiped before
@@ -199,7 +201,11 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 	p := &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, externals: map[int]string{},
 		restored: map[int]persistedSlot{}, released: make(chan struct{}, 1)}
 	if b, err := os.ReadFile(cfg.StateFile); err == nil {
-		_ = json.Unmarshal(b, &p.restored)
+		if err := json.Unmarshal(b, &p.restored); err != nil {
+			// Fail closed: every slot restores with an unknown owner.
+			log.Error("slot state unreadable, every slot will be wiped before its first job", "file", cfg.StateFile, "error", err)
+			p.restored = map[int]persistedSlot{}
+		}
 		if pruneRetired(p.restored, cfg.Slots, p.slots) > 0 {
 			p.saveLocked()
 		}
@@ -216,13 +222,10 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 // count that no longer exist (left by a former, higher slot count) and
 // returns how many were dropped. Forgetting a slot is fail closed: if it
 // comes back, its owner is unknown and it is wiped before its first job.
-// The one exception is a slot last used by a strict job: with the shared
-// cache scope an unknown owner is not wiped but a strict one is, so that
-// entry is kept.
 func pruneRetired(state map[int]persistedSlot, slots int, live map[int]*slot) int {
 	n := 0
-	for i, st := range state {
-		if i < slots || live[i] != nil || st.Owner == StrictOwner {
+	for i := range state {
+		if i < slots || live[i] != nil {
 			continue
 		}
 		delete(state, i)
@@ -247,11 +250,40 @@ func (p *Pool) saveLocked() {
 	}
 	pruneRetired(out, p.cfg.Slots, p.slots)
 	p.restored = out
-	b, _ := json.Marshal(out)
-	tmp := p.cfg.StateFile + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err == nil {
-		_ = os.Rename(tmp, p.cfg.StateFile)
+	if err := writeState(p.cfg.StateFile, out); err != nil {
+		// Fail closed: a stale file could restore an owner that no longer
+		// matches the slot's data, and skip its wipe. Without a file every
+		// slot restores with an unknown owner and is wiped.
+		p.log.Error("cannot persist slot ownership, removing the state file: slots will be wiped after a restart", "file", p.cfg.StateFile, "error", err)
+		if rerr := os.Remove(p.cfg.StateFile); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			p.log.Error("cannot remove the stale slot state file: remove it before restarting Pitlane", "file", p.cfg.StateFile, "error", rerr)
+		}
 	}
+}
+
+// writeState atomically replaces the state file.
+func writeState(file string, state map[int]persistedSlot) error {
+	b, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	tmp := file + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if serr := f.Sync(); err == nil {
+		err = serr
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, file)
 }
 
 // Docker exposes the Docker client (used for logs).
@@ -834,7 +866,11 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64, strict
 		p.mu.Unlock()
 		return Lease{}, false
 	}
-	needWipe := (p.cfg.CacheScope == "owner" || strict || best.Owner == StrictOwner) && best.Owner != "" && (best.Owner != owner || strict)
+	// The shared scope lets owners share caches, but a slot left by a strict
+	// job, or whose last owner is unknown (it may have been a strict job), is
+	// always wiped.
+	sticky := best.Owner == StrictOwner || best.Owner == UnknownOwner
+	needWipe := (p.cfg.CacheScope == "owner" || strict || sticky) && best.Owner != "" && (best.Owner != owner || strict)
 	best.Status, best.Since = "busy", time.Now().Unix()
 	if !needWipe && (best.Owner != owner || best.TargetID != targetID) {
 		best.Owner, best.TargetID = owner, targetID

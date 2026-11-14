@@ -71,6 +71,64 @@ func TestAcquireSharedScopeNoWipe(t *testing.T) {
 	}
 }
 
+func TestAcquireSharedScopeWipesUnknownOwner(t *testing.T) {
+	p := newTestPool("shared", SlotState{Index: 0, Status: "ready", Owner: UnknownOwner})
+	if l, _ := p.Acquire(context.Background(), "acme", 1, false); !l.wipe {
+		t.Fatal("an unknown owner may have been a strict job: it must be wiped in the shared scope too")
+	}
+}
+
+func TestStateWriteFailureForgetsOwners(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "slots.json")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p, err := New(Config{Slots: 1, StateFile: file, CacheScope: "shared"}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.slots[0] = &slot{SlotState: SlotState{Index: 0, Owner: StrictOwner}}
+	p.mu.Lock()
+	p.saveLocked()
+	p.mu.Unlock()
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("state not written")
+	}
+	// The next write fails (the temporary file cannot be created): the
+	// stale file must not survive, it would restore the old owner.
+	if err := os.Mkdir(file+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	p.slots[0].Owner = "acme"
+	p.saveLocked()
+	p.mu.Unlock()
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("stale state file kept after a failed write: %v", err)
+	}
+	// After a restart the slot's owner is unknown, so it is wiped.
+	p2, err := New(Config{Slots: 1, StateFile: file, CacheScope: "shared"}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, known := p2.restored[0]; known {
+		t.Fatal("owner restored without a state file")
+	}
+}
+
+func TestCorruptStateRestoresNothing(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "slots.json")
+	if err := os.WriteFile(file, []byte(`{"0":{"owner":"acme"},"1":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{Slots: 2, StateFile: file}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.restored) != 0 {
+		t.Fatalf("corrupt state partly restored: %+v", p.restored)
+	}
+}
+
 func TestAcquireStrict(t *testing.T) {
 	p := newTestPool("shared",
 		SlotState{Index: 0, Status: "ready", Owner: "acme", TargetID: 1},
@@ -149,14 +207,14 @@ func TestPruneRetiredSlotState(t *testing.T) {
 		0: {Owner: "acme"},
 		3: {Owner: "acme"},       // beyond the slot count, gone: dropped
 		4: {Owner: "acme"},       // beyond the slot count but still live: kept
-		5: {Owner: StrictOwner},  // left by a strict job: kept (shared scope wipes it)
+		5: {Owner: StrictOwner},  // dropped: an unknown owner is wiped in every scope
 		6: {Owner: UnknownOwner}, // dropped: forgetting it is the same
 	}
 	live := map[int]*slot{0: {}, 4: {}}
-	if n := pruneRetired(state, 2, live); n != 2 {
-		t.Fatalf("dropped %d, want 2", n)
+	if n := pruneRetired(state, 2, live); n != 3 {
+		t.Fatalf("dropped %d, want 3", n)
 	}
-	for _, i := range []int{0, 4, 5} {
+	for _, i := range []int{0, 4} {
 		if _, ok := state[i]; !ok {
 			t.Errorf("slot %d dropped", i)
 		}
