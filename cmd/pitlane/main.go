@@ -119,7 +119,10 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	<-ctx.Done()
 	log.Info("shutting down (busy runners keep running and are adopted on restart)")
 	mgr.Shutdown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return httpSrv.Shutdown(shutdownCtx)
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		_ = httpSrv.Close() // long-lived event streams (open browser tabs)
+	}
+	return nil
 }

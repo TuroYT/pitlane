@@ -39,10 +39,10 @@ then the same owner, then any free slot.
 | Cache | Scope | Location |
 | --- | --- | --- |
 | Docker images, layers, buildx cache | per slot | `pitlane-slot-N-docker` volume |
-| Toolchains (`setup-*` actions) | global | `pitlane-toolcache` volume → `/opt/hostedtoolcache` |
+| Toolchains (`setup-*` actions) | per owner (or global) | `pitlane-toolcache-<owner>` volume → `/opt/hostedtoolcache` |
 | npm, pnpm, yarn, bun, pip, Go modules | per owner (or global) | `pitlane-cache-<owner>` volume → `/home/runner/.cache` |
 | Docker Hub mirror | global | `pitlane-mirror-data` volume |
-| Downloaded actions | per slot | `_work/_actions` in `pitlane-slot-N-work` |
+| Downloaded actions | per slot (wiped when the slot changes owner) | `_work/_actions` in `pitlane-slot-N-work` |
 
 ## Lifecycle and restarts
 

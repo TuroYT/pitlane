@@ -4,12 +4,16 @@
 
 - Jobs **never** get the host's Docker socket. Each slot runs its own Docker
   daemon (Docker-in-Docker, privileged container), and a job only controls that
-  daemon.
+  daemon. The slot daemon's API listens on loopback only and is reachable only
+  by the runner that shares the slot's network namespace. Slots never share a
+  network with each other.
 - Because slot daemons are privileged, a malicious job could escape to the Pitlane
   host. **Treat the host as dedicated to CI**, ideally a VM or an LXC container used
   only for Pitlane.
 - With the default cache scope (`owner`), caches never cross GitHub owners: a slot
-  that switches to another user or organization is wiped first.
+  that switches to another user or organization is wiped first (images, build
+  cache, downloaded actions), and package/toolchain caches are separate volumes
+  per owner. If a wipe fails, the slot is destroyed and rebuilt empty.
 - **Do not enable public repositories** unless you understand the risk: anyone can
   open a pull request that runs code on your runners. The UI flags public repositories.
 

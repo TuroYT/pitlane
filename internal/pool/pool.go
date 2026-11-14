@@ -40,9 +40,15 @@ const (
 
 	mirrorName    = "pitlane-mirror"
 	mirrorNetwork = "pitlane-mirror"
-	toolcacheVol  = "pitlane-toolcache"
 	runnerUID     = "1001:1001"
 	workDir       = "/home/runner/_work"
+	// The slot daemon only listens on loopback: the runner shares the slot's
+	// network namespace, nothing else can reach the Docker API.
+	dindAddr = "tcp://127.0.0.1:2375"
+	// Bumped whenever the slot container definition changes: older slots are
+	// recreated (their volumes, hence their cache, are kept).
+	slotSpecVersion = "2"
+	LabelSpec       = "dev.pitlane.spec"
 )
 
 // Config tunes the pool. Every field can change at runtime via Configure.
@@ -149,10 +155,34 @@ func (p *Pool) Start(ctx context.Context) error {
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
 	}
-	if err := p.ensureVolume(ctx, toolcacheVol); err != nil {
-		return err
-	}
+	go p.retryFailed(ctx)
 	return p.Configure(ctx, cfg)
+}
+
+// retryFailed restarts slots in error every 30 seconds.
+func (p *Pool) retryFailed(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		p.mu.Lock()
+		var failed []int
+		for i, s := range p.slots {
+			if s.Status == "error" && !s.retire {
+				s.Status = "starting"
+				failed = append(failed, i)
+			}
+		}
+		p.mu.Unlock()
+		for _, i := range failed {
+			p.log.Info("retrying slot", "slot", i)
+			go p.startSlot(ctx, i)
+		}
+	}
 }
 
 // Configure applies a new configuration: slots are added or retired, other
@@ -258,11 +288,11 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 	info, err := p.cli.ContainerInspect(ctx, name)
 	switch {
 	case errdefs.IsNotFound(err):
-		cmd := []string{"--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--tls=false"}
+		cmd := []string{"--host=" + dindAddr, "--host=unix:///var/run/docker.sock", "--tls=false"}
 		if cfg.Mirror {
 			cmd = append(cmd, "--registry-mirror=http://"+mirrorName+":5000")
 		}
-		labels := map[string]string{LabelManaged: "true", LabelRole: "dind", LabelSlot: strconv.Itoa(i)}
+		labels := map[string]string{LabelManaged: "true", LabelRole: "dind", LabelSlot: strconv.Itoa(i), LabelSpec: slotSpecVersion}
 		hc := &container.HostConfig{
 			Privileged:    true,
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
@@ -275,24 +305,36 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 			hc.Memory = cfg.MemoryMB * 1024 * 1024
 		}
 		_, err = p.cli.ContainerCreate(ctx, &container.Config{
-			Image:    cfg.DindImage,
-			Cmd:      cmd,
-			Env:      []string{"DOCKER_TLS_CERTDIR="},
-			Labels:   labels,
-			Hostname: name,
+			Image: cfg.DindImage,
+			// Skip dockerd-entrypoint.sh: it would add its own TCP listener on
+			// 0.0.0.0. The "dind" wrapper only prepares cgroups and mounts.
+			Entrypoint: []string{"dind", "dockerd"},
+			Cmd:        cmd,
+			Env:        []string{"DOCKER_TLS_CERTDIR="},
+			Labels:     labels,
+			Hostname:   name,
 		}, hc, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{slotNetwork(i): {Aliases: []string{name}}}}, nil, name)
 		if err != nil {
 			return fmt.Errorf("create dind: %w", err)
 		}
-		if cfg.Mirror {
-			if err := p.cli.NetworkConnect(ctx, mirrorNetwork, name, nil); err != nil {
-				p.log.Warn("connect slot to mirror network", "slot", i, "error", err)
-			}
-		}
 	case err != nil:
 		return err
+	case info.Config.Labels[LabelSpec] != slotSpecVersion:
+		// Slot created by an older Pitlane (Docker API on all interfaces):
+		// recreate it, its volumes (and cache) are kept.
+		p.log.Info("recreating slot with hardened settings", "slot", i)
+		if err := p.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
+			return err
+		}
+		return p.ensureSlot(ctx, i)
 	case info.State != nil && info.State.Running:
+		if cfg.Mirror {
+			p.connectMirror(ctx, i)
+		}
 		return p.waitDind(ctx, name)
+	}
+	if cfg.Mirror {
+		p.connectMirror(ctx, i)
 	}
 	if err := p.cli.ContainerStart(ctx, name, container.StartOptions{}); err != nil {
 		return fmt.Errorf("start dind: %w", err)
@@ -303,6 +345,16 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 	// The work directory is shared with runner containers (uid 1001).
 	_, _, err = p.exec(ctx, name, "chown "+runnerUID+" "+workDir)
 	return err
+}
+
+// connectMirror attaches the mirror to the slot's own network so slots never
+// share a network with each other.
+func (p *Pool) connectMirror(ctx context.Context, i int) {
+	_ = p.cli.NetworkDisconnect(ctx, mirrorNetwork, slotName(i), true) // layout of older versions
+	err := p.cli.NetworkConnect(ctx, slotNetwork(i), mirrorName, &network.EndpointSettings{Aliases: []string{mirrorName}})
+	if err != nil && !errdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
+		p.log.Warn("connect mirror to slot network", "slot", i, "error", err)
+	}
 }
 
 func (p *Pool) waitDind(ctx context.Context, name string) error {
@@ -326,6 +378,20 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 	p.mu.Lock()
 	delete(p.slots, i)
 	p.mu.Unlock()
+}
+
+// rebuildSlot deletes a slot with all its volumes and starts it again empty.
+func (p *Pool) rebuildSlot(ctx context.Context, i int) {
+	_ = p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
+	p.DropSlotCache(ctx, i)
+	p.mu.Lock()
+	if s, ok := p.slots[i]; ok {
+		s.Owner, s.TargetID = "", 0
+	}
+	delete(p.chowned, slotDocker(i))
+	delete(p.chowned, slotWork(i))
+	p.mu.Unlock()
+	p.startSlot(ctx, i)
 }
 
 // DropSlotCache deletes a retired slot's volumes (frees disk).
@@ -375,8 +441,15 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 	p.mu.Unlock()
 
 	if needWipe {
-		p.log.Info("slot changes owner, wiping its Docker cache", "slot", idx, "owner", owner)
-		_, _, _ = p.exec(ctx, slotName(idx), "docker system prune -af --volumes >/dev/null 2>&1; docker builder prune -af >/dev/null 2>&1; true")
+		p.log.Info("slot changes owner, wiping its caches", "slot", idx, "owner", owner)
+		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions"
+		if _, code, err := p.exec(ctx, slotName(idx), script); err != nil || code != 0 {
+			// Never hand out a slot that may still hold another owner's data.
+			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", idx, "code", code, "error", err)
+			p.setStatus(idx, "starting", "")
+			go p.rebuildSlot(context.Background(), idx)
+			return Lease{}, false
+		}
 	}
 	return Lease{Slot: idx, Owner: owner}, true
 }
@@ -472,8 +545,11 @@ func cacheVolume(scope, owner string) string {
 func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error) {
 	cfg := p.Config()
 	cacheVol := cacheVolume(cfg.CacheScope, spec.Owner)
-	if err := p.ensureVolume(ctx, cacheVol); err != nil {
-		return "", err
+	toolVol := strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
+	for _, v := range []string{cacheVol, toolVol} {
+		if err := p.ensureVolume(ctx, v); err != nil {
+			return "", err
+		}
 	}
 	slotIdx := spec.Lease.Slot
 	env := []string{
@@ -498,7 +574,7 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
 		Mounts: []mount.Mount{
 			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
-			{Type: mount.TypeVolume, Source: toolcacheVol, Target: "/opt/hostedtoolcache"},
+			{Type: mount.TypeVolume, Source: toolVol, Target: "/opt/hostedtoolcache"},
 			{Type: mount.TypeVolume, Source: cacheVol, Target: "/home/runner/.cache"},
 		},
 	}

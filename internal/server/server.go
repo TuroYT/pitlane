@@ -212,8 +212,10 @@ func (s *Server) setCookie(w http.ResponseWriter, r *http.Request, name, value s
 		Secure: strings.HasPrefix(s.baseURL(r), "https://"), SameSite: http.SameSiteLaxMode})
 }
 
-func (s *Server) newState() string {
-	st := randomHex(16)
+// newState returns a random state bound to a purpose ("manifest" or "oauth")
+// so one flow's state can never be replayed in the other.
+func (s *Server) newState(purpose string) string {
+	st := purpose + "." + randomHex(16)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, t := range s.states {
@@ -225,7 +227,10 @@ func (s *Server) newState() string {
 	return st
 }
 
-func (s *Server) consumeState(st string) bool {
+func (s *Server) consumeState(purpose, st string) bool {
+	if !strings.HasPrefix(st, purpose+".") {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.states[st]
@@ -275,8 +280,7 @@ func (s *Server) handleSetupUnlock(w http.ResponseWriter, r *http.Request) {
 // handleSetupManifest returns what the browser must POST to github.com to
 // create the GitHub App.
 func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
-	_, signedIn := s.currentUser(r)
-	if !s.hasSetupCookie(r) && !signedIn {
+	if !s.canManageApp(r) {
 		writeErr(w, http.StatusForbidden, "setup is locked")
 		return
 	}
@@ -300,7 +304,8 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 		name = "Pitlane " + randomHex(3)
 	}
 	manifest, _ := json.Marshal(gh.Manifest(name, base))
-	state := s.newState()
+	state := s.newState("manifest")
+	s.setCookie(w, r, stateCookie, state, 900)
 	action := "https://github.com/settings/apps/new?state=" + state
 	if org := strings.TrimSpace(body.Org); org != "" {
 		action = "https://github.com/organizations/" + org + "/settings/apps/new?state=" + state
@@ -308,8 +313,20 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"action": action, "manifest": string(manifest)})
 }
 
+// canManageApp reports whether the request may create the GitHub App: during
+// first setup it needs the setup token cookie, afterwards a signed-in admin.
+func (s *Server) canManageApp(r *http.Request) bool {
+	if !s.appConfigured() && s.store.Get("allowed_users", "") == "" {
+		return s.hasSetupCookie(r)
+	}
+	_, signedIn := s.currentUser(r)
+	return signedIn && !s.cfg.InsecureNoAuth || (s.cfg.InsecureNoAuth && !s.appConfigured())
+}
+
 func (s *Server) handleSetupCallback(w http.ResponseWriter, r *http.Request) {
-	if !s.consumeState(r.URL.Query().Get("state")) {
+	st := r.URL.Query().Get("state")
+	c, err := r.Cookie(stateCookie)
+	if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(st)) != 1 || !s.canManageApp(r) || !s.consumeState("manifest", st) {
 		http.Redirect(w, r, "/setup?error=state", http.StatusFound)
 		return
 	}
@@ -328,6 +345,7 @@ func (s *Server) handleSetupCallback(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.SetSecret("app_pem", app.PEM)
 	_ = s.store.SetSecret("app_client_secret", app.ClientSecret)
 	_ = s.store.SetSecret("app_webhook_secret", app.WebhookSecret)
+	s.setCookie(w, r, stateCookie, "", -1)
 	s.log.Info("GitHub App created", "app", app.Slug)
 	if s.mgr != nil {
 		s.mgr.Restart()
@@ -341,7 +359,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup", http.StatusFound)
 		return
 	}
-	st := s.newState()
+	st := s.newState("oauth")
 	s.setCookie(w, r, stateCookie, st, 900)
 	http.Redirect(w, r, gh.AuthorizeURL(clientID, s.baseURL(r)+"/auth/callback", st), http.StatusFound)
 }
@@ -349,7 +367,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	st := r.URL.Query().Get("state")
 	c, err := r.Cookie(stateCookie)
-	if err != nil || c.Value != st || !s.consumeState(st) {
+	if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(st)) != 1 || !s.consumeState("oauth", st) {
 		http.Redirect(w, r, "/login?error=state", http.StatusFound)
 		return
 	}
