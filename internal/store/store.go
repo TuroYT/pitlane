@@ -557,6 +557,8 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	return jobs, err
 }
 
+const jobColumns = `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref FROM jobs`
+
 // JobFilter narrows a job listing. Empty fields match everything.
 type JobFilter struct {
 	Owner, Repo string // repository (both set) or nothing
@@ -599,8 +601,8 @@ func (s *Store) JobsPage(ctx context.Context, f JobFilter, limit, offset int) ([
 		return nil, 0, err
 	}
 	// where is built from constant fragments only; values are bound parameters.
-	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
-		FROM jobs`+where+` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...) //nolint:gosec // G202: see above
+	query := jobColumns + where + ` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?` //nolint:gosec // G202: constant fragments, bound values
+	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
