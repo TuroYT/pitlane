@@ -68,3 +68,32 @@ func TestTargets(t *testing.T) {
 		t.Fatal(created.URL())
 	}
 }
+
+func TestTargetMaxJobMinutes(t *testing.T) {
+	s := open(t)
+	created, err := s.CreateTarget(Target{Kind: "repo", Owner: "acme", Repo: "api", MaxJobMinutes: DefaultMaxJobMinutes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Target(created.ID)
+	if err != nil || got.MaxJobMinutes != 360 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	got.MaxJobMinutes = 0 // unlimited
+	if err := s.UpdateTarget(got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.Target(created.ID); got.MaxJobMinutes != 0 {
+		t.Fatalf("unlimited not stored: %+v", got)
+	}
+	// Rows created before the migration get the default.
+	if _, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, created_at) VALUES ('org', 'old', '', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := s.Targets()
+	for _, x := range ts {
+		if x.Owner == "old" && x.MaxJobMinutes != DefaultMaxJobMinutes {
+			t.Fatalf("column default not applied: %+v", x)
+		}
+	}
+}

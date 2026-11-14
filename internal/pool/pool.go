@@ -1133,6 +1133,15 @@ func (p *Pool) Remove(ctx context.Context, id string) {
 	_ = p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
 }
 
+// Kill stops a runner container at once; whoever waits on it then cleans up.
+func (p *Pool) Kill(ctx context.Context, id string) error {
+	err := p.cli.ContainerKill(ctx, id, "KILL")
+	if errdefs.IsNotFound(err) || errdefs.IsConflict(err) { // gone or already stopped
+		return nil
+	}
+	return err
+}
+
 // Orphan is a runner container found at startup.
 type Orphan struct {
 	ID       string
@@ -1141,6 +1150,7 @@ type Orphan struct {
 	TargetID int64
 	Owner    string
 	Running  bool
+	Created  time.Time
 }
 
 // RunnerContainers lists runner containers left by a previous run and marks
@@ -1155,7 +1165,7 @@ func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
 	for _, c := range list {
 		slotIdx, _ := strconv.Atoi(c.Labels[LabelSlot])
 		tid, _ := strconv.ParseInt(c.Labels[LabelTarget], 10, 64)
-		o := Orphan{ID: c.ID, Name: c.Labels[LabelRunner], Slot: slotIdx, TargetID: tid, Owner: c.Labels[LabelOwner], Running: c.State == "running"}
+		o := Orphan{ID: c.ID, Name: c.Labels[LabelRunner], Slot: slotIdx, TargetID: tid, Owner: c.Labels[LabelOwner], Running: c.State == "running", Created: time.Unix(c.Created, 0)}
 		out = append(out, o)
 		p.mu.Lock()
 		if s, ok := p.slots[slotIdx]; ok {

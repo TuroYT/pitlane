@@ -635,7 +635,7 @@ var validName = func(s string) bool {
 }
 
 func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	var t store.Target
+	t := store.Target{MaxJobMinutes: store.DefaultMaxJobMinutes}
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -685,6 +685,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		MaxRunners   *int    `json:"maxRunners"`
 		ScaleSetName *string `json:"scaleSetName"`
 		Strict       *bool   `json:"strict"`
+		MaxJobMins   *int    `json:"maxJobMinutes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -698,6 +699,9 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Strict != nil {
 		t.Strict = *body.Strict
+	}
+	if body.MaxJobMins != nil {
+		t.MaxJobMinutes = max(0, *body.MaxJobMins)
 	}
 	if body.MaxRunners != nil {
 		t.MaxRunners = max(1, *body.MaxRunners)

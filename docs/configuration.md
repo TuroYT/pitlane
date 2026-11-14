@@ -25,6 +25,7 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Label | `pitlane` | The value for `runs-on:`. |
 | Warm runners | 0 | Runners kept registered and idle, so jobs start instantly. Each one holds a slot. |
 | Max parallel | number of slots | Upper bound for this target. |
+| Job limit (min) | 360 | A runner whose job runs longer is killed; its slot is cleaned and released as after any job. `0` = no limit. |
 | Strict | on for public repositories | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |
 
 ## Environment variables / flags

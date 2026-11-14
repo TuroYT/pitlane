@@ -96,6 +96,7 @@ function copy(text: string) {
               <th>Status</th>
               <th title="Runners kept ready even when no job is queued: jobs start instantly">Warm runners</th>
               <th title="Maximum parallel jobs for this target">Max parallel</th>
+              <th title="A job running longer is stopped and its slot cleaned. 0 = no limit.">Job limit (min)</th>
               <th title="Strict isolation: fresh caches and a wiped Docker daemon for every job. Recommended for public repositories (pull requests from forks).">Strict</th>
               <th>Enabled</th>
               <th></th>
@@ -103,7 +104,7 @@ function copy(text: string) {
           </thead>
           <tbody>
             <tr v-if="!targets.length">
-              <td colspan="8" class="muted center">Nothing yet: enable a repository below.</td>
+              <td colspan="9" class="muted center">Nothing yet: enable a repository below.</td>
             </tr>
             <tr v-for="t in targets" :key="t.id">
               <td>
@@ -127,6 +128,10 @@ function copy(text: string) {
               <td>
                 <input type="number" class="num" min="1" max="64" :value="t.maxRunners"
                   @change="update(t, { maxRunners: +($event.target as HTMLInputElement).value })" />
+              </td>
+              <td>
+                <input type="number" class="num" min="0" step="10" :value="t.maxJobMinutes"
+                  @change="update(t, { maxJobMinutes: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
                 <label class="switch">

@@ -23,6 +23,7 @@ export interface Target {
   scaleSetName: string
   scaleSetId: number
   strict: boolean
+  maxJobMinutes: number
 }
 
 export interface RunnerState {

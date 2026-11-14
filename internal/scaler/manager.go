@@ -67,7 +67,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 	for _, o := range orphans {
-		r := &runner{name: o.Name, containerID: o.ID, lease: pool.Lease{Slot: o.Slot, Owner: o.Owner}, busy: true, startedAt: time.Now()}
+		// Assume busy since the container was created: the job timeout then
+		// still applies after a restart.
+		r := &runner{name: o.Name, containerID: o.ID, lease: pool.Lease{Slot: o.Slot, Owner: o.Owner}, busy: true, startedAt: time.Now(), busySince: o.Created}
+		if o.Created.Year() < 2000 {
+			r.busySince = time.Now()
+		}
 		if !o.Running {
 			go m.finishRunner(nil, r)
 			continue
@@ -85,6 +90,8 @@ func (m *Manager) loop(ctx context.Context) {
 	defer tick.Stop()
 	clean := time.NewTicker(time.Hour)
 	defer clean.Stop()
+	timeouts := time.NewTicker(30 * time.Second)
+	defer timeouts.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -95,6 +102,8 @@ func (m *Manager) loop(ctx context.Context) {
 			m.reconcileAll()
 		case <-clean.C:
 			m.housekeeping()
+		case <-timeouts.C:
+			m.enforceTimeouts()
 		}
 	}
 }
@@ -261,6 +270,8 @@ type runner struct {
 	lease       pool.Lease
 	busy        bool
 	exited      bool
+	killed      bool      // killed for exceeding the job time limit
+	busySince   time.Time // when its job started
 	jobName     string
 	repo        string
 	startedAt   time.Time
@@ -628,6 +639,45 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 	m.pool.EnsureFreeDisk(ctx) // idle slots only; skipped while another prune runs
 }
 
+// timedOut reports whether a runner's job ran longer than limit (0 = no limit).
+func timedOut(r *runner, limit time.Duration, now time.Time) bool {
+	return limit > 0 && r.busy && !r.exited && !r.killed && !r.busySince.IsZero() && now.Sub(r.busySince) > limit
+}
+
+// enforceTimeouts kills the runners whose job exceeded the target's
+// max_job_minutes. The runner's watch then goes through finishRunner as for
+// any other exit (logs archived, slot cleaned and released).
+func (m *Manager) enforceTimeouts() {
+	m.mu.Lock()
+	ts := make([]*target, 0, len(m.targets))
+	for _, t := range m.targets {
+		ts = append(ts, t)
+	}
+	m.mu.Unlock()
+	now := time.Now()
+	for _, t := range ts {
+		t.mu.Lock()
+		limit := time.Duration(t.t.MaxJobMinutes) * time.Minute
+		var kill []*runner
+		for _, r := range t.runners {
+			if timedOut(r, limit, now) {
+				r.killed = true
+				kill = append(kill, r)
+			}
+		}
+		t.mu.Unlock()
+		for _, r := range kill {
+			t.log.Warn("job exceeded the time limit, killing its runner", "runner", r.name, "job", r.jobName, "limit", limit)
+			if err := m.pool.Kill(context.Background(), r.containerID); err != nil {
+				t.log.Error("kill runner", "runner", r.name, "error", err)
+				t.mu.Lock()
+				r.killed = false // retried at the next check
+				t.mu.Unlock()
+			}
+		}
+	}
+}
+
 // ------------------------------------------------------------------ scaler
 
 type scaler struct {
@@ -681,6 +731,9 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		}
 		s.t.mu.Lock()
 		if r, ok := s.t.runners[j.RunnerName]; ok {
+			if !r.busy || r.busySince.IsZero() {
+				r.busySince = time.Now()
+			}
 			r.busy, r.jobName, r.repo = true, j.JobDisplayName, j.RepositoryName
 			job.Slot = r.lease.Slot
 		}
