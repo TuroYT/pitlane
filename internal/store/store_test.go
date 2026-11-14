@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -211,5 +214,32 @@ func TestPruneSessions(t *testing.T) {
 	}
 	if _, ok := s.SessionLogin("new"); !ok {
 		t.Fatal("valid session pruned")
+	}
+}
+
+func TestOpenRestrictsPermissions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pitlane.db"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o700 {
+		t.Errorf("data dir mode %v", st.Mode().Perm())
+	}
+	for _, f := range []string{"pitlane.db", "pitlane.db-wal", "pitlane.db-shm"} {
+		st, err := os.Stat(filepath.Join(dir, f))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || st.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode %v %v", f, st.Mode().Perm(), err)
+		}
 	}
 }
