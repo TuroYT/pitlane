@@ -58,9 +58,21 @@ const day = computed(() => {
 function slotJob(runner: string) {
   return runner ? byRunner.value.get(runner) : undefined
 }
-function slotIdle(owner: string) {
-  if (owner === '(unknown)') return 'wiped before next use'
-  return owner ? `warm for ${owner}` : 'empty cache'
+// What an idle slot keeps between jobs, and the tooltip explaining it.
+function slotIdle(owner: string): { label: string; title: string } {
+  if (owner === '(unknown)') {
+    return { label: 'cache: unknown owner', title: 'Pitlane does not know who used this slot last: it is wiped before its next job.' }
+  }
+  if (owner === '(strict)') {
+    return { label: 'cache: none (strict)', title: 'Last used by a strict job: the slot is rebuilt before its next job, nothing is kept.' }
+  }
+  if (!owner) {
+    return { label: 'cache: empty', title: 'This slot has not run a job yet (or was rebuilt): its Docker cache is empty.' }
+  }
+  return {
+    label: `cache: ${owner}`,
+    title: `Docker images, layers and build cache of ${owner}'s last jobs are kept here, so the next ${owner} job starts warm. A job of another owner gets this slot rebuilt (wiped) first.`,
+  }
 }
 function pct(used: number, total: number) {
   return total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0
@@ -154,7 +166,7 @@ function level(p: number) {
             </template>
           </div>
           <div v-else-if="s.status === 'error'" class="slot-body error-text">{{ s.error }}</div>
-          <div v-else class="slot-body muted">{{ slotIdle(s.owner) }}</div>
+          <div v-else class="slot-body muted" :title="slotIdle(s.owner).title">{{ slotIdle(s.owner).label }}</div>
         </div>
       </div>
     </section>
