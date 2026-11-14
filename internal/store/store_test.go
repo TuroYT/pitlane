@@ -56,6 +56,43 @@ func TestUpsertJobKeepsKnownFields(t *testing.T) {
 	}
 }
 
+func TestJobWorkflowRef(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	full := "acme/api/.github/workflows/ci.yml@refs/pull/42/merge"
+	if err := s.UpsertJob(Job{JobID: "j1", RunID: 7, WorkflowRef: "ci.yml", WorkflowFullRef: full, Event: "pull_request", Slot: -1, QueuedAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+	// A later message without the reference must not erase it.
+	if err := s.UpsertJob(Job{JobID: "j1", RunnerName: "pitlane-x", Slot: 1, StartedAt: 105}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.JobByRunner(ctx, "pitlane-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.WorkflowFullRef != full || j.Ref != "refs/pull/42/merge" || j.WorkflowRef != "ci.yml" || j.Event != "pull_request" {
+		t.Fatalf("unexpected job: %+v", j)
+	}
+	jobs, err := s.Jobs(ctx, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].Ref != "refs/pull/42/merge" {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+}
+
+func TestWorkflowRefParts(t *testing.T) {
+	for _, c := range []struct{ in, path, ref string }{
+		{"acme/api/.github/workflows/ci.yml@refs/heads/main", "acme/api/.github/workflows/ci.yml", "refs/heads/main"},
+		{"acme/api/.github/workflows/ci.yml@refs/heads/feat@2", "acme/api/.github/workflows/ci.yml", "refs/heads/feat@2"},
+		{"acme/api/.github/workflows/ci.yml", "acme/api/.github/workflows/ci.yml", ""},
+		{"", "", ""},
+	} {
+		if p, r := WorkflowRefParts(c.in); p != c.path || r != c.ref {
+			t.Errorf("WorkflowRefParts(%q) = %q, %q", c.in, p, r)
+		}
+	}
+}
+
 func TestTargets(t *testing.T) {
 	s := open(t)
 	created, err := s.CreateTarget(Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true})

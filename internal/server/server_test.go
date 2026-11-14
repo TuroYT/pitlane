@@ -1,6 +1,8 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,5 +85,35 @@ func TestNewTargetDefaults(t *testing.T) {
 	}
 	if _, _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme"}`), 4); err == nil {
 		t.Fatal("repo target without a repository accepted")
+	}
+}
+
+func TestGitHubJobRedirect(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := New(Config{}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j1", RunID: 123, Owner: "acme", Repo: "api", RunnerName: "pitlane-a", Slot: -1})
+	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j2", RunID: 124, Owner: "acme", Repo: "api", RunnerName: "pitlane-b", Slot: -1})
+	s.jobIDs.Store("pitlane-b", int64(555))
+
+	get := func(name string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/runners/"+name+"/github", nil)
+		r.SetPathValue("name", name)
+		w := httptest.NewRecorder()
+		s.handleGitHubJob(w, r)
+		return w
+	}
+	// Unknown target: falls back to the run page.
+	if w := get("pitlane-a"); w.Code != http.StatusFound || w.Header().Get("Location") != "https://github.com/acme/api/actions/runs/123" {
+		t.Fatalf("fallback: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("pitlane-b"); w.Header().Get("Location") != "https://github.com/acme/api/actions/runs/124/job/555" {
+		t.Fatalf("cached: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("pitlane-none"); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown runner: %d", w.Code)
 	}
 }

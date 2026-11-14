@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, live, type Job } from '../api'
+import { jobSource } from '../source'
 import JobTable from '../components/JobTable.vue'
 import CompareTable from '../components/CompareTable.vue'
 
@@ -18,10 +19,12 @@ watch(() => live.snap?.time, () => {
   if (Date.now() - last > 5000) load()
 })
 
+const branch = ref('')
 const repos = computed(() => [...new Set(jobs.value.map((j) => `${j.owner}/${j.repo}`))].sort())
 const filtered = computed(() =>
   jobs.value.filter((j) => {
     if (repo.value && `${j.owner}/${j.repo}` !== repo.value) return false
+    if (branch.value && !(jobSource(j).ref?.name ?? '').toLowerCase().includes(branch.value.trim().toLowerCase())) return false
     if (result.value === 'running') return !j.finishedAt
     if (result.value) return j.result.toLowerCase() === result.value
     return true
@@ -34,6 +37,7 @@ const filtered = computed(() =>
     <div class="row-between">
       <h1>Jobs</h1>
       <div class="filters">
+        <input v-model="branch" type="search" placeholder="Filter by branch or ref…" aria-label="Filter by branch or ref" />
         <select v-model="repo">
           <option value="">All repositories</option>
           <option v-for="r in repos" :key="r" :value="r">{{ r }}</option>
@@ -47,7 +51,7 @@ const filtered = computed(() =>
         </select>
       </div>
     </div>
-    <JobTable :jobs="filtered" />
+    <JobTable :jobs="filtered" :empty="jobs.length ? 'No job matches these filters.' : undefined" />
     <CompareTable />
   </div>
 </template>

@@ -89,6 +89,10 @@ export interface Job {
   startedAt: number
   finishedAt: number
   result: string
+  /** Full workflow reference, e.g. "owner/repo/.github/workflows/ci.yml@refs/heads/main" ('' for old jobs). */
+  workflowFullRef?: string
+  /** Git ref of the workflow: "refs/heads/main", "refs/pull/42/merge", "refs/tags/v1"… */
+  ref?: string
 }
 
 export interface Settings {

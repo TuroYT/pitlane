@@ -922,7 +922,7 @@ func shortRef(ref string) string {
 func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
 	cfg := s.t.cfg()
 	return store.Job{TargetID: cfg.ID, JobID: b.JobID, RunID: b.WorkflowRunID, Owner: b.OwnerName, Repo: b.RepositoryName,
-		WorkflowRef: shortRef(b.JobWorkflowRef), JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
+		WorkflowRef: shortRef(b.JobWorkflowRef), WorkflowFullRef: b.JobWorkflowRef, JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
 }
 
 // upsertJob records a job in the history; a failure only affects the UI and

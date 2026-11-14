@@ -1,16 +1,11 @@
 <script setup lang="ts">
 import { duration, type Job } from '../api'
+import JobStatus from './JobStatus.vue'
+import JobSource from './JobSource.vue'
+import JobLinks from './JobLinks.vue'
 
-defineProps<{ jobs: Job[]; compact?: boolean }>()
+defineProps<{ jobs: Job[]; compact?: boolean; empty?: string }>()
 
-function resultClass(j: Job) {
-  if (!j.finishedAt) return j.startedAt ? 'busy' : 'queued'
-  return { succeeded: 'ok', failed: 'error', canceled: 'muted', cancelled: 'muted' }[j.result.toLowerCase()] ?? 'muted'
-}
-function resultLabel(j: Job) {
-  if (!j.finishedAt) return j.startedAt ? 'running' : 'queued'
-  return j.result.toLowerCase() || 'done'
-}
 function wait(j: Job) {
   if (!j.queuedAt) return '—'
   const end = j.startedAt || (j.finishedAt ? 0 : Date.now() / 1000)
@@ -23,8 +18,11 @@ function runTime(j: Job) {
 function when(j: Job) {
   return j.queuedAt ? new Date(j.queuedAt * 1000).toLocaleString() : ''
 }
-function runUrl(j: Job) {
-  return j.runId ? `https://github.com/${j.owner}/${j.repo}/actions/runs/${j.runId}` : ''
+function whenShort(j: Job) {
+  if (!j.queuedAt) return '—'
+  const d = new Date(j.queuedAt * 1000)
+  const today = new Date().toDateString() === d.toDateString()
+  return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 </script>
 
@@ -33,34 +31,31 @@ function runUrl(j: Job) {
     <table class="table">
       <thead>
         <tr>
-          <th>Status</th>
+          <th style="width: 28px"><span class="sr-only">Status</span></th>
           <th>Job</th>
-          <th>Repository</th>
-          <th title="Time between the job being queued and a runner picking it up">Wait</th>
-          <th>Duration</th>
-          <th v-if="!compact">Slot</th>
-          <th v-if="!compact">Queued</th>
+          <th class="right" title="Time between the job being queued and a runner picking it up">Wait</th>
+          <th class="right">Duration</th>
+          <th v-if="!compact" class="right">Slot</th>
+          <th class="right">Queued</th>
           <th></th>
         </tr>
       </thead>
       <tbody>
         <tr v-if="!jobs.length">
-          <td colspan="8" class="muted center">No jobs yet.</td>
+          <td colspan="7" class="muted center">{{ empty ?? 'No jobs yet. They appear here as soon as GitHub assigns one to Pitlane.' }}</td>
         </tr>
         <tr v-for="j in jobs" :key="j.id">
-          <td><span class="badge" :class="resultClass(j)">{{ resultLabel(j) }}</span></td>
-          <td class="ellipsis" :title="j.workflowRef">
-            {{ j.jobName || '—' }} <span class="muted small">{{ j.workflowRef }}</span>
+          <td><JobStatus :job="j" /></td>
+          <td style="min-width: 260px">
+            <RouterLink v-if="j.runnerName" class="job-title" :to="`/logs/${j.runnerName}`">{{ j.jobName || 'Unnamed job' }}</RouterLink>
+            <span v-else class="job-title">{{ j.jobName || 'Unnamed job' }}</span>
+            <JobSource :job="j" />
           </td>
-          <td class="ellipsis">{{ j.owner }}/{{ j.repo }}</td>
-          <td>{{ wait(j) }}</td>
-          <td>{{ runTime(j) }}</td>
-          <td v-if="!compact">{{ j.slot >= 0 ? '#' + j.slot : '—' }}</td>
-          <td v-if="!compact" class="small muted">{{ when(j) }}</td>
-          <td class="actions">
-            <RouterLink v-if="j.runnerName" :to="`/logs/${j.runnerName}`">logs</RouterLink>
-            <a v-if="runUrl(j)" :href="runUrl(j)" target="_blank" rel="noopener">run ↗</a>
-          </td>
+          <td class="right">{{ wait(j) }}</td>
+          <td class="right">{{ runTime(j) }}</td>
+          <td v-if="!compact" class="right mono">{{ j.slot >= 0 ? '#' + j.slot : '—' }}</td>
+          <td class="right small muted" :title="when(j)">{{ whenShort(j) }}</td>
+          <td class="actions"><JobLinks :job="j" /></td>
         </tr>
       </tbody>
     </table>

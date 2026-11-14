@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { api, duration, type Job } from '../api'
+import JobStatus from '../components/JobStatus.vue'
+import JobSource from '../components/JobSource.vue'
+import JobLinks from '../components/JobLinks.vue'
 
 const route = useRoute()
 const name = String(route.params.name)
@@ -71,22 +75,55 @@ async function load() {
   }
 }
 watch(tab, load, { immediate: true })
+
+// The job this runner picked, for its origin and links to GitHub.
+const job = ref<Job | null>(null)
+async function loadJob() {
+  try {
+    const jobs = await api<Job[]>('/api/jobs?limit=1000')
+    job.value = jobs.find((j) => j.runnerName === name) ?? null
+  } catch {
+    job.value = null
+  }
+}
+loadJob()
+watch(streaming, (now, before) => {
+  if (before && !now) loadJob()
+})
+const elapsed = computed(() => {
+  const j = job.value
+  if (!j?.startedAt) return ''
+  return duration((j.finishedAt || Date.now() / 1000) - j.startedAt)
+})
 onBeforeUnmount(() => ctrl?.abort())
 </script>
 
 <template>
   <div class="stack">
+    <header class="job-header">
+      <RouterLink to="/jobs" class="small">Jobs</RouterLink>
+      <h1>
+        <JobStatus v-if="job" :job="job" />
+        {{ job?.jobName || 'Runner' }}
+      </h1>
+      <JobSource v-if="job" :job="job" />
+      <div class="filters small muted">
+        <span>Runner <code>{{ name }}</code></span>
+        <span v-if="job && job.slot >= 0">· slot #{{ job.slot }}</span>
+        <span v-if="elapsed">· {{ job?.finishedAt ? 'ran' : 'running for' }} {{ elapsed }}</span>
+        <JobLinks v-if="job" :job="job" />
+      </div>
+    </header>
     <div class="row-between">
-      <h1>Runner <code>{{ name }}</code></h1>
+      <div class="tabs" role="tablist">
+        <button role="tab" :aria-selected="tab === 'job'" :class="{ active: tab === 'job' }" @click="tab = 'job'">Job output</button>
+        <button role="tab" :aria-selected="tab === 'runner'" :class="{ active: tab === 'runner' }" @click="tab = 'runner'">Runner</button>
+      </div>
       <div class="filters">
         <span class="badge" :class="streaming ? 'busy' : 'muted'">{{ streaming ? 'live' : 'finished' }}</span>
         <label class="inline"><input type="checkbox" v-model="timestamps" /> Timestamps</label>
         <label class="inline"><input type="checkbox" v-model="follow" /> Follow</label>
       </div>
-    </div>
-    <div class="tabs">
-      <button :class="{ active: tab === 'job' }" @click="tab = 'job'">Job output</button>
-      <button :class="{ active: tab === 'runner' }" @click="tab = 'runner'">Runner</button>
     </div>
     <p class="muted small">
       {{ tab === 'job'

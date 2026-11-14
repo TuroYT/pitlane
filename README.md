@@ -1,26 +1,39 @@
 <p align="center">
-  <img src="docs/logo.svg" width="64" height="64" alt="">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
+    <img src="docs/assets/hero-light.svg" width="880" alt="Pitlane: ephemeral self-hosted GitHub Actions runners with caches that stay warm. One binary, a web UI, no Kubernetes.">
+  </picture>
 </p>
-
-<h1 align="center">Pitlane</h1>
 
 <p align="center">
-  <b>Fast, ephemeral, autoscaled self-hosted GitHub Actions runners. One binary, a web UI, no Kubernetes.</b>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#faster-than-github-hosted-runners">Benchmark</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="docs/getting-started.md">Docs</a>
 </p>
 
----
+Pitlane turns a Docker host you already have (a VM, a Proxmox LXC, a spare server)
+into self-hosted GitHub Actions runners that **start on demand, run one job and
+disappear**. The Docker layers, package caches and toolchains stay on disk between
+jobs, so CI gets faster instead of starting cold every time.
 
-Pitlane turns any Docker host (a VM, a Proxmox LXC, a spare server) into a pool of
-self-hosted GitHub Actions runners that **start on demand, run one job, and
-disappear**, while **keeping every cache warm** so your CI is faster than on
-GitHub-hosted runners.
+On a real-world monorepo, the whole CI went from **~6 min 30** on GitHub-hosted
+runners to **~3 min** on Pitlane. [See the numbers](#faster-than-github-hosted-runners).
 
-- **Ephemeral runners, warm caches.** Every job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs.
-- **Docker that just works.** `services:`, `container:` jobs and `docker build` work out of the box. Each slot has its own Docker-in-Docker daemon, and jobs never touch the host's Docker.
-- **Autoscaling with GitHub's official scale set API.** No webhook and no public URL: Pitlane long-polls GitHub, and jobs start within seconds.
-- **Web UI.** Live slots and runners, job history with wait time and duration, runner logs, one-click repository enablement, settings applied live.
+```yaml
+jobs:
+  build:
+    runs-on: pitlane
+```
+
+## Why Pitlane
+
+- **A fresh runner for every job, with warm caches.** Each job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs.
+- **Docker works as on GitHub.** `services:`, `container:` jobs and `docker build` work out of the box. Each slot has its own Docker-in-Docker daemon, and jobs never touch the host's Docker.
+- **Jobs start within seconds, with no public URL.** Pitlane long-polls GitHub through the official scale set API, the one GitHub's Kubernetes controller uses. There is no webhook to expose.
+- **A web UI to see what runs where.** Live slots and runners, every job traced back to its repository, workflow, branch or pull request and run on GitHub, wait and duration trends, runner logs, one-click repository enablement, settings applied live.
 - **Two-minute setup.** Pitlane creates its own GitHub App in one click and uses it to sign you in with GitHub.
-- **Single static binary.** Install it with systemd, Docker Compose, or a one-liner on Proxmox.
+- **One static binary.** Install it with systemd, Docker Compose, or a one-liner on Proxmox.
 
 ## Quick start
 
@@ -82,16 +95,28 @@ saturated host is not faster than on a 4-vCPU GitHub runner.
 On a project that previously used fixed self-hosted runners, the same jobs went from
 705 s → 250 s (lint), 417 s → 210 s (tests) and 376 s → 165 s (build).
 
-The **Jobs** page of the UI compares, for each of your jobs, the median duration on Pitlane
-with the same job on GitHub-hosted runners, so you can check on your own workloads.
+Check it on your own workloads: the dashboard compares, for each of your jobs, the median
+duration on Pitlane with the same job on GitHub-hosted runners.
+
+## The dashboard
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dashboard-dark.png">
+  <img src="docs/assets/dashboard-light.png" width="880" alt="Pitlane dashboard: running jobs with their repository, workflow, branch or pull request and links to GitHub, the warm slots, and charts of jobs, slot utilization, queue wait and job duration">
+</picture>
+
+<sub>Screenshot with demo data.</sub>
+
+Every running or finished job shows where it came from: repository, workflow file,
+branch, tag or pull request, and the event that triggered it, each linked to GitHub,
+with one click to the run or the job page and its live output.
 
 ## How it works
 
-```
-GitHub ──(scale set long-poll)──▶ pitlane ──▶ slot #0  [dind daemon, warm cache] ◀── runner (one job, then deleted)
-                                          ├─▶ slot #1  [dind daemon, warm cache] ◀── runner
-                                          └─▶ …        shared: toolcache, package caches, Docker Hub mirror
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+  <img src="docs/assets/how-it-works-light.svg" width="880" alt="GitHub Actions assigns jobs to pitlane over a long-poll; pitlane picks a warm Docker-in-Docker slot and starts a fresh runner that runs one job and is deleted; images, build cache, toolcache, package caches and the Docker Hub mirror are kept between jobs">
+</picture>
 
 A **slot** is a long-lived Docker-in-Docker daemon. When GitHub assigns a job to
 your `pitlane` label, Pitlane picks a free slot (preferring one that already ran
@@ -107,11 +132,12 @@ stay. Read more in [How it works](docs/how-it-works.md).
 - [How it works & performance](docs/how-it-works.md)
 - [Security](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Brand](docs/brand.md)
 
 ## Status
 
 Pitlane is young (v0.1). It is used in production by its author, but expect rough
-edges. Issues and pull requests are welcome.
+edges. It provides Linux runners only. Issues and pull requests are welcome.
 
 ## License
 

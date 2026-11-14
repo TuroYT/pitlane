@@ -82,6 +82,9 @@ var migrations = []string{
 	// and when Pitlane switched it to strict on its own (0 = never).
 	`ALTER TABLE targets ADD COLUMN strict_required TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE targets ADD COLUMN strict_forced_at INTEGER NOT NULL DEFAULT 0`,
+	// Full workflow reference of a job ("owner/repo/.github/workflows/ci.yml@refs/heads/main"),
+	// which keeps the branch, tag or pull request the job ran for.
+	`ALTER TABLE jobs ADD COLUMN workflow_full_ref TEXT NOT NULL DEFAULT ''`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -471,16 +474,34 @@ type Job struct {
 	StartedAt   int64  `json:"startedAt"`
 	FinishedAt  int64  `json:"finishedAt"`
 	Result      string `json:"result"`
+	// WorkflowFullRef is the full workflow reference GitHub sent with the job,
+	// e.g. "owner/repo/.github/workflows/ci.yml@refs/heads/main" (empty for
+	// jobs recorded before it was stored). WorkflowRef keeps the file name.
+	WorkflowFullRef string `json:"workflowFullRef"`
+	// Ref is the git ref of WorkflowFullRef: "refs/heads/main",
+	// "refs/pull/42/merge", "refs/tags/v1"… Derived, not stored.
+	Ref string `json:"ref"`
+}
+
+// WorkflowRefParts splits a full workflow reference into the workflow file
+// path ("owner/repo/.github/workflows/ci.yml") and the git ref ("refs/heads/main").
+func WorkflowRefParts(full string) (path, ref string) {
+	// Repository and workflow paths never contain "@", branch names may.
+	if i := strings.Index(full, "@"); i >= 0 {
+		return full[:i], full[i+1:]
+	}
+	return full, ""
 }
 
 // UpsertJob inserts or updates a job keyed by its GitHub job id. Zero values
 // never overwrite existing data.
 func (s *Store) UpsertJob(j Job) error {
-	_, err := s.db.Exec(`INSERT INTO jobs (target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO jobs (target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id) DO UPDATE SET
 			run_id = CASE WHEN excluded.run_id != 0 THEN excluded.run_id ELSE run_id END,
 			workflow_ref = CASE WHEN excluded.workflow_ref != '' THEN excluded.workflow_ref ELSE workflow_ref END,
+			workflow_full_ref = CASE WHEN excluded.workflow_full_ref != '' THEN excluded.workflow_full_ref ELSE workflow_full_ref END,
 			job_name = CASE WHEN excluded.job_name != '' THEN excluded.job_name ELSE job_name END,
 			runner_name = CASE WHEN excluded.runner_name != '' THEN excluded.runner_name ELSE runner_name END,
 			slot = CASE WHEN excluded.slot >= 0 THEN excluded.slot ELSE slot END,
@@ -488,7 +509,7 @@ func (s *Store) UpsertJob(j Job) error {
 			started_at = CASE WHEN excluded.started_at != 0 THEN excluded.started_at ELSE started_at END,
 			finished_at = CASE WHEN excluded.finished_at != 0 THEN excluded.finished_at ELSE finished_at END,
 			result = CASE WHEN excluded.result != '' THEN excluded.result ELSE result END`,
-		j.TargetID, j.JobID, j.RunID, j.Owner, j.Repo, j.WorkflowRef, j.JobName, j.Event, j.RunnerName, j.Slot, j.QueuedAt, j.StartedAt, j.FinishedAt, j.Result)
+		j.TargetID, j.JobID, j.RunID, j.Owner, j.Repo, j.WorkflowRef, j.JobName, j.Event, j.RunnerName, j.Slot, j.QueuedAt, j.StartedAt, j.FinishedAt, j.Result, j.WorkflowFullRef)
 	return err
 }
 
@@ -501,9 +522,10 @@ func (s *Store) SetJobSlot(runnerName string, slot int) error {
 // JobByRunner returns the job a runner picked up.
 func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
 	var j Job
-	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result
+	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
 		FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
-		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result)
+		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef)
+	_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
 	return j, err
 }
 
@@ -531,7 +553,7 @@ func (s *Store) InFlightJobs(ctx context.Context) ([]Job, error) {
 
 // Jobs returns the most recent jobs.
 func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result
+	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
 		FROM jobs ORDER BY queued_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -540,9 +562,10 @@ func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	var out []Job
 	for rows.Next() {
 		var j Job
-		if err := rows.Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result); err != nil {
+		if err := rows.Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result, &j.WorkflowFullRef); err != nil {
 			return nil, err
 		}
+		_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
 		out = append(out, j)
 	}
 	return out, rows.Err()

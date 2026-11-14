@@ -108,7 +108,7 @@ function copy(text: string) {
               <th title="Runners kept registered and idle even when no job is queued: jobs start instantly, but each warm runner keeps one slot reserved for this target">Warm runners</th>
               <th title="Maximum parallel jobs for this target">Max parallel</th>
               <th title="A job running longer is stopped and its slot cleaned. 0 = no limit.">Job limit (min)</th>
-              <th title="Strict isolation: fresh caches and a wiped Docker daemon for every job. Always on for public repositories (pull requests from forks).">Strict</th>
+              <th title="Strict isolation: fresh caches and a rebuilt Docker daemon for every job, so nothing leaks between jobs. Always on for public repositories. Not a sandbox: a malicious job can still take over the host, so require approval for pull requests from forks.">Strict</th>
               <th>Enabled</th>
               <th></th>
             </tr>
@@ -193,7 +193,7 @@ function copy(text: string) {
         <ul class="repo-list">
           <li v-for="r in filteredRepos(inst)" :key="r.fullName">
             <span>{{ r.name }} <span v-if="r.private" class="muted small">private</span>
-              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners: always strict">public</span></span>
+              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners: always strict, and require approval for fork pull requests">public</span></span>
             <button class="small" :class="{ primary: !has(`repo:${r.fullName}`) }" :disabled="has(`repo:${r.fullName}`)"
               @click="enable('repo', inst.account, r.name, inst.id)">
               {{ has(`repo:${r.fullName}`) ? 'Enabled' : 'Enable' }}
