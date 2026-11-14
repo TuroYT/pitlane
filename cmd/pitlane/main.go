@@ -60,14 +60,19 @@ func main() {
 	listen := flag.String("listen", env("PITLANE_LISTEN", ":8080"), "HTTP listen address (PITLANE_LISTEN)")
 	dataDir := flag.String("data", env("PITLANE_DATA", "/var/lib/pitlane"), "data directory (PITLANE_DATA)")
 	baseURL := flag.String("base-url", env("PITLANE_BASE_URL", ""), "public URL of the UI, e.g. http://pitlane.lan:8080 (PITLANE_BASE_URL)")
+	trusted := flag.String("trusted-proxies", env("PITLANE_TRUSTED_PROXIES", ""),
+		"comma-separated IPs or CIDRs of reverse proxies whose Host and X-Forwarded-Proto headers are trusted when no base URL is set; loopback always is (PITLANE_TRUSTED_PROXIES)")
 	logLevel := flag.String("log-level", env("PITLANE_LOG_LEVEL", "info"), "debug, info, warn or error (PITLANE_LOG_LEVEL)")
 	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only, loopback listen address only) (PITLANE_INSECURE_NO_AUTH)")
 	noAuthAnyAddr := flag.Bool("insecure-no-auth-any-address", env("PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS", "") == "true",
 		"allow --insecure-no-auth on a non-loopback listen address, e.g. behind an authenticating proxy (PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS)")
 	flag.Parse()
 
-	var lvl slog.Level
-	_ = lvl.UnmarshalText([]byte(*logLevel))
+	lvl, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pitlane:", err)
+		os.Exit(2)
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	slog.SetDefault(log) // packages without a logger of their own (store)
 	if *noAuth {
@@ -77,7 +82,13 @@ func main() {
 		}
 		log.Warn("login is disabled (--insecure-no-auth): anyone reaching this address controls Pitlane", "addr", *listen)
 	}
-	err := run(log, *listen, *dataDir, *baseURL, *noAuth)
+	proxies, err := server.ParseTrustedProxies(*trusted)
+	if err != nil {
+		log.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+	err = run(log, server.Config{Version: version, DataDir: *dataDir, BaseURL: *baseURL, InsecureNoAuth: *noAuth,
+		Listen: *listen, TrustedProxies: proxies, PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN"))})
 	if errors.Is(err, errRestart) {
 		reexec(log)
 	}
@@ -85,6 +96,16 @@ func main() {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// parseLogLevel parses --log-level (debug, info, warn or error, any case;
+// slog's "info+2" offsets are accepted too).
+func parseLogLevel(s string) (slog.Level, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
+		return 0, fmt.Errorf("invalid --log-level / PITLANE_LOG_LEVEL %q: want debug, info, warn or error", s)
+	}
+	return lvl, nil
 }
 
 // checkNoAuthListen refuses to serve without authentication on anything but
@@ -134,7 +155,8 @@ func reexec(log *slog.Logger) {
 	os.Exit(1)
 }
 
-func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
+func run(log *slog.Logger, cfg server.Config) error {
+	listen, dataDir := cfg.Listen, cfg.DataDir
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -149,14 +171,11 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)
 	}
-	if _, err := p.Docker().Ping(ctx); err != nil {
+	if err := p.Ping(ctx); err != nil {
 		return fmt.Errorf("cannot reach Docker (is the socket mounted / is Docker running?): %w", err)
 	}
 
-	srv := server.New(server.Config{
-		Version: version, DataDir: dataDir, BaseURL: baseURL,
-		PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN")), InsecureNoAuth: noAuth,
-	}, st, p, log.With("component", "http"), web.Dist())
+	srv := server.New(cfg, st, p, log.With("component", "http"), web.Dist())
 	mgr := scaler.New(st, p, dataDir, srv.Credentials, srv.Notify, log.With("component", "scaler"))
 	mgr.Version = version
 	mgr.ListRunners = srv.GitHubRunners

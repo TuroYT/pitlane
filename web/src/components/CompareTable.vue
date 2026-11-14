@@ -48,7 +48,7 @@ function ratio(r: Row) {
     <div class="row-between">
       <h2>Pitlane vs GitHub-hosted</h2>
       <div class="filters">
-        <label v-if="rows" class="inline"><input type="checkbox" v-model="onlyBoth" /> Only jobs run on both</label>
+        <label v-if="rows" class="inline"><input v-model="onlyBoth" type="checkbox" /> Only jobs run on both</label>
         <button class="small" :disabled="loading" @click="load(!!rows)">{{ loading ? 'Comparing…' : rows ? 'Refresh' : 'Compare' }}</button>
       </div>
     </div>

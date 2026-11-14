@@ -104,7 +104,7 @@ func (p *Pool) syncPnpmStore(ctx context.Context, slot int, owner string) {
 	p.volMu.RLock()
 	defer p.volMu.RUnlock()
 	start := time.Now()
-	st, err := p.mergeStore(ctx, slot, vol)
+	st, err := p.ops().mergeStore(ctx, slot, vol)
 	if err != nil {
 		p.stores.set(slot, "")
 		p.stores.mu.Lock()
@@ -121,8 +121,8 @@ func (p *Pool) syncPnpmStore(ctx context.Context, slot int, owner string) {
 		"deduped", st.dedup, "ms", time.Since(start).Milliseconds())
 }
 
-// slotStoreEmpty reports whether the slot has no pnpm store content yet.
-func (p *Pool) slotStoreEmpty(ctx context.Context, slot int) bool {
+func (d dockerSlotOps) slotStoreEmpty(ctx context.Context, slot int) bool {
+	p := d.p
 	work, err := p.cli.VolumeInspect(ctx, slotWork(slot))
 	if err != nil {
 		return false
@@ -137,7 +137,8 @@ func (p *Pool) slotStoreEmpty(ctx context.Context, slot int) bool {
 
 var errNoHostAccess = errors.New("Docker volumes are not reachable from Pitlane's filesystem")
 
-func (p *Pool) mergeStore(ctx context.Context, slot int, vol string) (mergeStats, error) {
+func (d dockerSlotOps) mergeStore(ctx context.Context, slot int, vol string) (mergeStats, error) {
+	p := d.p
 	if _, err := p.cli.VolumeInspect(ctx, vol); err != nil {
 		if _, err := p.cli.VolumeCreate(ctx, volume.CreateOptions{Name: vol, Labels: map[string]string{LabelManaged: "true"}}); err != nil {
 			return mergeStats{}, fmt.Errorf("create volume %s: %w", vol, err)

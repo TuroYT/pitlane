@@ -50,18 +50,18 @@ async function save(clearMetricsToken = false) {
       <h2>Capacity</h2>
       <label>
         Parallel jobs (slots)
-        <input type="number" min="1" max="64" v-model.number="s.slots" />
+        <input v-model.number="s.slots" type="number" min="1" max="64" />
         <small>Each slot is a warm Docker daemon that runs one job at a time. A good start is half your CPU cores.</small>
       </label>
       <div class="grid2">
         <label>
           Memory limit per job (MB)
-          <input type="number" min="0" v-model.number="s.memoryMb" />
+          <input v-model.number="s.memoryMb" type="number" min="0" />
           <small>0 = no limit (fastest).</small>
         </label>
         <label>
           CPU weight per job
-          <input type="number" min="0" v-model.number="s.cpuShares" />
+          <input v-model.number="s.cpuShares" type="number" min="0" />
           <small>Relative share when the host is saturated (Docker cpu-shares). 0 = default. A lone job always gets every core.</small>
         </label>
       </div>
@@ -77,18 +77,18 @@ async function save(clearMetricsToken = false) {
         </select>
       </label>
       <label class="inline">
-        <input type="checkbox" v-model="s.mirror" /> Local Docker Hub mirror (faster pulls, no rate limits)
+        <input v-model="s.mirror" type="checkbox" /> Local Docker Hub mirror (faster pulls, no rate limits)
       </label>
       <label class="inline">
-        <input type="checkbox" v-model="s.qemu" /> Multi-architecture builds (QEMU emulation, applied at next restart)
+        <input v-model="s.qemu" type="checkbox" /> Multi-architecture builds (QEMU emulation, applied at next restart)
       </label>
       <label>
         Docker build cache kept per slot (GB)
-        <input type="number" min="1" v-model.number="s.keepBuildGb" />
+        <input v-model.number="s.keepBuildGb" type="number" min="1" />
       </label>
       <label>
         Minimum free disk space (GB)
-        <input type="number" min="0" v-model.number="s.minFreeDiskGb" />
+        <input v-model.number="s.minFreeDiskGb" type="number" min="0" />
         <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 = never prune.</small>
       </label>
     </section>
@@ -121,7 +121,7 @@ async function save(clearMetricsToken = false) {
       </label>
       <label>
         Keep job history and logs (days)
-        <input type="number" min="1" v-model.number="s.historyDays" />
+        <input v-model.number="s.historyDays" type="number" min="1" />
       </label>
       <label>
         Metrics token

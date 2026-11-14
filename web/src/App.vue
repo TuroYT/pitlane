@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, post, connectLive, disconnectLive, live, type Status } from './api'
+import { api, post, connectLive, disconnectLive, live, onUnauthorized, type Status } from './api'
 import { status } from './session'
 import BrandMark from './components/BrandMark.vue'
 import Icon from './components/Icon.vue'
@@ -23,6 +23,13 @@ async function refresh() {
   }
   ready.value = true
 }
+
+// The session is gone (expired, user removed): back to the login page.
+onUnauthorized(() => {
+  disconnectLive()
+  if (status.value) status.value = { ...status.value, signedIn: false }
+  if (route.path !== '/login' && route.path !== '/setup') void router.replace('/login')
+})
 
 onMounted(async () => {
   await router.isReady()

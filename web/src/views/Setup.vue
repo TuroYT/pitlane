@@ -9,7 +9,7 @@ const emit = defineEmits<{ refresh: [] }>()
 const route = useRoute()
 
 const token = ref('')
-const baseUrl = ref(status.value?.baseUrl ?? location.origin)
+const baseUrl = ref(status.value?.baseUrl || location.origin)
 const org = ref('')
 const appName = ref('')
 const busy = ref(false)
@@ -86,14 +86,14 @@ async function createApp() {
 
       <p v-if="error" class="alert error">{{ error }}</p>
 
-      <form v-if="step === 'unlock'" @submit.prevent="unlock" class="stack">
+      <form v-if="step === 'unlock'" class="stack" @submit.prevent="unlock">
         <p>Enter the one-time setup token. It is printed in Pitlane's logs, or run:</p>
         <pre class="code">pitlane setup-token</pre>
         <input v-model="token" placeholder="Setup token" autofocus required autocomplete="off" />
         <button class="primary" :disabled="busy || !token">Continue</button>
       </form>
 
-      <form v-else-if="step === 'create'" @submit.prevent="createApp" class="stack">
+      <form v-else-if="step === 'create'" class="stack" @submit.prevent="createApp">
         <p>
           Pitlane creates its own private GitHub App in one click. It uses it to register runners and to sign you in.
           Nothing to copy or paste.

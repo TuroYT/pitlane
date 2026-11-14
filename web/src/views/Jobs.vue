@@ -110,11 +110,11 @@ function go(p: number) {
     <nav v-if="total > PAGE" class="pager" aria-label="Pages">
       <span class="muted small" aria-live="polite">{{ from }}–{{ to }} of {{ total.toLocaleString() }}</span>
       <div class="filters">
-        <button type="button" class="small" :disabled="page <= 1 || loading" @click="go(1)" aria-label="First page">«</button>
+        <button type="button" class="small" :disabled="page <= 1 || loading" aria-label="First page" @click="go(1)">«</button>
         <button type="button" class="small" :disabled="page <= 1 || loading" @click="go(page - 1)">Previous</button>
         <span class="small">Page {{ page }} / {{ pages }}</span>
         <button type="button" class="small" :disabled="page >= pages || loading" @click="go(page + 1)">Next</button>
-        <button type="button" class="small" :disabled="page >= pages || loading" @click="go(pages)" aria-label="Last page">»</button>
+        <button type="button" class="small" :disabled="page >= pages || loading" aria-label="Last page" @click="go(pages)">»</button>
       </div>
     </nav>
     <CompareTable />

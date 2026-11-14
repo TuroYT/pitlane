@@ -166,17 +166,17 @@ onUnmounted(() => window.clearTimeout(timer))
 
     <div v-if="prefs" class="stack">
       <label class="inline">
-        <input type="checkbox" v-model="prefs.autoUpdate" :disabled="!p.capability.canSelfUpdate" />
+        <input v-model="prefs.autoUpdate" type="checkbox" :disabled="!p.capability.canSelfUpdate" />
         Install updates automatically (patch and minor releases of the same major version; while in 0.x only patch releases; never pre-releases; only when no job runs)
       </label>
       <div v-if="prefs.autoUpdate" class="grid2">
         <label>
           Window start (hour, local time)
-          <input type="number" min="0" max="23" v-model.number="prefs.window.start" />
+          <input v-model.number="prefs.window.start" type="number" min="0" max="23" />
         </label>
         <label>
           Window end (hour)
-          <input type="number" min="0" max="23" v-model.number="prefs.window.end" />
+          <input v-model.number="prefs.window.end" type="number" min="0" max="23" />
           <small>Same as the start = any time.</small>
         </label>
       </div>
@@ -210,7 +210,7 @@ onUnmounted(() => window.clearTimeout(timer))
       <small class="muted">New runners use the pulled image; busy runners are never touched.</small>
     </div>
     <label v-if="prefs" class="inline">
-      <input type="checkbox" v-model="prefs.autoPull" /> Pull the runner image automatically every day
+      <input v-model="prefs.autoPull" type="checkbox" /> Pull the runner image automatically every day
     </label>
     <div v-if="prefs" class="filters">
       <button type="button" class="small" @click="savePrefs">Save update preferences</button>
