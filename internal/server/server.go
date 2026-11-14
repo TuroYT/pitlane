@@ -13,7 +13,9 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -39,6 +41,11 @@ type Config struct {
 	BaseURL        string // public URL of the UI, overrides the stored value
 	PAT            string // optional personal access token instead of a GitHub App
 	InsecureNoAuth bool   // disable login (development only)
+	// Listen is the HTTP listen address: the base URL falls back to it.
+	Listen string
+	// TrustedProxies may set the Host and X-Forwarded-Proto headers the
+	// base URL is derived from when none is configured (loopback always may).
+	TrustedProxies []netip.Prefix
 }
 
 // Server is the HTTP server.
@@ -89,18 +96,86 @@ func (s *Server) Credentials() scaler.Credentials {
 
 func (s *Server) appConfigured() bool { return s.store.Get("app_client_id", "") != "" }
 
+// baseURL is the public URL of the UI (OAuth callback, Secure cookies).
 func (s *Server) baseURL(r *http.Request) string {
+	if v := s.knownBaseURL(r); v != "" {
+		return v
+	}
+	return s.listenURL()
+}
+
+// knownBaseURL is --base-url, else the URL saved by the setup, else, for a
+// request from loopback or a trusted proxy, the one its Host and
+// X-Forwarded-Proto headers give. Anyone else cannot choose it: "".
+func (s *Server) knownBaseURL(r *http.Request) string {
 	if s.cfg.BaseURL != "" {
 		return strings.TrimRight(s.cfg.BaseURL, "/")
 	}
 	if v := s.store.Get("base_url", ""); v != "" {
 		return v
 	}
+	if !s.trustedProxy(r) {
+		return ""
+	}
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+// ParseTrustedProxies parses a comma-separated list of IP addresses and
+// CIDR prefixes (PITLANE_TRUSTED_PROXIES).
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, f := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if p, err := netip.ParsePrefix(f); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy %q: not an IP address or CIDR prefix", f)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
+}
+
+// trustedProxy reports whether a request comes from loopback or from one of
+// the configured trusted proxies.
+func (s *Server) trustedProxy(r *http.Request) bool {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	addr := ap.Addr().Unmap()
+	if addr.IsLoopback() {
+		return true
+	}
+	for _, p := range s.cfg.TrustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// listenURL derives a URL from the listen address (the machine's host name
+// when it listens on every interface), used when no base URL is known.
+func (s *Server) listenURL() string {
+	host, port, err := net.SplitHostPort(s.cfg.Listen)
+	if err != nil || port == "" {
+		host, port = "", "8080"
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host, _ = os.Hostname()
+		if host == "" {
+			host = "localhost"
+		}
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // EnsureSetupToken creates the one-time token protecting the first setup.
@@ -296,7 +371,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"setupUnlocked": s.hasSetupCookie(r),
 		"signedIn":      signedIn,
 		"user":          user,
-		"baseUrl":       s.baseURL(r),
+		"baseUrl":       s.knownBaseURL(r), // "" before setup: the UI proposes its own address
 		"app": map[string]string{
 			"slug":    s.store.Get("app_slug", ""),
 			"name":    s.store.Get("app_name", ""),
@@ -1364,7 +1439,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
-		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.baseURL(r),
+		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
 	})
 }

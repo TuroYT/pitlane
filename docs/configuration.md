@@ -108,13 +108,27 @@ scrape_configs:
 | --- | --- | --- | --- |
 | `PITLANE_LISTEN` | `--listen` | `:8080` | HTTP address. |
 | `PITLANE_DATA` | `--data` | `/var/lib/pitlane` | Database, master key, logs. **Back it up.** |
-| `PITLANE_BASE_URL` | `--base-url` | request host | URL you open in the browser. |
+| `PITLANE_BASE_URL` | `--base-url` | saved by the setup | URL you open in the browser (see [Base URL](#base-url)). |
+| `PITLANE_TRUSTED_PROXIES` | `--trusted-proxies` | | Comma-separated IPs or CIDRs of reverse proxies allowed to set the `Host` and `X-Forwarded-Proto` headers the base URL is derived from (loopback always is). |
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |
 | `PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS` | `--insecure-no-auth-any-address` | `false` | Allows `--insecure-no-auth` on any listen address. Only behind your own authentication (an authenticating reverse proxy that is the only thing able to reach Pitlane). |
 | `PITLANE_SELF_UPDATE` | | | `false` disables self-update (for packaged installs). |
 | `DOCKER_HOST` | | local socket | Standard Docker client variables are honored. |
+
+### Base URL
+
+The base URL is the GitHub App's callback address and decides whether cookies are
+`Secure`. Pitlane uses, in order: `PITLANE_BASE_URL`; the URL saved by the first-run
+setup (the setup page proposes the address your browser used, and you can edit it);
+for a request coming from loopback or from a `PITLANE_TRUSTED_PROXIES` address, the
+request's `Host` and `X-Forwarded-Proto` headers; otherwise a URL built from
+`PITLANE_LISTEN` (the machine's host name when it listens on every interface).
+Other clients cannot choose it through request headers. First-run setup keeps
+working without any of these set: open the UI at the address you want, check the
+proposed URL and create the App. Behind a reverse proxy on another machine, set
+`PITLANE_BASE_URL` or list the proxy in `PITLANE_TRUSTED_PROXIES`.
 
 ### Personal access token mode
 

@@ -9,7 +9,7 @@ const emit = defineEmits<{ refresh: [] }>()
 const route = useRoute()
 
 const token = ref('')
-const baseUrl = ref(status.value?.baseUrl ?? location.origin)
+const baseUrl = ref(status.value?.baseUrl || location.origin)
 const org = ref('')
 const appName = ref('')
 const busy = ref(false)
