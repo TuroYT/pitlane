@@ -12,6 +12,7 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`) used by every slot. |
 | Build cache kept per slot | 20 GB | `docker builder prune --keep-storage` after each job. |
+| Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
 | Runner image | `ghcr.io/turoyt/pitlane-runner:latest` | GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). Any image based on `ghcr.io/actions/actions-runner` works. |
 | Docker-in-Docker image | `docker:28-dind` | |
 | Allowed GitHub users | first admin | Comma-separated logins. |

@@ -79,6 +79,11 @@ async function save() {
         Docker build cache kept per slot (GB)
         <input type="number" min="1" v-model.number="s.keepBuildGb" />
       </label>
+      <label>
+        Minimum free disk space (GB)
+        <input type="number" min="0" v-model.number="s.minFreeDiskGb" />
+        <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 = never prune.</small>
+      </label>
     </section>
 
     <section class="card stack">

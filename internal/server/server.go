@@ -956,33 +956,35 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 
 // Settings editable from the UI.
 type Settings struct {
-	Slots        int    `json:"slots"`
-	RunnerImage  string `json:"runnerImage"`
-	DindImage    string `json:"dindImage"`
-	CPUShares    int64  `json:"cpuShares"`
-	MemoryMB     int64  `json:"memoryMb"`
-	CacheScope   string `json:"cacheScope"`
-	Mirror       bool   `json:"mirror"`
-	QEMU         bool   `json:"qemu"`
-	KeepBuildGB  int    `json:"keepBuildGb"`
-	AllowedUsers string `json:"allowedUsers"`
-	HistoryDays  int    `json:"historyDays"`
-	BaseURL      string `json:"baseUrl"`
+	Slots         int    `json:"slots"`
+	RunnerImage   string `json:"runnerImage"`
+	DindImage     string `json:"dindImage"`
+	CPUShares     int64  `json:"cpuShares"`
+	MemoryMB      int64  `json:"memoryMb"`
+	CacheScope    string `json:"cacheScope"`
+	Mirror        bool   `json:"mirror"`
+	QEMU          bool   `json:"qemu"`
+	KeepBuildGB   int    `json:"keepBuildGb"`
+	MinFreeDiskGB int    `json:"minFreeDiskGb"`
+	AllowedUsers  string `json:"allowedUsers"`
+	HistoryDays   int    `json:"historyDays"`
+	BaseURL       string `json:"baseUrl"`
 }
 
 // LoadPoolConfig reads the pool configuration from the store.
 func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
-		StateFile:   filepath.Join(dataDir, "slots.json"),
-		Slots:       st.GetInt("slots", DefaultSlots()),
-		RunnerImage: st.Get("runner_image", ""),
-		DindImage:   st.Get("dind_image", ""),
-		CPUShares:   int64(st.GetInt("cpu_shares", 0)),
-		MemoryMB:    int64(st.GetInt("memory_mb", 0)),
-		CacheScope:  st.Get("cache_scope", "owner"),
-		Mirror:      st.Get("mirror", "true") == "true",
-		NoQEMU:      st.Get("qemu", "true") != "true",
-		KeepBuildGB: st.GetInt("keep_build_gb", 20),
+		StateFile:     filepath.Join(dataDir, "slots.json"),
+		Slots:         st.GetInt("slots", DefaultSlots()),
+		RunnerImage:   st.Get("runner_image", ""),
+		DindImage:     st.Get("dind_image", ""),
+		CPUShares:     int64(st.GetInt("cpu_shares", 0)),
+		MemoryMB:      int64(st.GetInt("memory_mb", 0)),
+		CacheScope:    st.Get("cache_scope", "owner"),
+		Mirror:        st.Get("mirror", "true") == "true",
+		NoQEMU:        st.Get("qemu", "true") != "true",
+		KeepBuildGB:   st.GetInt("keep_build_gb", 20),
+		MinFreeDiskGB: st.GetInt("min_free_disk_gb", 20),
 	}
 }
 
@@ -993,13 +995,14 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.pool.Config()
 	writeJSON(w, Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
-		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB,
+		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
 		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.baseURL(r),
 	})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
-	var in Settings
+	// Fields missing from the request keep their current value.
+	in := Settings{MinFreeDiskGB: s.pool.Config().MinFreeDiskGB}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -1022,6 +1025,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		"cpu_shares": strconv.FormatInt(max(0, in.CPUShares), 10), "memory_mb": strconv.FormatInt(max(0, in.MemoryMB), 10),
 		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "qemu": strconv.FormatBool(in.QEMU), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
 		"allowed_users": in.AllowedUsers, "history_days": strconv.Itoa(max(1, in.HistoryDays)),
+		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
 	}
 	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
 		kv["base_url"] = b

@@ -75,6 +75,9 @@ type Config struct {
 	ImageOS     string // value of ImageOS for setup-* actions
 	StateFile   string // where slot ownership is persisted (outside any slot's reach)
 	NoQEMU      bool   // disable multi-arch emulation (binfmt_misc + QEMU)
+	// Minimum free disk space (GB) on Docker's filesystem: below it, idle
+	// caches are pruned after each job (0 = never prune).
+	MinFreeDiskGB int
 }
 
 func (c *Config) defaults() {
@@ -149,6 +152,9 @@ type Pool struct {
 	binfmt    map[string]string // binfmt_misc entries registered by Pitlane (name -> content)
 	qemuWant  bool              // QEMU should be (re)registered as soon as no job runs
 	qemuBusy  bool              // registration in progress: no slot is handed out
+
+	pruneMu sync.Mutex   // one disk reclaim at a time
+	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -1025,6 +1031,9 @@ func cacheVolume(scope, owner string) string {
 
 // StartRunner creates and starts an ephemeral runner container in a slot.
 func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error) {
+	// Cache volumes must not be pruned between their creation and their use.
+	p.volMu.RLock()
+	defer p.volMu.RUnlock()
 	cfg := p.Config()
 	cacheVol := cacheVolume(cfg.CacheScope, spec.Owner)
 	toolVol := strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)

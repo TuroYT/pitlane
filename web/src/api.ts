@@ -96,6 +96,7 @@ export interface Settings {
   mirror: boolean
   qemu: boolean
   keepBuildGb: number
+  minFreeDiskGb: number
   allowedUsers: string
   historyDays: number
   baseUrl: string

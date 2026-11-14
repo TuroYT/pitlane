@@ -625,6 +625,7 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 		t.mu.Unlock()
 	}
 	m.changed()
+	m.pool.EnsureFreeDisk(ctx) // idle slots only; skipped while another prune runs
 }
 
 // ------------------------------------------------------------------ scaler
