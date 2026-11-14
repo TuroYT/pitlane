@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Updates: Pitlane releases (self-update) and the runner image. Self-contained:
 // its own API types and calls (GET /api/updates, POST /api/updates/*).
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, toRaw } from 'vue'
 import { ago, api, post } from '../api'
 
 interface UpdateSettings {
@@ -76,11 +76,16 @@ function schedule() {
   timer = window.setTimeout(load, working.value ? 2000 : 60000)
 }
 
+// st is reactive: structuredClone cannot copy a Vue proxy, clone the raw object.
+function copySettings(s: UpdateSettings): UpdateSettings {
+  return structuredClone(toRaw(s))
+}
+
 async function load() {
   const before = p.value
   try {
     st.value = await api<UpdatesState>('/api/updates')
-    if (!prefs.value) prefs.value = structuredClone(st.value.settings)
+    if (!prefs.value) prefs.value = copySettings(st.value.settings)
     if (before?.phase === 'restarting' && st.value.pitlane.current !== before.current) {
       window.location.reload() // new version: reload its UI
       return
@@ -112,7 +117,7 @@ async function savePrefs() {
   error.value = ''
   try {
     st.value = await post<UpdatesState>('/api/updates/settings', prefs.value, 'PUT')
-    prefs.value = structuredClone(st.value.settings)
+    prefs.value = copySettings(st.value.settings)
     savedPrefs.value = true
     setTimeout(() => (savedPrefs.value = false), 2500)
   } catch (e) {
