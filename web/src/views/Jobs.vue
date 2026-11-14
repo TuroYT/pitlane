@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, live, type Job } from '../api'
 import JobTable from '../components/JobTable.vue'
+import CompareTable from '../components/CompareTable.vue'
 
 const jobs = ref<Job[]>([])
 const repo = ref('')
@@ -47,5 +48,6 @@ const filtered = computed(() =>
       </div>
     </div>
     <JobTable :jobs="filtered" />
+    <CompareTable />
   </div>
 </template>

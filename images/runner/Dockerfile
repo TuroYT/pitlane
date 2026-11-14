@@ -20,12 +20,21 @@ RUN apt-get update \
       zip unzip xz-utils zstd bzip2 p7zip-full \
       jq git-lfs rsync openssh-client ca-certificates gnupg lsb-release wget curl \
       file tree time parallel tzdata locales sudo less nano \
-      sqlite3 libsqlite3-dev postgresql-client default-mysql-client redis-tools \
+      sqlite3 libsqlite3-dev default-mysql-client redis-tools \
       libssl-dev libffi-dev zlib1g-dev libyaml-dev libreadline-dev \
       python3-pip python3-venv python3-dev pipx \
       openjdk-17-jdk-headless \
  && git lfs install --system \
  && rm -rf /var/lib/apt/lists/*
+
+# PostgreSQL client from the official PGDG repository: the latest major can
+# talk to every older server (Ubuntu's client is too old for recent services).
+RUN set -eux; \
+    install -d /usr/share/postgresql-common/pgdg; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; apt-get install -y --no-install-recommends postgresql-client; rm -rf /var/lib/apt/lists/*; \
+    pg_dump --version
 
 # Node.js LTS with corepack (pnpm / yarn), like ubuntu-latest.
 RUN set -eux; \

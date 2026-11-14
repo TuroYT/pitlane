@@ -218,6 +218,51 @@ func LatestRunnerVersion(ctx context.Context) (string, error) {
 	return strings.TrimPrefix(rel.TagName, "v"), nil
 }
 
+// JobRun is one completed job of a workflow run.
+type JobRun struct {
+	Workflow   string
+	Name       string
+	RunnerName string
+	Seconds    float64
+}
+
+// RecentJobs returns the successful jobs of the last completed workflow runs.
+func RecentJobs(ctx context.Context, token, owner, repo string, maxRuns int) ([]JobRun, error) {
+	var runs struct {
+		Runs []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"workflow_runs"`
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs?status=completed&per_page=%d", apiBase, url.PathEscape(owner), url.PathEscape(repo), min(maxRuns, 100))
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &runs); err != nil {
+		return nil, err
+	}
+	var out []JobRun
+	for _, r := range runs.Runs {
+		var jobs struct {
+			Jobs []struct {
+				Name        string    `json:"name"`
+				RunnerName  string    `json:"runner_name"`
+				Conclusion  string    `json:"conclusion"`
+				StartedAt   time.Time `json:"started_at"`
+				CompletedAt time.Time `json:"completed_at"`
+			} `json:"jobs"`
+		}
+		u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), r.ID)
+		if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
+			continue
+		}
+		for _, j := range jobs.Jobs {
+			if j.Conclusion != "success" || j.StartedAt.IsZero() || j.CompletedAt.Before(j.StartedAt) {
+				continue
+			}
+			out = append(out, JobRun{Workflow: r.Name, Name: j.Name, RunnerName: j.RunnerName, Seconds: j.CompletedAt.Sub(j.StartedAt).Seconds()})
+		}
+	}
+	return out, nil
+}
+
 // JobLog downloads the log of the job a given runner ran in a workflow run.
 // token is an installation token or a personal access token.
 func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {

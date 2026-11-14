@@ -525,12 +525,18 @@ func readBinfmt() map[string]string {
 	return out
 }
 
+// hostMachine returns the ELF e_machine of the host as hex bytes, the way it
+// ends a binfmt_misc magic string.
+func hostMachine() string {
+	return map[string]string{"amd64": "3e00", "arm64": "b700", "386": "0300", "riscv64": "f300", "ppc64le": "1500", "s390x": "0016"}[runtime.GOARCH]
+}
+
 // trustedQEMU keeps only the handlers Pitlane itself registers: QEMU
 // emulators whose interpreter is the static QEMU binary installed by binfmt.
 func trustedQEMU(all map[string]string) map[string]string {
 	// ELF e_machine of the host, as it appears at the end of a binfmt magic:
 	// a handler matching native binaries would intercept every program.
-	native := map[string]string{"amd64": "3e00", "arm64": "b700", "386": "0300", "riscv64": "f300", "ppc64le": "1500", "s390x": "0016"}[runtime.GOARCH]
+	native := hostMachine()
 	out := map[string]string{}
 	for name, def := range all {
 		if !strings.HasPrefix(name, "qemu-") || !strings.Contains(def, "interpreter /usr/bin/"+name+"\n") {
