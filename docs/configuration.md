@@ -63,7 +63,7 @@ whenever the repository list is shown:
 
 **Pitlane.** Every 6 hours (and on **Check now**) Pitlane asks the GitHub API, without a token, for the releases of `TuroYT/pitlane`, and shows the latest stable release next to the running version, with a link to its release notes. If the repository is private or unreachable, the check fails with a message and nothing else changes.
 
-**Update now** is offered when Pitlane runs as a plain binary (systemd, the Proxmox LXC script). It downloads `pitlane_linux_<arch>` and `checksums.txt` from the **same** release, over HTTPS from `github.com` and GitHub's release storage hosts only, with a 200 MB limit, and refuses to install when the checksum does not match or the file has no entry. It then runs `<new binary> version`, writes the binary next to the current one, fsyncs it, keeps the current one as `pitlane.prev` and renames the new one into place. Pitlane then shuts down like on `systemctl stop` (busy runners keep running and are adopted) and re-executes itself; if that fails it exits and systemd's `Restart=always` starts it again. Every step is logged (`journalctl -u pitlane`) and errors show in the UI; on any failure the current binary is left untouched.
+**Update now** is offered when Pitlane runs as a plain binary (systemd, the Proxmox LXC script). It downloads `pitlane_linux_<arch>` and `checksums.txt` from the **same** release, over HTTPS from `github.com` and GitHub's release storage hosts only, with a 200 MB limit, and refuses to install when the checksum does not match or the file has no entry, or when its build attestation does not verify (see below). It then runs `<new binary> version`, writes the binary next to the current one, fsyncs it, keeps the current one as `pitlane.prev` and renames the new one into place. Pitlane then shuts down like on `systemctl stop` (busy runners keep running and are adopted) and re-executes itself; if that fails it exits and systemd's `Restart=always` starts it again. Every step is logged (`journalctl -u pitlane`) and errors show in the UI; on any failure the current binary is left untouched.
 
 Rollback: `sudo mv /usr/local/bin/pitlane.prev /usr/local/bin/pitlane && sudo systemctl restart pitlane`.
 
@@ -71,7 +71,16 @@ Self-update is not offered, and the exact command is shown instead, when Pitlane
 
 **Install updates automatically** (off by default) installs, inside a daily window (local time, default 03:00-05:00), the highest patch or minor release of the running major version (while Pitlane is in 0.x, where a minor release may break things, only patch releases of the running minor version), never a pre-release, and only while no job runs. A failed automatic attempt is retried the next day. New major versions (and, in 0.x, new minor versions) are always installed manually, with **Update now**.
 
-The checksum only proves that the binary is the one listed in its release. A future step should also verify a signature or a GitHub build attestation of the release (see the release workflow): the `update.Verifier` hook in `internal/update` runs after the checksum check, before anything is installed.
+**Build attestation.** The checksum only proves that the binary is the one listed in its release. After it, and before anything is written in place, Pitlane checks the binary's GitHub build provenance attestation (published by `actions/attest-build-provenance` in the release workflow):
+
+- it asks `GET https://api.github.com/repos/TuroYT/pitlane/attestations/sha256:<digest of the downloaded binary>` (anonymous);
+- it verifies the Sigstore bundle with [sigstore-go](https://github.com/sigstore/sigstore-go): signature, certificate chain to the Sigstore public-good Fulcio roots, signed certificate timestamp, and inclusion in the Rekor transparency log. The trusted root comes from Sigstore's TUF repository (`https://tuf-repo-cdn.sigstore.dev`, verified against the TUF root embedded in Pitlane, cached in `<data>/sigstore-tuf`);
+- the certificate must be issued by GitHub Actions (`https://token.actions.githubusercontent.com`) to the workflow `TuroYT/pitlane/.github/workflows/release.yml` at a `refs/tags/v*` ref, for the repository `https://github.com/TuroYT/pitlane`, on a GitHub-hosted runner, and for the tag of the release being installed;
+- the statement must be a SLSA provenance whose subject `pitlane_linux_<arch>` has the downloaded binary's SHA-256.
+
+Fail closed: when GitHub has no attestation for the digest, when the API, the TUF repository or any check fails, nothing is installed and the error shows in **Settings → Updates** (and in the journal). An automatic update that fails this way is retried the next day. Manual installs with `install.sh` are not affected.
+
+The expected repository and workflow are fixed at build time and cannot be changed from the UI or the environment. A fork that publishes its own attested releases builds with `-ldflags "-X github.com/TuroYT/pitlane/internal/update.AttestationRepo=<owner>/<repo> -X github.com/TuroYT/pitlane/internal/update.AttestationWorkflow=.github/workflows/release.yml"`. A fork without attestations can set `PITLANE_UPDATE_SKIP_ATTESTATION=true`: **unsafe**, updates then rely on the checksum only (a compromised release would be installed); Pitlane logs a warning at start and at every update, and the Updates panel says so.
 
 **Runner image.** Pitlane reads the GitHub runner version inside the configured runner image (from `/home/runner/bin/Runner.Listener.deps.json` of a created, never started, container) and compares it with the latest `actions/runner` release. GitHub stops accepting a runner that does not update itself about 30 days after a newer version is released: the UI warns a week before that date and after it. **Pull latest** pulls the configured tag again; with **Pull the runner image automatically** (on by default) this happens every day. Runners already started (idle warm runners included) keep their image; runners started after the pull use the new one. The pull runs in the background, so no job waits for it. The image digest in use and the time of the last pull are shown.
 
@@ -116,6 +125,7 @@ scrape_configs:
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |
 | `PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS` | `--insecure-no-auth-any-address` | `false` | Allows `--insecure-no-auth` on any listen address. Only behind your own authentication (an authenticating reverse proxy that is the only thing able to reach Pitlane). |
 | `PITLANE_SELF_UPDATE` | | | `false` disables self-update (for packaged installs). |
+| `PITLANE_UPDATE_SKIP_ATTESTATION` | | | `true` skips the [build attestation](#updates) check of self-updates. **Unsafe**, for forks that publish no attestation. |
 | `DOCKER_HOST` | | local socket | Standard Docker client variables are honored. |
 
 ### Base URL
