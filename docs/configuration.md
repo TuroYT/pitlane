@@ -88,3 +88,12 @@ then unavailable, so put Pitlane behind your own authentication and start it wit
   logs/           runner logs
   setup-token     only until the first admin signs in
 ```
+
+Pitlane restricts the data directory to its owner (`0700`) and creates every file
+in it `0600`. Both the Docker image and the systemd unit run Pitlane as root, which
+owns the directory (a new Compose volume is created by Docker for root). If you
+point `PITLANE_DATA` at a directory owned by another user (a bind mount prepared
+by someone else, Pitlane running as a non-root user with group access), Pitlane
+cannot change its mode: it logs a warning and starts anyway, its files staying
+`0600`. Restrict that directory yourself. A directory Pitlane owns but cannot
+`chmod` is an error.

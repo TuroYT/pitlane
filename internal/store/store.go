@@ -14,10 +14,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -83,10 +85,8 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
-	// MkdirAll keeps the mode of an existing directory: the data directory
-	// holds the master key, the database and job logs.
-	if err := os.Chmod(dataDir, 0o700); err != nil { //nolint:gosec // G302: a directory needs the x bit
-		return nil, fmt.Errorf("restrict data directory: %w", err)
+	if err := restrictDataDir(dataDir); err != nil {
+		return nil, err
 	}
 	key, err := loadOrCreateKey(filepath.Join(dataDir, "master.key"))
 	if err != nil {
@@ -119,6 +119,39 @@ func Open(dataDir string) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+// Seams for tests.
+var (
+	chmod       = os.Chmod
+	ownedBySelf = func(path string) bool {
+		info, err := os.Stat(path)
+		if err != nil {
+			return false
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		return ok && int(st.Uid) == os.Geteuid()
+	}
+)
+
+// restrictDataDir makes the data directory private to its owner: it holds
+// the master key, the database and job logs, and MkdirAll keeps the mode of
+// an existing directory. A directory Pitlane does not own (a volume or bind
+// mount prepared by someone else, Pitlane running as a non-root user with
+// group access) cannot be chmod'ed: that is only logged, since every file
+// Pitlane writes in it is itself created 0600 (and the database files are
+// checked below).
+func restrictDataDir(dataDir string) error {
+	err := chmod(dataDir, 0o700) //nolint:gosec // G302: a directory needs the x bit
+	if err == nil {
+		return nil
+	}
+	if !ownedBySelf(dataDir) {
+		slog.Warn("cannot restrict the data directory to its owner: it belongs to another user, its files stay private (0600)",
+			"dir", dataDir, "error", err)
+		return nil
+	}
+	return fmt.Errorf("restrict data directory: %w", err)
 }
 
 // Close closes the database.

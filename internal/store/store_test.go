@@ -243,3 +243,28 @@ func TestOpenRestrictsPermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenDataDirOwnedByAnotherUser(t *testing.T) {
+	defer func(c func(string, os.FileMode) error, o func(string) bool) { chmod, ownedBySelf = c, o }(chmod, ownedBySelf)
+	chmod = func(string, os.FileMode) error { return os.ErrPermission }
+
+	// Not ours (e.g. a volume owned by another user): logged, not fatal,
+	// and the database files are still private.
+	ownedBySelf = func(string) bool { return false }
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("a data dir owned by another user must not prevent the start: %v", err)
+	}
+	st, err := os.Stat(filepath.Join(dir, "pitlane.db"))
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("database mode %v %v", st.Mode().Perm(), err)
+	}
+	s.Close()
+
+	// Ours but chmod fails: something is wrong, refuse to start.
+	ownedBySelf = func(string) bool { return true }
+	if _, err := Open(t.TempDir()); err == nil {
+		t.Fatal("a chmod failure on our own data dir must be fatal")
+	}
+}

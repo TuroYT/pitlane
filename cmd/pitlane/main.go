@@ -64,6 +64,7 @@ func main() {
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(*logLevel))
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
+	slog.SetDefault(log) // packages without a logger of their own (store)
 	if err := run(log, *listen, *dataDir, *baseURL, *noAuth); err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
