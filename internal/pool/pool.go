@@ -157,6 +157,36 @@ type Pool struct {
 	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
 
 	stores storeSync // slot pnpm stores merged with their owner's canonical store
+
+	sops slotOps // nil: Docker (tests set a fake)
+}
+
+// slotOps is what slot wiping and cleanup need from Docker and the host.
+// Tests use a fake implementation.
+type slotOps interface {
+	exec(ctx context.Context, container, script string) (string, int, error)
+	auditBinfmt(ctx context.Context)
+	rebuild(ctx context.Context, slot int) // in the background
+}
+
+func (p *Pool) ops() slotOps {
+	if p.sops != nil {
+		return p.sops
+	}
+	return dockerSlotOps{p}
+}
+
+// dockerSlotOps is the real slotOps.
+type dockerSlotOps struct{ p *Pool }
+
+func (d dockerSlotOps) exec(ctx context.Context, container, script string) (string, int, error) {
+	return d.p.exec(ctx, container, script)
+}
+
+func (d dockerSlotOps) auditBinfmt(ctx context.Context) { d.p.auditBinfmt(ctx) }
+
+func (d dockerSlotOps) rebuild(_ context.Context, slot int) {
+	go d.p.rebuildSlot(context.Background(), slot)
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -825,8 +855,10 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	if l.wipe {
 		p.log.Info("slot changes owner, wiping its caches", "slot", l.Slot, "owner", l.Owner)
 		p.forgetStore(l.Slot)
-		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions " + workDir + "/" + pnpmStoreDir
-		if _, code, err := p.exec(ctx, slotName(l.Slot), script); err != nil || code != 0 {
+		// The whole work directory goes, not only the caches: Release is best
+		// effort and may not have emptied the previous job's workspace (failed
+		// cleanup, Pitlane stopped between the job's end and its release).
+		if _, code, err := p.ops().exec(ctx, slotName(l.Slot), wipeScript); err != nil || code != 0 {
 			// Never hand out a slot that may still hold another owner's data.
 			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", l.Slot, "code", code, "error", err)
 			p.mu.Lock()
@@ -835,7 +867,7 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 			}
 			p.mu.Unlock()
 			p.setStatus(l.Slot, "starting", "")
-			go p.rebuildSlot(context.Background(), l.Slot)
+			p.ops().rebuild(ctx, l.Slot)
 			return ErrSlotRebuilding
 		}
 		p.mu.Lock()
@@ -860,8 +892,6 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	return nil
 }
 
-// Release cleans what the job left in the slot (containers, networks,
-// volumes, workspace) while keeping images and build cache, then frees it.
 // strictVolumes returns the throwaway cache volumes of a strict runner.
 func strictVolumes(runner string) (cache, tools string) {
 	return "pitlane-strict-" + runner + "-cache", "pitlane-strict-" + runner + "-tools"
@@ -872,8 +902,7 @@ func strictVolumes(runner string) (cache, tools string) {
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.setStatus(l.Slot, "cleaning", "")
 	p.forgetStore(l.Slot)
-	script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; find " + workDir + " -mindepth 1 -maxdepth 1 -exec rm -rf {} +; chown " + runnerUID + " " + workDir
-	_, code, err := p.exec(ctx, slotName(l.Slot), script)
+	_, code, err := p.ops().exec(ctx, slotName(l.Slot), wipeScript)
 	if l.Runner != "" {
 		c, t := strictVolumes(l.Runner)
 		for _, v := range []string{c, t} {
@@ -885,7 +914,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 			p.mu.Unlock()
 		}
 	}
-	p.auditBinfmt(ctx)
+	p.ops().auditBinfmt(ctx)
 	if err != nil || code != 0 {
 		p.log.Error("strict cleanup failed, rebuilding the slot", "slot", l.Slot, "code", code, "error", err)
 		p.mu.Lock()
@@ -894,7 +923,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 		}
 		p.mu.Unlock()
 		p.setStatus(l.Slot, "starting", "")
-		go p.rebuildSlot(context.Background(), l.Slot)
+		p.ops().rebuild(ctx, l.Slot)
 		return
 	}
 	p.mu.Lock()
@@ -913,6 +942,41 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.setStatus(l.Slot, "ready", "")
 }
 
+// wipeScript empties a slot for a new owner (or around a strict job): every
+// container, image, volume and build cache of its daemon, and the whole work
+// directory. It fails on the first error.
+var wipeScript = "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; " +
+	clearDir(workDir) + "; chown " + runnerUID + " " + workDir
+
+// clearDir returns a command removing everything in dir (hidden files
+// included) except the top-level entries named in keep.
+func clearDir(dir string, keep ...string) string {
+	cmd := "find " + dir + " -mindepth 1 -maxdepth 1"
+	for _, k := range keep {
+		cmd += " ! -name " + k
+	}
+	return cmd + " -exec rm -rf {} +"
+}
+
+// releaseScript cleans what a job left in its slot while keeping the owner's
+// caches (images, build cache, actions, pnpm store). The daemon prunes are
+// best effort; the script fails when the workspace cannot be emptied or a
+// container of the job survives, and the slot is then never reused as is.
+func releaseScript(keepBuildGB int) string {
+	return fmt.Sprintf(`docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1
+docker network prune -f >/dev/null 2>&1
+docker volume prune -af >/dev/null 2>&1
+docker image prune -f >/dev/null 2>&1
+docker builder prune -f --keep-storage %dgb >/dev/null 2>&1
+%s &&
+chown %s %s &&
+left=$(docker ps -aq) && test -z "$left"`, keepBuildGB, clearDir(workDir, "_actions", pnpmStoreDir), runnerUID, workDir)
+}
+
+// Release cleans what the job left in the slot (containers, networks,
+// volumes, workspace) while keeping images and build cache, then frees it.
+// Fail closed: when the cleanup fails the slot is marked dirty, so it is never
+// handed out again until it has been rebuilt from scratch.
 func (p *Pool) Release(ctx context.Context, l Lease) {
 	if l.Strict {
 		p.releaseStrict(ctx, l)
@@ -920,20 +984,17 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 	}
 	p.setStatus(l.Slot, "cleaning", "")
 	cfg := p.Config()
-	script := fmt.Sprintf(`docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1
-docker network prune -f >/dev/null 2>&1
-docker volume prune -af >/dev/null 2>&1
-docker image prune -f >/dev/null 2>&1
-docker builder prune -f --keep-storage %dgb >/dev/null 2>&1
-find %s -mindepth 1 -maxdepth 1 ! -name _actions ! -name `+pnpmStoreDir+` -exec rm -rf {} + 2>/dev/null
-chown %s %s
-true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
-	if _, _, err := p.exec(ctx, slotName(l.Slot), script); err != nil {
-		p.log.Warn("slot cleanup failed, restarting its daemon", "slot", l.Slot, "error", err)
-		_ = p.cli.ContainerRestart(ctx, slotName(l.Slot), container.StopOptions{})
-		_ = p.waitDind(ctx, slotName(l.Slot))
+	_, code, err := p.ops().exec(ctx, slotName(l.Slot), releaseScript(cfg.KeepBuildGB))
+	failed := err != nil || code != 0
+	if failed {
+		p.log.Error("slot cleanup failed, rebuilding the slot before any reuse", "slot", l.Slot, "code", code, "error", err)
+		p.mu.Lock()
+		if s, ok := p.slots[l.Slot]; ok {
+			s.dirty = true // previous owner is kept
+		}
+		p.mu.Unlock()
 	}
-	p.auditBinfmt(ctx)
+	p.ops().auditBinfmt(ctx)
 	p.mu.Lock()
 	s, ok := p.slots[l.Slot]
 	owned := ok && !s.dirty && s.Owner == l.Owner
@@ -950,10 +1011,21 @@ true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 	if upgrade {
 		s.upgrade = false
 	}
+	dirty := ok && s.dirty
 	p.mu.Unlock()
 	if retire {
 		p.removeSlot(ctx, l.Slot)
 		p.signal()
+		return
+	}
+	if dirty {
+		// The retry loop rebuilds dirty slots in error (a rebuild recreates
+		// the container, which also covers a pending upgrade).
+		msg := "cleanup failed, slot will be rebuilt"
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		p.setStatus(l.Slot, "error", msg)
 		return
 	}
 	if upgrade {
