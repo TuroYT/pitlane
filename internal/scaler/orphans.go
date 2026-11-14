@@ -123,6 +123,7 @@ func (t *target) cleanupOrphans() {
 			_, err := client.GetRunner(ctx, int(r.ID))
 			if isNotFound(err) {
 				_ = t.m.store.DeleteRunner(r.ID)
+				t.forgetLostRunner(r.Name)
 			}
 		case orphanRemove:
 			err := client.RemoveRunner(ctx, r.ID)
@@ -132,6 +133,7 @@ func (t *target) cleanupOrphans() {
 			}
 			t.log.Info("removed orphan runner from GitHub", "runner", r.Name, "id", r.ID)
 			_ = t.m.store.DeleteRunner(r.ID)
+			t.forgetLostRunner(r.Name) // GitHub reports it idle: its job is over
 		}
 	}
 }

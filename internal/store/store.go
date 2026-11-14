@@ -375,6 +375,28 @@ func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
 	return j, err
 }
 
+// InFlightJobs returns the jobs that started and have not finished on a
+// runner that is still recorded as registered on GitHub. Used at startup to
+// find the jobs of runners that died while Pitlane was stopped.
+func (s *Store) InFlightJobs(ctx context.Context) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT target_id, job_id, runner_name, started_at FROM jobs j
+		WHERE finished_at = 0 AND started_at > 0 AND runner_name != ''
+		AND EXISTS (SELECT 1 FROM runners r WHERE r.name = j.runner_name AND r.target_id = j.target_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := rows.Scan(&j.TargetID, &j.JobID, &j.RunnerName, &j.StartedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 // Jobs returns the most recent jobs.
 func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result

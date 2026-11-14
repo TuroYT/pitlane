@@ -136,3 +136,30 @@ func TestJobMetrics(t *testing.T) {
 		t.Fatalf("durations %v waits %v err %v", d, w, err)
 	}
 }
+
+func TestInFlightJobs(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	for _, j := range []Job{
+		{TargetID: 1, JobID: "running", RunnerName: "pitlane-a", Slot: -1, StartedAt: 100},
+		{TargetID: 1, JobID: "done", RunnerName: "pitlane-b", Slot: -1, StartedAt: 100, FinishedAt: 200, Result: "succeeded"},
+		{TargetID: 1, JobID: "unregistered", RunnerName: "pitlane-c", Slot: -1, StartedAt: 100},
+		{TargetID: 1, JobID: "queued", Slot: -1, QueuedAt: 100},
+	} {
+		if err := s.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, name := range []string{"pitlane-a", "pitlane-b"} {
+		if err := s.AddRunner(RegisteredRunner{ID: int64(i + 1), TargetID: 1, Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs, err := s.InFlightJobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].JobID != "running" || jobs[0].RunnerName != "pitlane-a" || jobs[0].TargetID != 1 {
+		t.Fatalf("got %+v", jobs)
+	}
+}

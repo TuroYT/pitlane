@@ -52,6 +52,7 @@ type Manager struct {
 	mu      sync.Mutex
 	targets map[int64]*target
 	adopted map[int64][]*runner
+	lost    map[int64]map[string]lostJob // found at startup, handed to targets by Sync
 	ctx     context.Context
 }
 
@@ -60,7 +61,7 @@ func New(st *store.Store, p *pool.Pool, dataDir string, creds func() Credentials
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
 	return &Manager{store: st, pool: p, log: log, logDir: logDir, creds: creds, changed: changed,
-		targets: map[int64]*target{}, adopted: map[int64][]*runner{}}
+		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
 // Start adopts runners left by a previous process and starts every enabled target.
@@ -70,6 +71,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	running := map[string]*runner{}
 	for _, o := range orphans {
 		// Assume busy since the container was created: the job timeout then
 		// still applies after a restart.
@@ -84,7 +86,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot)
 		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
+		running[o.Name] = r
 	}
+	m.findLostJobs(ctx, running)
 	m.Sync()
 	go m.loop(ctx)
 	return nil
@@ -160,6 +164,9 @@ func (m *Manager) Sync() {
 		w, ok := want[id]
 		if !ok || w.ScaleSetName != t.cfg().ScaleSetName || w.InstallationID != t.cfg().InstallationID {
 			delete(m.targets, id)
+			if ok {
+				m.keepLostLocked(id, t)
+			}
 			go t.stop(!ok)
 			continue
 		}
@@ -176,6 +183,10 @@ func (m *Manager) Sync() {
 			go t.watch(r)
 		}
 		delete(m.adopted, id)
+		for jobID, l := range m.lost[id] {
+			t.lost[jobID] = l
+		}
+		delete(m.lost, id)
 		m.targets[id] = t
 		go t.run(m.ctx)
 	}
@@ -188,6 +199,7 @@ func (m *Manager) Restart() {
 	m.mu.Lock()
 	for id, t := range m.targets {
 		delete(m.targets, id)
+		m.keepLostLocked(id, t)
 		go t.stop(false)
 	}
 	m.mu.Unlock()
@@ -281,6 +293,7 @@ type runner struct {
 	exited      bool
 	killed      bool      // killed for exceeding the job time limit
 	busySince   time.Time // when its job started
+	jobID       string    // GitHub job it runs, cleared on JobCompleted
 	jobName     string
 	repo        string
 	startedAt   time.Time
@@ -303,7 +316,8 @@ type target struct {
 	waiting     int
 	waitSince   time.Time
 	runners     map[string]*runner
-	starting    int // runners being prepared/started in the background
+	lost        map[string]lostJob // jobs bound to dead runners, by job ID
+	starting    int                // runners being prepared/started in the background
 	reconcileMu sync.Mutex
 	orphanMu    sync.Mutex
 	orphanAt    time.Time // last orphan cleanup
@@ -311,7 +325,7 @@ type target struct {
 
 func newTarget(m *Manager, t store.Target) *target {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{},
+	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{}, lost: map[string]lostJob{},
 		log: m.log.With("target", t.FullName())}
 }
 
@@ -501,7 +515,7 @@ func (t *target) reconcile() {
 		return
 	}
 	cfg := t.t
-	want := min(cfg.MaxRunners, cfg.MinRunners+t.desired)
+	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, time.Now())))
 	have := t.starting
 	var idle []*runner
 	for _, r := range t.runners {
@@ -640,6 +654,7 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 	}
 	m.pool.Remove(ctx, r.containerID)
 	if t != nil {
+		t.runnerGone(r)
 		t.mu.Lock()
 		r.exited = true
 		client := t.client
@@ -754,8 +769,11 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			if !r.busy || r.busySince.IsZero() {
 				r.busySince = time.Now()
 			}
-			r.busy, r.jobName, r.repo = true, j.JobDisplayName, j.RepositoryName
+			r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
 			job.Slot = r.lease.Slot
+		}
+		if l, ok := s.t.lost[j.JobID]; ok && l.runner != j.RunnerName {
+			delete(s.t.lost, j.JobID) // started again elsewhere: it needs a runner
 		}
 		s.t.mu.Unlock()
 		_ = st.UpsertJob(job)
@@ -771,6 +789,12 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		if job.Result == "" {
 			job.Result = "canceled"
 		}
+		s.t.mu.Lock()
+		delete(s.t.lost, j.JobID)
+		if r, ok := s.t.runners[j.RunnerName]; ok && r.jobID == j.JobID {
+			r.jobID = ""
+		}
+		s.t.mu.Unlock()
 		_ = st.UpsertJob(job)
 	}
 	if msg.Statistics != nil {
