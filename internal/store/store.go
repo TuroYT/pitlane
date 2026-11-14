@@ -123,14 +123,17 @@ func Open(dataDir string) (*Store, error) {
 
 // Seams for tests.
 var (
-	chmod       = os.Chmod
-	ownedBySelf = func(path string) bool {
+	chmod   = os.Chmod
+	dirInfo = func(path string) (uid int, mode os.FileMode, err error) {
 		info, err := os.Stat(path)
 		if err != nil {
-			return false
+			return 0, 0, err
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
-		return ok && int(st.Uid) == os.Geteuid()
+		if !ok {
+			return 0, 0, errors.New("no owner information for " + path)
+		}
+		return int(st.Uid), info.Mode(), nil
 	}
 )
 
@@ -140,18 +143,26 @@ var (
 // mount prepared by someone else, Pitlane running as a non-root user with
 // group access) cannot be chmod'ed: that is only logged, since every file
 // Pitlane writes in it is itself created 0600 (and the database files are
-// checked below).
+// checked below), as long as nobody else can write to it (plant or replace
+// files). Anything else fails.
 func restrictDataDir(dataDir string) error {
 	err := chmod(dataDir, 0o700) //nolint:gosec // G302: a directory needs the x bit
 	if err == nil {
 		return nil
 	}
-	if !ownedBySelf(dataDir) {
-		slog.Warn("cannot restrict the data directory to its owner: it belongs to another user, its files stay private (0600)",
-			"dir", dataDir, "error", err)
-		return nil
+	uid, mode, serr := dirInfo(dataDir)
+	switch {
+	case serr != nil:
+		return fmt.Errorf("restrict data directory: %w (and cannot check its owner: %v)", err, serr)
+	case uid == os.Geteuid():
+		return fmt.Errorf("restrict data directory: %w", err)
+	case mode.Perm()&0o022 != 0:
+		return fmt.Errorf("data directory %s belongs to another user (uid %d) and is writable by its group or others (%v): "+
+			"make it owned by the user running Pitlane, or at least not group/world-writable", dataDir, uid, mode.Perm())
 	}
-	return fmt.Errorf("restrict data directory: %w", err)
+	slog.Warn("cannot restrict the data directory to its owner: it belongs to another user, its files stay private (0600)",
+		"dir", dataDir, "owner", uid, "mode", mode.Perm().String(), "error", err)
+	return nil
 }
 
 // Close closes the database.

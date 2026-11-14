@@ -245,12 +245,15 @@ func TestOpenRestrictsPermissions(t *testing.T) {
 }
 
 func TestOpenDataDirOwnedByAnotherUser(t *testing.T) {
-	defer func(c func(string, os.FileMode) error, o func(string) bool) { chmod, ownedBySelf = c, o }(chmod, ownedBySelf)
+	defer func(c func(string, os.FileMode) error, d func(string) (int, os.FileMode, error)) {
+		chmod, dirInfo = c, d
+	}(chmod, dirInfo)
 	chmod = func(string, os.FileMode) error { return os.ErrPermission }
+	other := os.Geteuid() + 1
 
-	// Not ours (e.g. a volume owned by another user): logged, not fatal,
-	// and the database files are still private.
-	ownedBySelf = func(string) bool { return false }
+	// Not ours (e.g. a volume owned by another user), not writable by
+	// others: logged, not fatal, and the database files are still private.
+	dirInfo = func(string) (int, os.FileMode, error) { return other, os.ModeDir | 0o750, nil }
 	dir := t.TempDir()
 	s, err := Open(dir)
 	if err != nil {
@@ -262,9 +265,15 @@ func TestOpenDataDirOwnedByAnotherUser(t *testing.T) {
 	}
 	s.Close()
 
-	// Ours but chmod fails: something is wrong, refuse to start.
-	ownedBySelf = func(string) bool { return true }
-	if _, err := Open(t.TempDir()); err == nil {
-		t.Fatal("a chmod failure on our own data dir must be fatal")
+	for name, info := range map[string]func(string) (int, os.FileMode, error){
+		"ours but chmod fails":       func(string) (int, os.FileMode, error) { return os.Geteuid(), os.ModeDir | 0o755, nil },
+		"group-writable, not ours":   func(string) (int, os.FileMode, error) { return other, os.ModeDir | 0o770, nil },
+		"world-writable, not ours":   func(string) (int, os.FileMode, error) { return other, os.ModeDir | 0o757, nil },
+		"owner cannot be determined": func(string) (int, os.FileMode, error) { return 0, 0, errors.New("stat failed") },
+	} {
+		dirInfo = info
+		if _, err := Open(t.TempDir()); err == nil {
+			t.Errorf("%s: Open must fail", name)
+		}
 	}
 }
