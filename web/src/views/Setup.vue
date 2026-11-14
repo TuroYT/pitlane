@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandMark from '../components/BrandMark.vue'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { post, ApiError } from '../api'
@@ -73,7 +74,7 @@ async function createApp() {
 <template>
   <div class="center-page">
     <div class="card narrow">
-      <h1 class="brand-big"><span class="logo">P</span> Pitlane setup</h1>
+      <h1 class="brand-big"><BrandMark :size="32" /> Pitlane setup</h1>
 
       <ol class="steps">
         <li :class="{ done: step !== 'unlock', current: step === 'unlock' }">Unlock</li>

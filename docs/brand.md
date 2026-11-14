@@ -44,13 +44,16 @@ Everything else is neutral and functional, in the spirit of GitHub's own UI:
 | Border | `#d1d9e0` | `#3d444d` |
 | Text | `#1f2328` | `#f0f6fc` |
 | Muted text | `#59636e` | `#9198a1` |
-| Link / running | `#0969da` | `#4493f8` |
+| Link | `#0969da` | `#4493f8` |
 | Success | `#1a7f37` | `#3fb950` |
 | Failure | `#d1242f` | `#f85149` |
-| Warning / queued | `#9a6700` | `#d29922` |
+| In progress | `#bf8700` | `#d29922` |
+| Warning | `#9a6700` | `#d29922` |
+| Canceled / idle | `#818b98` | `#9198a1` |
 
-Orange is the brand, never a status: success is green, failure is red, running
-is blue. In charts, Pitlane is orange and GitHub-hosted runners are gray.
+Orange is the brand, never a status: success is green, failure is red, a job in
+progress is amber, like a workflow run on GitHub. In charts, Pitlane is orange
+and GitHub-hosted runners are gray; percentiles are blue (p50) and purple (p90).
 
 ## Typography
 
