@@ -243,6 +243,7 @@ func (p *Pool) retryFailed(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		p.auditBinfmt(ctx)
 		p.mu.Lock()
 		var failed, dirty []int
 		for i, s := range p.slots {
@@ -486,7 +487,7 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 	}
 	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err == nil && p.Wait(ctx, c.ID) == 0 {
-		base := readBinfmt()
+		base := trustedQEMU(readBinfmt())
 		p.mu.Lock()
 		p.binfmt = base
 		p.mu.Unlock()
@@ -514,16 +515,31 @@ func readBinfmt() map[string]string {
 	return out
 }
 
+// trustedQEMU keeps only the handlers Pitlane itself registers: QEMU
+// emulators whose interpreter is the static QEMU binary installed by binfmt.
+func trustedQEMU(all map[string]string) map[string]string {
+	out := map[string]string{}
+	for name, def := range all {
+		if strings.HasPrefix(name, "qemu-") && strings.Contains(def, "interpreter /usr/bin/"+name+"\n") {
+			out[name] = def
+		}
+	}
+	return out
+}
+
 // auditBinfmt runs after every job. Slot daemons are privileged, so a job
 // could register its own binfmt_misc handler, which would then apply to every
 // later job. Unknown or modified handlers are removed, and Pitlane's QEMU
 // handlers are registered again if they were tampered with.
 func (p *Pool) auditBinfmt(ctx context.Context) {
+	if _, err := os.Stat(binfmtDir + "/register"); err != nil {
+		return // not mounted: registrations cannot outlive the job's own mount
+	}
 	p.mu.Lock()
 	base := p.binfmt
 	p.mu.Unlock()
-	if base == nil {
-		return
+	if base == nil || p.Config().NoQEMU {
+		base = map[string]string{} // fail closed: nothing is trusted
 	}
 	cur := readBinfmt()
 	tampered := false
@@ -542,7 +558,7 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 			tampered = true
 		}
 	}
-	if tampered {
+	if tampered && len(base) > 0 && !p.Config().NoQEMU {
 		p.log.Warn("QEMU handlers were modified by a job, registering them again")
 		p.ensureQEMU(ctx)
 	}
