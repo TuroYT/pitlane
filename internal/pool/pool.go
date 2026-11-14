@@ -321,6 +321,24 @@ func (p *Pool) signal() {
 	}
 }
 
+// localRunnerImage returns the most recent Pitlane runner image present on
+// the host (any tag of runnerRepo), or "" when there is none.
+func (p *Pool) localRunnerImage(ctx context.Context) (string, error) {
+	list, err := p.cli.ImageList(ctx, image.ListOptions{Filters: filters.NewArgs(filters.Arg("reference", runnerRepo))})
+	if err != nil {
+		return "", err
+	}
+	best, created := "", int64(-1)
+	for _, im := range list {
+		for _, tag := range im.RepoTags {
+			if strings.HasPrefix(tag, runnerRepo+":") && im.Created > created {
+				best, created = tag, im.Created
+			}
+		}
+	}
+	return best, nil
+}
+
 // Start pulls images, starts the mirror and every slot. Slots that already
 // exist (e.g. after a Pitlane restart) are reused with their warm cache.
 func (p *Pool) Start(ctx context.Context) error {
@@ -332,13 +350,25 @@ func (p *Pool) Start(ctx context.Context) error {
 		if cfg.RunnerImage != DefaultRunnerImage {
 			return err
 		}
-		p.log.Warn("Pitlane runner image unavailable, using GitHub's official image", "error", err)
-		cfg.RunnerImage = OfficialRunnerImage
-		if err := p.EnsureImage(ctx, cfg.RunnerImage, false); err != nil {
-			return err
+		// Prefer any Pitlane runner image already on this host (another
+		// release, or one built locally): it has the tools the CIs use.
+		// GitHub's bare image is the last resort, and a loud one: jobs that
+		// expect Node, compilers… will fail on it.
+		fallback, lerr := p.localRunnerImage(ctx)
+		if lerr == nil && fallback != "" {
+			p.log.Warn("Pitlane runner image unavailable, using the Pitlane runner image already on this host",
+				"wanted", cfg.RunnerImage, "using", fallback, "error", err)
+		} else {
+			p.log.Error("no Pitlane runner image available: using GitHub's bare official image; jobs that need Node, compilers or other tools will fail. Pull or build a Pitlane runner image, or set one in Settings",
+				"wanted", cfg.RunnerImage, "error", err)
+			fallback = OfficialRunnerImage
+			if err := p.EnsureImage(ctx, fallback, false); err != nil {
+				return err
+			}
 		}
+		cfg.RunnerImage = fallback
 		p.mu.Lock()
-		p.cfg.RunnerImage = OfficialRunnerImage
+		p.cfg.RunnerImage = fallback
 		p.mu.Unlock()
 	}
 	p.mu.Lock()
