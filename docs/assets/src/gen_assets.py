@@ -148,7 +148,16 @@ def diagram(t):
     return svg(W, H, ''.join(b), 'How Pitlane works: GitHub long-poll, pitlane, warm Docker-in-Docker slots running one ephemeral runner per job, shared caches')
 
 
+def lockup(t):
+    w, _ = outline('pitlane', 44, 640, -0.03)
+    W, H = int(56 + 14 + w + 4), 56
+    body = mark(0, 0, 56) + text('pitlane', 70, 42, 44, 640, t['fg'], tracking=-0.03)
+    return svg(W, H, body, 'Pitlane')
+
+
 for name, t in THEMES.items():
+    # logo-wordmark-light.svg is for light backgrounds (dark text).
+    open(os.path.join(OUT, f'logo-wordmark-{name}.svg'), 'w').write(lockup(t))
     open(os.path.join(OUT, f'hero-{name}.svg'), 'w').write(hero(t))
     open(os.path.join(OUT, f'how-it-works-{name}.svg'), 'w').write(diagram(t))
 print('ok')

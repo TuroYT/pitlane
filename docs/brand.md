@@ -18,7 +18,14 @@ It sits in a signal-orange tile with 7/32 rounded corners, and is drawn on a
 | [`assets/logo-mono-black.svg`](assets/logo-mono-black.svg) | Single color, no tile, on light backgrounds. |
 | [`assets/logo-mono-white.svg`](assets/logo-mono-white.svg) | Single color, no tile, on dark backgrounds or photos. |
 | [`web/public/favicon.svg`](../web/public/favicon.svg) | Web UI favicon (same as `logo.svg`). |
+| [`assets/logo-wordmark-light.svg`](assets/logo-wordmark-light.svg), [`assets/logo-wordmark-dark.svg`](assets/logo-wordmark-dark.svg) | Mark and wordmark, for light and dark backgrounds. |
 | [`assets/hero-light.svg`](assets/hero-light.svg), [`assets/hero-dark.svg`](assets/hero-dark.svg) | README banner. |
+
+Every asset (logos, colors as Light/Dark variables, UI icons, README visuals and
+dashboard screenshots) is collected in one FigCraft document,
+[`assets/src/pitlane-brand.figcraft`](assets/src/pitlane-brand.figcraft), built by
+[`assets/src/build_figcraft.py`](assets/src/build_figcraft.py). The README visuals and
+lockups come from [`assets/src/gen_assets.py`](assets/src/gen_assets.py).
 
 - Keep clear space of at least a quarter of the tile around the mark.
 - Minimum size: 16 px for the tile, 20 px for the single-color versions.
