@@ -529,6 +529,7 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 		}
 		p.mu.Lock()
 		best.Owner, best.TargetID = owner, targetID
+		delete(p.externals, idx) // re-copied from the image before the next runner
 		p.mu.Unlock()
 	}
 	return Lease{Slot: idx, Owner: owner}, true
@@ -583,8 +584,9 @@ func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
 	return err != nil || len(list) > 0 // when unsure, do not kill anything
 }
 
-// ensureExternals copies the runner image's externals into the slot volume
-// (once per slot and image version).
+// ensureExternals copies the runner image's externals into the slot volume.
+// The copy is redone after every Pitlane start, runner image change and slot
+// owner change; between jobs of the same owner it is shared like other caches.
 func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	info, err := p.cli.ImageInspect(ctx, img)
 	if err != nil {
@@ -596,10 +598,11 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	if done {
 		return nil
 	}
-	script := `[ "$(cat /x/.pitlane-image 2>/dev/null)" = "$IMAGE_ID" ] && exit 0
-find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/ && echo "$IMAGE_ID" > /x/.pitlane-image`
+	// Always a full copy: the volume is reachable from the privileged slot
+	// daemon, so nothing inside it (such as a marker file) can be trusted.
+	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/`
 	c, err := p.cli.ContainerCreate(ctx, &container.Config{
-		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script}, Env: []string{"IMAGE_ID=" + info.ID},
+		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script},
 		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
 	}, &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: slotExternals(i), Target: "/x"}}}, nil, nil, "")
 	if err != nil {
