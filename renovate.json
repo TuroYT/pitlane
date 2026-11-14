@@ -34,6 +34,17 @@
       ],
       "depNameTemplate": "ghcr.io/turoyt/pitlane-runner",
       "datasourceTemplate": "docker"
+    },
+    {
+      "description": "Tool versions pinned as build ARGs in the runner image, annotated with a \"# renovate:\" comment (their checksums are verified at build time)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^images/runner/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-]+))?\\nARG [A-Z0-9_]+_VERSION=(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}"
     }
   ],
   "packageRules": [
@@ -51,6 +62,19 @@
         "tonistiigi/binfmt"
       ],
       "versioning": "regex:^qemu-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
+    },
+    {
+      "description": "The runner image follows a Node.js LTS line: a new major (odd ones are never LTS) waits for approval on the dependency dashboard",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "node"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
     },
     {
       "description": "Pitlane's own images are released from this repository",
