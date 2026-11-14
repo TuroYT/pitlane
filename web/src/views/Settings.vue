@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api, post, type Settings } from '../api'
+import Updates from '../components/Updates.vue'
 
 const s = ref<Settings | null>(null)
 const saving = ref(false)
@@ -134,4 +135,5 @@ async function save(clearMetricsToken = false) {
       </label>
     </section>
   </form>
+  <Updates v-if="s" class="settings" />
 </template>
