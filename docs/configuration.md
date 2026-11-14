@@ -32,6 +32,33 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 
 - **Orphan runners.** A runner container that dies before deregistering (out of memory, host reboot) leaves an offline runner on GitHub. Pitlane records the ID of every runner it registers and, at start and every 10 minutes, removes those that GitHub reports offline and not busy, that have no Pitlane container and that were registered more than 15 minutes ago. Online, busy or unknown runners are never removed. It needs the REST runner list (`administration` permission of the GitHub App, or `repo` / `admin:org` for a token); runners registered by Pitlane versions before this feature are not tracked.
 
+## Health and metrics
+
+- `GET /healthz` returns 200 as long as the process serves HTTP.
+- `GET /readyz` returns 200 when Docker answers and at least one slot is up (ready, or busy/cleaning with a job), else 503 with the reason (`docker unreachable: …`, `no slot is ready`). No authentication.
+- `GET /metrics` serves Prometheus text format:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `pitlane_info` | gauge | `version` |
+| `pitlane_docker_up` | gauge | |
+| `pitlane_slots` | gauge | `status` (starting, ready, busy, cleaning, error, retiring) |
+| `pitlane_runners` | gauge | `target`, `label`, `state` (busy, idle) |
+| `pitlane_jobs_waiting` | gauge | `target`, `label`: jobs assigned by GitHub waiting for a free slot |
+| `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |
+| `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
+| `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |
+| `pitlane_disk_free_bytes`, `pitlane_disk_total_bytes` | gauge | filesystem of `/var/lib/docker` (or the data directory) |
+
+Access to `/metrics`: when a **metrics token** is set (Settings → Access), only `Authorization: Bearer <token>` is accepted. Without a token, signed-in users and clients connecting from the loopback address can read it. Requests carrying `X-Forwarded-For`, `X-Real-IP` or `Forwarded` never count as loopback, so a reverse proxy on the same host does not open it to everyone. With `--insecure-no-auth`, `/metrics` is open like the rest of the UI unless a token is set.
+
+```yaml
+scrape_configs:
+  - job_name: pitlane
+    authorization: { credentials: <metrics token> }
+    static_configs: [{ targets: ["pitlane.example:8080"] }]
+```
+
 ## Environment variables / flags
 
 | Variable | Flag | Default | |

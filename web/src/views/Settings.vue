@@ -6,18 +6,24 @@ const s = ref<Settings | null>(null)
 const saving = ref(false)
 const saved = ref(false)
 const error = ref('')
+const metricsToken = ref('')
 
 onMounted(async () => {
   s.value = await api<Settings>('/api/settings')
 })
 
-async function save() {
+async function save(clearMetricsToken = false) {
   if (!s.value) return
   saving.value = true
   saved.value = false
   error.value = ''
+  const body: Settings = { ...s.value }
+  delete body.metricsToken
+  if (clearMetricsToken) body.metricsToken = ''
+  else if (metricsToken.value.trim()) body.metricsToken = metricsToken.value.trim()
   try {
-    s.value = await post<Settings>('/api/settings', s.value, 'PUT')
+    s.value = await post<Settings>('/api/settings', body, 'PUT')
+    metricsToken.value = ''
     saved.value = true
     setTimeout(() => (saved.value = false), 2500)
   } catch (e) {
@@ -29,7 +35,7 @@ async function save() {
 </script>
 
 <template>
-  <form v-if="s" class="stack-lg settings" @submit.prevent="save">
+  <form v-if="s" class="stack-lg settings" @submit.prevent="save()">
     <div class="row-between">
       <h1>Settings</h1>
       <div class="filters">
@@ -115,6 +121,16 @@ async function save() {
       <label>
         Keep job history and logs (days)
         <input type="number" min="1" v-model.number="s.historyDays" />
+      </label>
+      <label>
+        Metrics token
+        <input v-model="metricsToken" type="password" autocomplete="new-password"
+          :placeholder="s.metricsTokenSet ? 'set (type a new one to replace it)' : 'not set'" />
+        <small>
+          When set, <code>/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (at least 16 characters).
+          When not set, only signed-in users and clients on this machine can read it.
+          <button v-if="s.metricsTokenSet" type="button" class="ghost small" @click="save(true)">Remove token</button>
+        </small>
       </label>
     </section>
   </form>

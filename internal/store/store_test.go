@@ -119,3 +119,20 @@ func TestRegisteredRunners(t *testing.T) {
 		t.Fatalf("not deleted: %+v", rs)
 	}
 }
+
+func TestJobMetrics(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	_ = s.UpsertJob(Job{JobID: "a", Slot: -1, QueuedAt: 1000, StartedAt: 1010, FinishedAt: 1100, Result: "succeeded"})
+	_ = s.UpsertJob(Job{JobID: "b", Slot: -1, QueuedAt: 1000, StartedAt: 1030, FinishedAt: 1060, Result: "failed"})
+	_ = s.UpsertJob(Job{JobID: "c", Slot: -1, QueuedAt: 1000, StartedAt: 1005})                                  // running
+	_ = s.UpsertJob(Job{JobID: "d", Slot: -1, QueuedAt: 10, StartedAt: 20, FinishedAt: 30, Result: "succeeded"}) // too old
+	counts, err := s.JobResultCounts(ctx)
+	if err != nil || counts["succeeded"] != 2 || counts["failed"] != 1 || len(counts) != 2 {
+		t.Fatalf("%v %v", counts, err)
+	}
+	d, w, err := s.JobTimings(ctx, 500)
+	if err != nil || len(d) != 2 || len(w) != 3 || d[0]+d[1] != 120 || w[0]+w[1]+w[2] != 45 {
+		t.Fatalf("durations %v waits %v err %v", d, w, err)
+	}
+}

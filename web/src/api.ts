@@ -98,6 +98,8 @@ export interface Settings {
   qemu: boolean
   keepBuildGb: number
   minFreeDiskGb: number
+  metricsToken?: string
+  metricsTokenSet: boolean
   allowedUsers: string
   historyDays: number
   baseUrl: string

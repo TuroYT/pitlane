@@ -118,6 +118,8 @@ func randomHex(n int) string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /metrics", s.handleMetrics) // own authorization (token, session or loopback)
 
 	// Public: status, setup and login.
 	mux.HandleFunc("GET /api/status", s.handleStatus)
@@ -987,6 +989,11 @@ type Settings struct {
 	AllowedUsers  string `json:"allowedUsers"`
 	HistoryDays   int    `json:"historyDays"`
 	BaseURL       string `json:"baseUrl"`
+	// Bearer token required by /metrics. Never returned: GET only says
+	// whether one is set; PUT changes it only when the field is present
+	// ("" removes it).
+	MetricsToken    *string `json:"metricsToken,omitempty"`
+	MetricsTokenSet bool    `json:"metricsTokenSet"`
 }
 
 // LoadPoolConfig reads the pool configuration from the store.
@@ -1015,6 +1022,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
 		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.baseURL(r),
+		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
 	})
 }
 
@@ -1034,6 +1042,23 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if in.Slots < 1 || in.Slots > 64 {
 		writeErr(w, http.StatusBadRequest, "parallel jobs must be between 1 and 64")
 		return
+	}
+	if in.MetricsToken != nil {
+		tok := strings.TrimSpace(*in.MetricsToken)
+		if tok != "" && len(tok) < 16 {
+			writeErr(w, http.StatusBadRequest, "the metrics token must be at least 16 characters")
+			return
+		}
+		var err error
+		if tok == "" {
+			err = s.store.Set(metricsTokenKey, "")
+		} else {
+			err = s.store.SetSecret(metricsTokenKey, tok)
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if in.CacheScope != "owner" && in.CacheScope != "shared" {
 		in.CacheScope = "owner"
