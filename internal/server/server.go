@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -290,12 +291,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxSetupBody bounds the bodies of the setup endpoints, which are reachable
+// without signing in.
+const maxSetupBody = 64 << 10
+
 func (s *Server) handleSetupUnlock(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token string `json:"token"`
 	}
 	tok := s.getSetupToken()
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || tok == "" ||
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSetupBody)).Decode(&body); err != nil || tok == "" ||
 		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(body.Token)), []byte(tok)) != 1 {
 		writeErr(w, http.StatusForbidden, "invalid setup token")
 		return
@@ -316,7 +321,15 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 		Org     string `json:"org"`
 		Name    string `json:"name"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSetupBody)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	org := strings.TrimSpace(body.Org)
+	if org != "" && !validName(org) {
+		writeErr(w, http.StatusBadRequest, "invalid organization name")
+		return
+	}
 	base := strings.TrimRight(strings.TrimSpace(body.BaseURL), "/")
 	if base == "" {
 		base = s.baseURL(r)
@@ -338,8 +351,8 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 	state := s.newState("manifest")
 	s.setCookie(w, r, stateCookie, state, 900)
 	action := "https://github.com/settings/apps/new?state=" + state
-	if org := strings.TrimSpace(body.Org); org != "" {
-		action = "https://github.com/organizations/" + org + "/settings/apps/new?state=" + state
+	if org != "" {
+		action = "https://github.com/organizations/" + url.PathEscape(org) + "/settings/apps/new?state=" + state
 	}
 	writeJSON(w, map[string]string{"action": action, "manifest": string(manifest)})
 }

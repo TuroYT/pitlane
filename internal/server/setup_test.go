@@ -2,12 +2,17 @@ package server
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 
 	"github.com/TuroYT/pitlane/internal/gh"
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
 type fakeSettings struct {
@@ -66,5 +71,51 @@ func TestSetupTokenConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	if s.hasSetupCookie(r) {
 		t.Fatal("cleared setup token still accepted")
+	}
+}
+
+func newSetupServer(t *testing.T) (*Server, *http.Cookie) {
+	t.Helper()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	s := New(Config{DataDir: t.TempDir()}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), fstest.MapFS{})
+	s.setSetupToken("tok")
+	return s, &http.Cookie{Name: setupCookie, Value: "tok"}
+}
+
+func TestSetupManifestValidatesOrg(t *testing.T) {
+	s, cookie := newSetupServer(t)
+	post := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/api/setup/manifest", strings.NewReader(body))
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		s.handleSetupManifest(w, r)
+		return w
+	}
+	for _, org := range []string{"../../evil", "a/b", "x?y", "a b"} {
+		if w := post(`{"baseUrl":"https://p.example","org":"` + org + `"}`); w.Code != http.StatusBadRequest {
+			t.Errorf("org %q accepted: %d", org, w.Code)
+		}
+	}
+	w := post(`{"baseUrl":"https://p.example","org":"acme-corp"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "https://github.com/organizations/acme-corp/settings/apps/new?state=") {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSetupBodiesAreBounded(t *testing.T) {
+	s, cookie := newSetupServer(t)
+	huge := `{"token":"` + strings.Repeat("a", 1<<20) + `"}`
+	for path, h := range map[string]http.HandlerFunc{"/api/setup/unlock": s.handleSetupUnlock, "/api/setup/manifest": s.handleSetupManifest} {
+		r := httptest.NewRequest("POST", path, strings.NewReader(huge))
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h(w, r)
+		if w.Code == http.StatusOK {
+			t.Errorf("%s accepted a 1 MB body", path)
+		}
 	}
 }
