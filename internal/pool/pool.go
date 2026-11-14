@@ -115,6 +115,10 @@ type slot struct {
 	dirty bool
 }
 
+// UnknownOwner marks a slot whose previous owner is not known; it is wiped
+// before its first job. Parentheses never appear in GitHub logins.
+const UnknownOwner = "(unknown)"
+
 // persistedSlot is what survives a Pitlane restart. It lives in Pitlane's
 // data directory, which jobs cannot reach, so it can be trusted.
 type persistedSlot struct {
@@ -162,10 +166,15 @@ func (p *Pool) saveLocked() {
 	if p.cfg.StateFile == "" {
 		return
 	}
+	// Start from the previous state so retired slots keep their last owner.
 	out := map[int]persistedSlot{}
+	for i, st := range p.restored {
+		out[i] = st
+	}
 	for i, s := range p.slots {
 		out[i] = persistedSlot{Owner: s.Owner, TargetID: s.TargetID, Externals: p.externals[i]}
 	}
+	p.restored = out
 	b, _ := json.Marshal(out)
 	tmp := p.cfg.StateFile + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err == nil {
@@ -267,7 +276,12 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 			s.retire = false
 			continue
 		}
-		st := p.restored[i]
+		st, known := p.restored[i]
+		if !known {
+			// Its volumes may hold data from an owner we do not know about:
+			// fail closed, the first job wipes it.
+			st.Owner = UnknownOwner
+		}
 		p.slots[i] = &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID}}
 		toStart = append(toStart, i)
 	}
@@ -351,10 +365,6 @@ func (p *Pool) startSlot(ctx context.Context, i int) {
 		return
 	}
 	if !busy {
-		// Copy the runner externals now rather than when a job is waiting.
-		if err := p.ensureExternals(ctx, i, p.Config().RunnerImage); err != nil {
-			p.log.Warn("prepare runner externals", "slot", i, "error", err)
-		}
 		p.setStatus(i, "ready", "")
 	}
 	p.log.Info("slot ready", "slot", i)
@@ -471,7 +481,9 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 	p.log.Info("retiring slot", "slot", i)
 	_ = p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true, RemoveVolumes: false})
 	p.mu.Lock()
+	p.saveLocked() // remember its owner: its volumes are kept
 	delete(p.slots, i)
+	delete(p.externals, i)
 	p.mu.Unlock()
 }
 
@@ -638,6 +650,8 @@ true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 	p.setStatus(l.Slot, "ready", "")
 }
 
+var externalsCopies = make(chan struct{}, 2)
+
 // slotHasRunner reports whether a runner container is running in a slot.
 func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
 	list, err := p.cli.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(
@@ -660,6 +674,14 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	if done {
 		return nil
 	}
+	// Copies are disk-heavy (~600 MB): never run many at once.
+	select {
+	case externalsCopies <- struct{}{}:
+		defer func() { <-externalsCopies }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	p.log.Info("copying runner externals into slot", "slot", i)
 	// Always a full copy: the volume is reachable from the privileged slot
 	// daemon, so nothing inside it (such as a marker file) can be trusted.
 	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/`

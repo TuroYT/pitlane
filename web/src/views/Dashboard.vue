@@ -88,7 +88,7 @@ const now = computed(() => snap.value?.time ?? Date.now() / 1000)
           </div>
           <div v-else-if="s.status === 'error'" class="slot-body small error-text">{{ s.error }}</div>
           <div v-else class="slot-body muted small">
-            {{ s.owner ? `warm for ${s.owner}` : 'empty cache' }}
+            {{ s.owner === '(unknown)' ? 'wiped before next use' : s.owner ? `warm for ${s.owner}` : 'empty cache' }}
           </div>
         </div>
       </div>
