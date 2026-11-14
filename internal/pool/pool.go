@@ -1184,9 +1184,14 @@ func (p *Pool) Remove(ctx context.Context, id string) {
 	_ = p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
 }
 
-// Kill stops a runner container at once; whoever waits on it then cleans up.
-func (p *Pool) Kill(ctx context.Context, id string) error {
-	err := p.cli.ContainerKill(ctx, id, "KILL")
+// StopRunner stops a runner container; whoever waits on it then cleans up.
+// SIGTERM comes first: the runner then cancels its job and reports it to
+// GitHub at once (after a SIGKILL, GitHub keeps the job "in progress" for
+// about 10 minutes, until it gives up on the lost runner). SIGKILL follows
+// after grace. It blocks up to grace.
+func (p *Pool) StopRunner(ctx context.Context, id string, grace time.Duration) error {
+	secs := int(grace / time.Second)
+	err := p.cli.ContainerStop(ctx, id, container.StopOptions{Signal: "SIGTERM", Timeout: &secs})
 	if errdefs.IsNotFound(err) || errdefs.IsConflict(err) { // gone or already stopped
 		return nil
 	}
