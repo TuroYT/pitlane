@@ -17,9 +17,10 @@ import (
 
 // Per-job resource usage, read from cgroup v2. A job runs in two
 // containers: its runner, created for it, and its slot, the long-lived
-// Docker-in-Docker daemon that runs its `services:` and `docker build`. The
-// runner is measured from its creation; the slot as deltas between the
-// runner's start and its exit. Nothing here may fail a job: when the cgroup
+// Docker-in-Docker daemon that runs its `services:` and `docker build`. Both
+// are measured as deltas between the job's start (Meter.Begin; the runner's
+// start when it is not seen) and the runner's exit, except the runner's
+// memory peak, which covers its whole life. Nothing here may fail a job: when the cgroup
 // files cannot be found or read (Docker Desktop, rootless Docker, Pitlane in
 // a container without the host's /sys/fs/cgroup, cgroup v1), the job simply
 // has no usage.
