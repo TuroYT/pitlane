@@ -281,8 +281,11 @@ func (p *Pool) saveLocked() {
 }
 
 // writeState atomically replaces the state file.
-func writeState(file string, state map[int]persistedSlot) error {
-	b, err := json.Marshal(state)
+func writeState(file string, state map[int]persistedSlot) error { return writeJSONFile(file, state) }
+
+// writeJSONFile atomically replaces a 0600 JSON file.
+func writeJSONFile(file string, v any) error {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
@@ -348,6 +351,7 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.mu.Lock()
 	p.qemuWant = !cfg.NoQEMU
 	p.mu.Unlock()
+	p.restoreBinfmt(ctx)
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
 	}
@@ -618,6 +622,7 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 		p.mu.Lock()
 		p.binfmt = base
 		p.mu.Unlock()
+		p.saveBinfmt(base)
 		p.log.Info("QEMU emulators registered: multi-arch builds are available", "handlers", len(base))
 	}
 }
@@ -754,6 +759,7 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 		p.binfmt = nil
 		p.qemuWant = !p.cfg.NoQEMU
 		p.mu.Unlock()
+		p.saveBinfmt(nil)
 	}
 }
 
