@@ -53,7 +53,7 @@ export interface Slot {
 
 export interface Host {
   cpus: number
-  load1: number
+  cpuPercent: number
   memTotal: number
   memAvailable: number
   diskTotal: number

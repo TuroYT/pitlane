@@ -51,6 +51,13 @@ const (
 	LabelSpec       = "dev.pitlane.spec"
 )
 
+// Runner images: Pitlane's image adds the build tools most CIs expect
+// (make, gcc, zip…) to GitHub's minimal official image.
+const (
+	DefaultRunnerImage  = "ghcr.io/turoyt/pitlane-runner:latest"
+	OfficialRunnerImage = "ghcr.io/actions/actions-runner:latest"
+)
+
 // Config tunes the pool. Every field can change at runtime via Configure.
 type Config struct {
 	Slots       int    // number of parallel jobs (warm dind daemons)
@@ -69,7 +76,7 @@ func (c *Config) defaults() {
 		c.Slots = 2
 	}
 	if c.RunnerImage == "" {
-		c.RunnerImage = "ghcr.io/actions/actions-runner:latest"
+		c.RunnerImage = DefaultRunnerImage
 	}
 	if c.DindImage == "" {
 		c.DindImage = "docker:28-dind"
@@ -147,10 +154,21 @@ func (p *Pool) signal() {
 // exist (e.g. after a Pitlane restart) are reused with their warm cache.
 func (p *Pool) Start(ctx context.Context) error {
 	cfg := p.Config()
-	for _, img := range []string{cfg.DindImage, cfg.RunnerImage} {
-		if err := p.EnsureImage(ctx, img, false); err != nil {
+	if err := p.EnsureImage(ctx, cfg.DindImage, false); err != nil {
+		return err
+	}
+	if err := p.EnsureImage(ctx, cfg.RunnerImage, false); err != nil {
+		if cfg.RunnerImage != DefaultRunnerImage {
 			return err
 		}
+		p.log.Warn("Pitlane runner image unavailable, using GitHub's official image", "error", err)
+		cfg.RunnerImage = OfficialRunnerImage
+		if err := p.EnsureImage(ctx, cfg.RunnerImage, false); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		p.cfg.RunnerImage = OfficialRunnerImage
+		p.mu.Unlock()
 	}
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
@@ -382,8 +400,17 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 
 // rebuildSlot deletes a slot with all its volumes and starts it again empty.
 func (p *Pool) rebuildSlot(ctx context.Context, i int) {
-	_ = p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
-	p.DropSlotCache(ctx, i)
+	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
+	if err != nil && !errdefs.IsNotFound(err) {
+		p.setStatus(i, "error", "rebuild: "+err.Error())
+		return
+	}
+	if err := p.DropSlotCache(ctx, i); err != nil {
+		// Keep the previous owner: the slot will be wiped again before any
+		// other owner can get it.
+		p.setStatus(i, "error", "rebuild: "+err.Error())
+		return
+	}
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
 		s.Owner, s.TargetID = "", 0
@@ -395,9 +422,13 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 }
 
 // DropSlotCache deletes a retired slot's volumes (frees disk).
-func (p *Pool) DropSlotCache(ctx context.Context, i int) {
-	_ = p.cli.VolumeRemove(ctx, slotDocker(i), true)
-	_ = p.cli.VolumeRemove(ctx, slotWork(i), true)
+func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
+	for _, v := range []string{slotDocker(i), slotWork(i)} {
+		if err := p.cli.VolumeRemove(ctx, v, true); err != nil && !errdefs.IsNotFound(err) {
+			return fmt.Errorf("remove volume %s: %w", v, err)
+		}
+	}
+	return nil
 }
 
 // Lease is a slot reserved for one runner.

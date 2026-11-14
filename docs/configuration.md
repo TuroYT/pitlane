@@ -12,7 +12,7 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`) used by every slot. |
 | Build cache kept per slot | 20 GB | `docker builder prune --keep-storage` after each job. |
-| Runner image | `ghcr.io/actions/actions-runner:latest` | Use `ghcr.io/turoyt/pitlane-runner:latest` for extra build tools (build-essential, zip…), or your own image based on the official one. |
+| Runner image | `ghcr.io/turoyt/pitlane-runner:latest` | GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). Any image based on `ghcr.io/actions/actions-runner` works. |
 | Docker-in-Docker image | `docker:28-dind` | |
 | Allowed GitHub users | first admin | Comma-separated logins. |
 | Job history | 30 days | Job records and runner logs. |

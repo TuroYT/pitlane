@@ -106,9 +106,9 @@ const now = computed(() => snap.value?.time ?? Date.now() / 1000)
       <h2>Host</h2>
       <div class="host">
         <div>
-          <span class="muted">CPU load</span>
-          <div class="bar"><div :style="{ width: Math.min(100, (snap.host.load1 / snap.host.cpus) * 100) + '%' }" /></div>
-          <span class="small">{{ snap.host.load1.toFixed(2) }} / {{ snap.host.cpus }} CPUs</span>
+          <span class="muted">CPU</span>
+          <div class="bar"><div :style="{ width: snap.host.cpuPercent + '%' }" /></div>
+          <span class="small">{{ snap.host.cpuPercent.toFixed(0) }}% of {{ snap.host.cpus }} CPUs</span>
         </div>
         <div>
           <span class="muted">Memory</span>
