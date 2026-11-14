@@ -40,9 +40,19 @@ then the same owner, then any free slot.
 | --- | --- | --- |
 | Docker images, layers, buildx cache | per slot | `pitlane-slot-N-docker` volume |
 | Toolchains (`setup-*` actions) | per owner (or global) | `pitlane-toolcache-<owner>` volume → `/opt/hostedtoolcache` |
-| npm, pnpm, yarn, bun, pip, Go modules | per owner (or global) | `pitlane-cache-<owner>` volume → `/home/runner/.cache` |
+| npm, yarn, bun, pip, Go modules | per owner (or global) | `pitlane-cache-<owner>` volume → `/home/runner/.cache` |
+| pnpm store | per owner (or global), hardlinked into each slot | `pitlane-cache-<owner>.pnpm` volume (never mounted) ↔ `_work/.pnpm-store` in `pitlane-slot-N-work` |
 | Docker Hub mirror | global | `pitlane-mirror-data` volume |
 | Downloaded actions | per slot (wiped when the slot changes owner) | `_work/_actions` in `pitlane-slot-N-work` |
+
+pnpm only hardlinks packages into `node_modules` from a store on the same
+mount as the workspace, so each slot keeps its store in its work volume. After
+each job Pitlane merges it with the owner's canonical store (new packages go
+up, missing ones come down, duplicate copies become hardlinks of the canonical
+file). All slots of an owner then share the same inodes: the store is cached in
+RAM once instead of once per slot, which is what keeps `pnpm install` fast when
+several jobs install at the same time on a slow disk. Strict jobs never touch
+it, and a slot changing owner drops its store before its first job.
 
 ## Tips for the fastest CI
 
@@ -52,6 +62,9 @@ then the same owner, then any free slot.
   adds time (often 30–60 s).
 - Prefer `docker buildx build` without `cache-from: type=gha`: the slot's local
   build cache is faster.
+- With pnpm, keep the default store location (do not set `store-dir`) and do
+  not cache it with `actions/cache` / `cache: pnpm`: Pitlane points
+  `npm_config_store_dir` at the shared, hardlinked store.
 - Use **warm runners** (Repositories → Warm runners) for repositories where a
   few seconds of pickup time matter.
 

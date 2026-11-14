@@ -155,6 +155,8 @@ type Pool struct {
 
 	pruneMu sync.Mutex   // one disk reclaim at a time
 	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
+
+	stores storeSync // slot pnpm stores merged with their owner's canonical store
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -677,6 +679,7 @@ func (p *Pool) waitDind(ctx context.Context, name string) error {
 
 func (p *Pool) removeSlot(ctx context.Context, i int) {
 	p.log.Info("retiring slot", "slot", i)
+	p.forgetStore(i)
 	_ = p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true, RemoveVolumes: false})
 	p.mu.Lock()
 	p.saveLocked() // remember its owner: its volumes are kept
@@ -692,6 +695,7 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 		s.dirty = true // cleared only once everything is really gone
 	}
 	p.mu.Unlock()
+	p.forgetStore(i)
 	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
 	if err != nil && !errdefs.IsNotFound(err) {
 		p.setStatus(i, "error", "rebuild: "+err.Error())
@@ -795,6 +799,7 @@ var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
 func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	if l.wipe {
 		p.log.Info("slot changes owner, wiping its caches", "slot", l.Slot, "owner", l.Owner)
+		p.forgetStore(l.Slot)
 		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions " + workDir + "/" + pnpmStoreDir
 		if _, code, err := p.exec(ctx, slotName(l.Slot), script); err != nil || code != 0 {
 			// Never hand out a slot that may still hold another owner's data.
@@ -816,7 +821,18 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 		p.saveLocked()
 		p.mu.Unlock()
 	}
-	return p.ensureExternals(ctx, l.Slot, p.Config().RunnerImage)
+	if err := p.ensureExternals(ctx, l.Slot, p.Config().RunnerImage); err != nil {
+		return err
+	}
+	if l.Strict {
+		p.forgetStore(l.Slot)
+	} else if !p.stores.isSynced(l.Slot, pnpmStoreVolume(p.Config().CacheScope, l.Owner)) && p.slotStoreEmpty(ctx, l.Slot) {
+		// New or wiped slot: fill its pnpm store from the owner's canonical
+		// one before the job installs (a store left by an earlier job of
+		// the same owner is merged after this job instead, off the clock).
+		p.syncPnpmStore(ctx, l.Slot, l.Owner)
+	}
+	return nil
 }
 
 // Release cleans what the job left in the slot (containers, networks,
@@ -830,6 +846,7 @@ func strictVolumes(runner string) (cache, tools string) {
 // failure the slot is rebuilt from scratch rather than reused.
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.setStatus(l.Slot, "cleaning", "")
+	p.forgetStore(l.Slot)
 	script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; find " + workDir + " -mindepth 1 -maxdepth 1 -exec rm -rf {} +; chown " + runnerUID + " " + workDir
 	_, code, err := p.exec(ctx, slotName(l.Slot), script)
 	if l.Runner != "" {
@@ -894,6 +911,15 @@ true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 	p.auditBinfmt(ctx)
 	p.mu.Lock()
 	s, ok := p.slots[l.Slot]
+	owned := ok && !s.dirty && s.Owner == l.Owner
+	p.mu.Unlock()
+	if owned {
+		// The job's containers are gone: publish the packages it downloaded
+		// and fill the slot with the others for the next job.
+		p.syncPnpmStore(ctx, l.Slot, l.Owner)
+	}
+	p.mu.Lock()
+	s, ok = p.slots[l.Slot]
 	retire := ok && s.retire
 	upgrade := ok && s.upgrade
 	if upgrade {
