@@ -55,13 +55,6 @@ const (
 	LabelSpec       = "dev.pitlane.spec"
 )
 
-// Runner images: Pitlane's image adds the build tools most CIs expect
-// (make, gcc, zip…) to GitHub's minimal official image.
-const (
-	DefaultRunnerImage  = "ghcr.io/turoyt/pitlane-runner:latest"
-	OfficialRunnerImage = "ghcr.io/actions/actions-runner:latest"
-)
-
 // Config tunes the pool. Every field can change at runtime via Configure.
 type Config struct {
 	Slots       int    // number of parallel jobs (warm dind daemons)
@@ -84,11 +77,11 @@ func (c *Config) defaults() {
 	if c.Slots <= 0 {
 		c.Slots = 2
 	}
-	if c.RunnerImage == "" {
+	if c.RunnerImage == "" || isDefaultRunnerImage(c.RunnerImage) {
 		c.RunnerImage = DefaultRunnerImage
 	}
-	if c.DindImage == "" {
-		c.DindImage = "docker:28-dind"
+	if c.DindImage == "" || c.DindImage == legacyDindImage {
+		c.DindImage = DefaultDindImage
 	}
 	if c.CacheScope == "" {
 		c.CacheScope = "owner"
@@ -519,7 +512,7 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 			return
 		}
 	}
-	const img = "tonistiigi/binfmt:latest"
+	const img = binfmtImage
 	if err := p.EnsureImage(ctx, img, false); err != nil {
 		p.log.Warn("QEMU emulators", "error", err)
 		return
@@ -1262,7 +1255,7 @@ func (p *Pool) ensureMirror(ctx context.Context, cfg Config) error {
 		_ = p.cli.ContainerStart(ctx, mirrorName, container.StartOptions{})
 		return nil
 	}
-	const img = "registry:2"
+	const img = mirrorImage
 	if err := p.EnsureImage(ctx, img, false); err != nil {
 		return err
 	}

@@ -10,11 +10,11 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Memory limit per job | 0 (unlimited) | Hard limit for the runner and its slot daemon. |
 | CPU weight per job | 0 (Docker default) | `cpu-shares`. It only matters when the host is saturated; a lone job uses every core. |
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
-| Docker Hub mirror | on | Local pull-through cache (`registry:2`) used by every slot. |
+| Docker Hub mirror | on | Local pull-through cache (`registry:2`, pinned by digest) used by every slot. |
 | Build cache kept per slot | 20 GB | `docker builder prune --keep-storage` after each job. |
 | Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
-| Runner image | `ghcr.io/turoyt/pitlane-runner:latest` | GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). Any image based on `ghcr.io/actions/actions-runner` works. |
-| Docker-in-Docker image | `docker:28-dind` | |
+| Runner image | `ghcr.io/turoyt/pitlane-runner:v<version>` | The runner image released with this Pitlane version: GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). It follows Pitlane upgrades, including when the settings page saved it; to stay on one image, give a digest (`name:tag@sha256:…`). Any image based on `ghcr.io/actions/actions-runner` works. |
+| Docker-in-Docker image | `docker:28-dind@sha256:…` | Pinned by digest ([images.go](../internal/pool/images.go)). |
 | Allowed GitHub users | first admin | Comma-separated logins. |
 | Job history | 30 days | Job records and runner logs. |
 
