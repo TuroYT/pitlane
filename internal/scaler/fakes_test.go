@@ -62,6 +62,8 @@ func (f *fakePool) RunnerNames(context.Context) (map[string]bool, error) {
 
 func (f *fakePool) Released() <-chan struct{} { return f.signal }
 
+func (f *fakePool) MeasureJob(context.Context, string, int) *pool.Meter { return nil }
+
 func (f *fakePool) Acquire(_ context.Context, owner string, targetID int64, strict bool) (pool.Lease, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
