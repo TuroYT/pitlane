@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -58,17 +59,52 @@ func main() {
 	dataDir := flag.String("data", env("PITLANE_DATA", "/var/lib/pitlane"), "data directory (PITLANE_DATA)")
 	baseURL := flag.String("base-url", env("PITLANE_BASE_URL", ""), "public URL of the UI, e.g. http://pitlane.lan:8080 (PITLANE_BASE_URL)")
 	logLevel := flag.String("log-level", env("PITLANE_LOG_LEVEL", "info"), "debug, info, warn or error (PITLANE_LOG_LEVEL)")
-	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only)")
+	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only, loopback listen address only) (PITLANE_INSECURE_NO_AUTH)")
+	noAuthAnyAddr := flag.Bool("insecure-no-auth-any-address", env("PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS", "") == "true",
+		"allow --insecure-no-auth on a non-loopback listen address, e.g. behind an authenticating proxy (PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS)")
 	flag.Parse()
 
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(*logLevel))
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	slog.SetDefault(log) // packages without a logger of their own (store)
+	if *noAuth {
+		if err := checkNoAuthListen(*listen, *noAuthAnyAddr); err != nil {
+			log.Error("fatal", "error", err)
+			os.Exit(1)
+		}
+		log.Warn("login is disabled (--insecure-no-auth): anyone reaching this address controls Pitlane", "addr", *listen)
+	}
 	if err := run(log, *listen, *dataDir, *baseURL, *noAuth); err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// checkNoAuthListen refuses to serve without authentication on anything but
+// a loopback address, unless explicitly allowed: whoever reaches the UI can
+// register runners and read job logs.
+func checkNoAuthListen(listen string, anyAddress bool) error {
+	if anyAddress || isLoopback(listen) {
+		return nil
+	}
+	return fmt.Errorf("--insecure-no-auth needs a loopback listen address (127.0.0.1, ::1 or localhost), not %q; "+
+		"to serve it on another address behind your own authentication, also set --insecure-no-auth-any-address "+
+		"(PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS=true)", listen)
+}
+
+// isLoopback reports whether a listen address only accepts local
+// connections (":8080" listens on every interface).
+func isLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {

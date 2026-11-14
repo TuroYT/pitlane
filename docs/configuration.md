@@ -69,7 +69,8 @@ scrape_configs:
 | `PITLANE_BASE_URL` | `--base-url` | request host | URL you open in the browser. |
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
-| `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Only behind your own authentication. |
+| `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |
+| `PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS` | `--insecure-no-auth-any-address` | `false` | Allows `--insecure-no-auth` on any listen address. Only behind your own authentication (an authenticating reverse proxy that is the only thing able to reach Pitlane). |
 | `DOCKER_HOST` | | local socket | Standard Docker client variables are honored. |
 
 ### Personal access token mode
@@ -77,7 +78,10 @@ scrape_configs:
 If you cannot create a GitHub App, set `PITLANE_GITHUB_TOKEN` to a token with the
 `repo` scope (repositories) or `admin:org` scope (organizations). GitHub sign-in is
 then unavailable, so put Pitlane behind your own authentication and start it with
-`--insecure-no-auth`. Add targets manually in **Repositories**.
+`--insecure-no-auth`. Keep it on a loopback address (`PITLANE_LISTEN=127.0.0.1:8080`)
+with the proxy on the same host. When the proxy reaches Pitlane over a network
+(another container, another machine), also set `PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS=true`
+and make sure nothing else can reach that port. Add targets manually in **Repositories**.
 
 ## Files
 
