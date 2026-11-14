@@ -1198,6 +1198,12 @@ func cacheVolume(scope, owner string) string {
 	return "pitlane-cache-" + strings.ToLower(unsafeChars.ReplaceAllString(owner, "_"))
 }
 
+// runnerLogConfig bounds what Docker keeps of a runner's output (a job
+// controls it): at most two 50 MB files, whatever the daemon's default.
+func runnerLogConfig() container.LogConfig {
+	return container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "50m", "max-file": "2"}}
+}
+
 // StartRunner creates and starts an ephemeral runner container in a slot.
 func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error) {
 	// Cache volumes must not be pruned between their creation and their use.
@@ -1248,6 +1254,7 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 			{Type: mount.TypeVolume, Source: cacheVol, Target: "/home/runner/.cache"},
 		},
 	}
+	hc.LogConfig = runnerLogConfig()
 	hc.CPUShares = cfg.CPUShares
 	if cfg.MemoryMB > 0 {
 		hc.Memory = cfg.MemoryMB * 1024 * 1024

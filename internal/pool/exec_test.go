@@ -52,3 +52,10 @@ func TestWaitExecStillRunningIsAnError(t *testing.T) {
 		t.Fatal("inspect error must surface")
 	}
 }
+
+func TestRunnerLogsBounded(t *testing.T) {
+	lc := runnerLogConfig()
+	if lc.Type != "json-file" || lc.Config["max-size"] == "" || lc.Config["max-file"] == "" {
+		t.Fatalf("runner logs unbounded: %+v", lc)
+	}
+}
