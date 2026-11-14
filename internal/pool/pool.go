@@ -626,6 +626,9 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		"GOMODCACHE=/home/runner/.cache/go-mod",
 		"PIP_CACHE_DIR=/home/runner/.cache/pip",
 		"PITLANE_SLOT=" + strconv.Itoa(slotIdx),
+		// The official image dumps the runner's internal debug traces to stdout
+		// (meant for Kubernetes); keep the runner output readable instead.
+		"ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0",
 	}
 	hc := &container.HostConfig{
 		Init: ptr(true),

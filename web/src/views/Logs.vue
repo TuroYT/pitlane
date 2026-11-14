@@ -50,7 +50,7 @@ onBeforeUnmount(() => ctrl?.abort())
         <label class="inline"><input type="checkbox" v-model="follow" /> Follow</label>
       </div>
     </div>
-    <p class="muted small">Runner process output. Step-by-step job logs are on the GitHub run page.</p>
+    <p class="muted small">Output of the runner process (connection, job start and result). The step-by-step job logs are on the GitHub run page.</p>
     <p v-if="error" class="alert error">{{ error }}</p>
     <pre ref="pre" class="logs">{{ text || (streaming ? 'Waiting for output…' : '') }}</pre>
   </div>
