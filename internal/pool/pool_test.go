@@ -2,8 +2,11 @@ package pool
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -138,5 +141,75 @@ func TestCacheVolumeNames(t *testing.T) {
 	c, tl := strictVolumes("pitlane-1234")
 	if c == tl || c == cacheVolume("owner", "pitlane-1234") {
 		t.Fatal("strict volumes must be unique per runner")
+	}
+}
+
+func TestPruneRetiredSlotState(t *testing.T) {
+	state := map[int]persistedSlot{
+		0: {Owner: "acme"},
+		3: {Owner: "acme"},       // beyond the slot count, gone: dropped
+		4: {Owner: "acme"},       // beyond the slot count but still live: kept
+		5: {Owner: StrictOwner},  // left by a strict job: kept (shared scope wipes it)
+		6: {Owner: UnknownOwner}, // dropped: forgetting it is the same
+	}
+	live := map[int]*slot{0: {}, 4: {}}
+	if n := pruneRetired(state, 2, live); n != 2 {
+		t.Fatalf("dropped %d, want 2", n)
+	}
+	for _, i := range []int{0, 4, 5} {
+		if _, ok := state[i]; !ok {
+			t.Errorf("slot %d dropped", i)
+		}
+	}
+}
+
+func TestStateFileDropsRetiredSlots(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "slots.json")
+	old := map[int]persistedSlot{}
+	for i := range 6 {
+		old[i] = persistedSlot{Owner: "acme"}
+	}
+	b, _ := json.Marshal(old)
+	if err := os.WriteFile(file, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(Config{Slots: 2, StateFile: file}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() map[int]persistedSlot {
+		var got map[int]persistedSlot
+		b, _ := os.ReadFile(file)
+		_ = json.Unmarshal(b, &got)
+		return got
+	}
+	if got := read(); len(got) != 2 || got[0].Owner != "acme" || got[1].Owner != "acme" {
+		t.Fatalf("state after load: %+v", got)
+	}
+
+	// Slot count reduced while slot 1 is live: kept until it is retired.
+	p.slots[0] = &slot{SlotState: SlotState{Index: 0, Owner: "acme"}}
+	p.slots[1] = &slot{SlotState: SlotState{Index: 1, Owner: "other"}}
+	p.mu.Lock()
+	p.cfg.Slots = 1
+	p.saveLocked()
+	p.mu.Unlock()
+	if got := read(); len(got) != 2 || got[1].Owner != "other" {
+		t.Fatalf("live retiring slot dropped: %+v", got)
+	}
+	p.mu.Lock()
+	delete(p.slots, 1)
+	p.saveLocked()
+	p.mu.Unlock()
+	if got := read(); len(got) != 1 {
+		t.Fatalf("retired slot kept: %+v", got)
+	}
+
+	// The slot comes back: its owner is unknown, so it is wiped (fail closed).
+	p.mu.Lock()
+	_, known := p.restored[1]
+	p.mu.Unlock()
+	if known {
+		t.Fatal("retired slot still known")
 	}
 }

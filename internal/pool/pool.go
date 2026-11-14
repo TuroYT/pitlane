@@ -170,6 +170,9 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 		restored: map[int]persistedSlot{}, released: make(chan struct{}, 1)}
 	if b, err := os.ReadFile(cfg.StateFile); err == nil {
 		_ = json.Unmarshal(b, &p.restored)
+		if pruneRetired(p.restored, cfg.Slots, p.slots) > 0 {
+			p.saveLocked()
+		}
 		for i, st := range p.restored {
 			if st.Externals != "" {
 				p.externals[i] = st.Externals
@@ -179,12 +182,32 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 	return p, nil
 }
 
+// pruneRetired drops the persisted state of slots beyond the configured
+// count that no longer exist (left by a former, higher slot count) and
+// returns how many were dropped. Forgetting a slot is fail closed: if it
+// comes back, its owner is unknown and it is wiped before its first job.
+// The one exception is a slot last used by a strict job: with the shared
+// cache scope an unknown owner is not wiped but a strict one is, so that
+// entry is kept.
+func pruneRetired(state map[int]persistedSlot, slots int, live map[int]*slot) int {
+	n := 0
+	for i, st := range state {
+		if i < slots || live[i] != nil || st.Owner == StrictOwner {
+			continue
+		}
+		delete(state, i)
+		n++
+	}
+	return n
+}
+
 // saveLocked persists slot ownership. Callers hold p.mu.
 func (p *Pool) saveLocked() {
 	if p.cfg.StateFile == "" {
 		return
 	}
-	// Start from the previous state so retired slots keep their last owner.
+	// Start from the previous state so slots being retired keep their last
+	// owner; those beyond the slot count are dropped once gone (pruneRetired).
 	out := map[int]persistedSlot{}
 	for i, st := range p.restored {
 		out[i] = st
@@ -192,6 +215,7 @@ func (p *Pool) saveLocked() {
 	for i, s := range p.slots {
 		out[i] = persistedSlot{Owner: s.Owner, TargetID: s.TargetID, Externals: p.externals[i]}
 	}
+	pruneRetired(out, p.cfg.Slots, p.slots)
 	p.restored = out
 	b, _ := json.Marshal(out)
 	tmp := p.cfg.StateFile + ".tmp"
@@ -682,9 +706,10 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 	p.forgetStore(i)
 	_ = p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true, RemoveVolumes: false})
 	p.mu.Lock()
-	p.saveLocked() // remember its owner: its volumes are kept
+	p.saveLocked() // record its current owner while it is still live: its volumes are kept
 	delete(p.slots, i)
 	delete(p.externals, i)
+	p.saveLocked() // now gone: forgotten if beyond the slot count (fail closed)
 	p.mu.Unlock()
 }
 
