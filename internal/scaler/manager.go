@@ -470,7 +470,11 @@ func (t *target) listen() error {
 	if err != nil {
 		return fmt.Errorf("open session: %w", err)
 	}
-	defer session.Close(context.Background())
+	defer func() {
+		if err := session.Close(context.Background()); err != nil {
+			t.log.Warn("close message session", "error", err)
+		}
+	}()
 	lst, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: cfg.MaxRunners, Logger: t.log.WithGroup("listener")})
 	if err != nil {
 		return err
@@ -679,7 +683,9 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 		if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
 			m.log.Warn("archive runner log", "runner", r.name, "error", err)
 		}
-		f.Close()
+		if err := f.Close(); err != nil {
+			m.log.Warn("archive runner log", "runner", r.name, "error", err)
+		}
 	} else {
 		m.log.Warn("archive runner log", "runner", r.name, "error", err)
 	}

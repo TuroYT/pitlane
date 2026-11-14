@@ -1,0 +1,39 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - gosec
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      # Nothing useful can be done when closing a read-only handle, rolling
+      # back an already failed transaction or writing to an HTTP response
+      # (the client is gone) fails.
+      exclude-functions:
+        - (io.ReadCloser).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - golang.org/x/sys/unix.Close
+        - (net/http.ResponseWriter).Write
+        - fmt.Fprintf
+        - io.WriteString
+    gosec:
+      excludes:
+        # File paths come from Pitlane's own configuration and data
+        # directory, never from requests.
+        - G304
+        # Background contexts are deliberate: slot cleanup and runner
+        # teardown must outlive the request or listener that started them.
+        - G118
+        # Unchecked errors are errcheck's job (with its exclusions above).
+        - G104
+  exclusions:
+    rules:
+      # Tests create throwaway files and run fixed shell snippets.
+      - path: _test\.go
+        linters: [gosec, errcheck]

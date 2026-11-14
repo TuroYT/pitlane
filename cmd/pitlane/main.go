@@ -43,7 +43,8 @@ func main() {
 			if len(os.Args) > 2 {
 				dir = os.Args[2]
 			}
-			b, err := os.ReadFile(filepath.Join(dir, "setup-token"))
+			// The operator's own command line chooses the directory.
+			b, err := os.ReadFile(filepath.Join(dir, "setup-token")) //nolint:gosec // G703: local CLI argument, not remote input
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "no setup token: setup is already complete (or Pitlane never started)")
 				os.Exit(1)
@@ -77,7 +78,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	p, err := pool.New(server.LoadPoolConfig(st, dataDir), log.With("component", "pool"))
 	if err != nil {

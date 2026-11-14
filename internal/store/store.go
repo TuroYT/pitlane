@@ -85,7 +85,7 @@ func Open(dataDir string) (*Store, error) {
 	}
 	// MkdirAll keeps the mode of an existing directory: the data directory
 	// holds the master key, the database and job logs.
-	if err := os.Chmod(dataDir, 0o700); err != nil {
+	if err := os.Chmod(dataDir, 0o700); err != nil { //nolint:gosec // G302: a directory needs the x bit
 		return nil, fmt.Errorf("restrict data directory: %w", err)
 	}
 	key, err := loadOrCreateKey(filepath.Join(dataDir, "master.key"))
@@ -108,13 +108,13 @@ func Open(dataDir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, aead: aead}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	// SQLite creates its files with the process umask.
 	for _, f := range []string{"pitlane.db", "pitlane.db-wal", "pitlane.db-shm"} {
 		if err := os.Chmod(filepath.Join(dataDir, f), 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("restrict %s: %w", f, err)
 		}
 	}

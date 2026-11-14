@@ -9,9 +9,9 @@ import (
 	"strings"
 	"syscall"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 )
 
 // Shared per-owner cache volumes (see cacheVolume). Only these are pruned when
@@ -53,7 +53,7 @@ func (p *Pool) DiskSpace() (total, free int64, err error) {
 	if err := syscall.Statfs(p.DiskPath(), &st); err != nil {
 		return 0, 0, err
 	}
-	return int64(st.Blocks) * int64(st.Bsize), int64(st.Bavail) * int64(st.Bsize), nil
+	return int64(st.Blocks) * st.Bsize, int64(st.Bavail) * st.Bsize, nil //nolint:gosec // G115: block counts of a real filesystem fit in int64
 }
 
 // EnsureFreeDisk frees disk space when less than the configured minimum is
@@ -265,7 +265,7 @@ func (d dockerDiskOps) volumes(ctx context.Context) ([]volInfo, error) {
 func (d dockerDiskOps) removeVolume(ctx context.Context, name string) error {
 	// Not forced: Docker refuses to remove a volume a container still uses.
 	err := d.p.cli.VolumeRemove(ctx, name, false)
-	if errdefs.IsNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		return nil
 	}
 	return err

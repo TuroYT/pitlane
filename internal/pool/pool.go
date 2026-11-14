@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -29,7 +30,6 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
@@ -501,7 +501,7 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 	name := slotName(i)
 	info, err := p.cli.ContainerInspect(ctx, name)
 	switch {
-	case errdefs.IsNotFound(err):
+	case cerrdefs.IsNotFound(err):
 		cmd := []string{"--host=" + dindAddr, "--host=unix:///var/run/docker.sock", "--tls=false"}
 		if cfg.Mirror {
 			cmd = append(cmd, "--registry-mirror=http://"+mirrorName+":5000")
@@ -598,7 +598,7 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 		p.log.Warn("QEMU emulators", "error", err)
 		return
 	}
-	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
+	defer p.Remove(context.Background(), c.ID)
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err == nil && p.Wait(ctx, c.ID) == 0 {
 		base := trustedQEMU(readBinfmt())
 		p.mu.Lock()
@@ -748,7 +748,7 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 func (p *Pool) connectMirror(ctx context.Context, i int) {
 	_ = p.cli.NetworkDisconnect(ctx, mirrorNetwork, slotName(i), true) // layout of older versions
 	err := p.cli.NetworkConnect(ctx, slotNetwork(i), mirrorName, &network.EndpointSettings{Aliases: []string{mirrorName}})
-	if err != nil && !errdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
+	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
 		p.log.Warn("connect mirror to slot network", "slot", i, "error", err)
 	}
 }
@@ -802,7 +802,7 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 	p.mu.Unlock()
 	p.forgetStore(i)
 	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return err
 	}
 	if err := p.DropSlotCache(ctx, i); err != nil {
@@ -826,7 +826,7 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 // DropSlotCache deletes a retired slot's volumes (frees disk).
 func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
 	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
-		if err := p.cli.VolumeRemove(ctx, v, true); err != nil && !errdefs.IsNotFound(err) {
+		if err := p.cli.VolumeRemove(ctx, v, true); err != nil && !cerrdefs.IsNotFound(err) {
 			return fmt.Errorf("remove volume %s: %w", v, err)
 		}
 	}
@@ -964,7 +964,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	if l.Runner != "" {
 		c, t := strictVolumes(l.Runner)
 		for _, v := range []string{c, t} {
-			if rerr := p.cli.VolumeRemove(ctx, v, true); rerr != nil && !errdefs.IsNotFound(rerr) && err == nil {
+			if rerr := p.cli.VolumeRemove(ctx, v, true); rerr != nil && !cerrdefs.IsNotFound(rerr) && err == nil {
 				err = rerr
 			}
 			p.mu.Lock()
@@ -1127,7 +1127,7 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	if err != nil {
 		return err
 	}
-	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
+	defer p.Remove(context.Background(), c.ID)
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
 		return err
 	}
@@ -1286,7 +1286,10 @@ func (p *Pool) Wait(ctx context.Context, id string) int64 {
 	select {
 	case st := <-statusCh:
 		return st.StatusCode
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil && ctx.Err() == nil {
+			p.log.Warn("wait for container", "container", id, "error", err)
+		}
 		return -1
 	case <-ctx.Done():
 		return -1
@@ -1317,7 +1320,7 @@ func (p *Pool) Remove(ctx context.Context, id string) {
 func (p *Pool) StopRunner(ctx context.Context, id string, grace time.Duration) error {
 	secs := int(grace / time.Second)
 	err := p.cli.ContainerStop(ctx, id, container.StopOptions{Signal: "SIGTERM", Timeout: &secs})
-	if errdefs.IsNotFound(err) || errdefs.IsConflict(err) { // gone or already stopped
+	if cerrdefs.IsNotFound(err) || cerrdefs.IsConflict(err) { // gone or already stopped
 		return nil
 	}
 	return err
@@ -1413,7 +1416,7 @@ func (p *Pool) ensureNetwork(ctx context.Context, name string, internal bool) er
 		return nil
 	}
 	_, err := p.cli.NetworkCreate(ctx, name, network.CreateOptions{Driver: "bridge", Internal: internal, Labels: map[string]string{LabelManaged: "true"}})
-	if err != nil && !errdefs.IsConflict(err) {
+	if err != nil && !cerrdefs.IsConflict(err) {
 		return fmt.Errorf("create network %s: %w", name, err)
 	}
 	return nil

@@ -164,7 +164,9 @@ func (p *Pool) mergeStore(ctx context.Context, slot int, vol string) (mergeStats
 
 func runnerIDs() (int, int) {
 	var uid, gid int
-	fmt.Sscanf(runnerUID, "%d:%d", &uid, &gid)
+	if _, err := fmt.Sscanf(runnerUID, "%d:%d", &uid, &gid); err != nil {
+		panic("invalid runnerUID constant: " + runnerUID)
+	}
 	return uid, gid
 }
 
@@ -322,7 +324,7 @@ func readDir(fd int) ([]dirEntry, error) {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(dup), "")
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	if _, err := f.Seek(0, 0); err != nil {
 		return nil, err
 	}

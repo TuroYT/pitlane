@@ -235,8 +235,11 @@ func (s *Server) auth(h http.HandlerFunc) http.Handler {
 }
 
 func (s *Server) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true,
-		Secure: strings.HasPrefix(s.baseURL(r), "https://"), SameSite: http.SameSiteLaxMode})
+	// Secure whenever the UI is served over HTTPS; plain HTTP stays possible
+	// on a LAN.
+	c := &http.Cookie{Name: name, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, //nolint:gosec // G124: Secure depends on the scheme, HttpOnly and SameSite are set
+		Secure: strings.HasPrefix(s.baseURL(r), "https://"), SameSite: http.SameSiteLaxMode}
+	http.SetCookie(w, c)
 }
 
 // newState returns a random state bound to a purpose ("manifest" or "oauth")
@@ -459,7 +462,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.allowed(login) {
 		s.log.Warn("sign-in refused", "login", login)
-		http.Redirect(w, r, "/login?error=forbidden&login="+login, http.StatusFound)
+		http.Redirect(w, r, "/login?error=forbidden&login="+url.QueryEscape(login), http.StatusFound) //nolint:gosec // G710: fixed local path, the login is query-escaped
 		return
 	}
 	token := randomHex(32)
@@ -571,8 +574,8 @@ func readHost(dataDir string) hostStats {
 	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(dir, &st); err == nil {
-		h.DiskTotal = int64(st.Blocks) * int64(st.Bsize)
-		h.DiskFree = int64(st.Bavail) * int64(st.Bsize)
+		h.DiskTotal = int64(st.Blocks) * st.Bsize //nolint:gosec // G115: block counts of a real filesystem fit in int64
+		h.DiskFree = int64(st.Bavail) * st.Bsize  //nolint:gosec // G115: same
 	}
 	return h
 }
@@ -695,7 +698,7 @@ var validName = func(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !(c == '-' || c == '_' || c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		if c != '-' && c != '_' && c != '.' && (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			return false
 		}
 	}
@@ -863,7 +866,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no logs for this runner")
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	_, _ = io.Copy(w, f)
 }
 
@@ -1205,7 +1208,8 @@ func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
-	http.ServeFileFS(w, r, s.web, p)
+	// s.web is the embedded UI: nothing outside it can be served.
+	http.ServeFileFS(w, r, s.web, p) //nolint:gosec // G703: embedded read-only FS
 }
 
 // ------------------------------------------------------------------ helpers
