@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import type { ChartConfiguration } from 'chart.js'
 import type { Job } from '../api'
 import {
-  baseOptions, buckets, fmtPercent, fmtSeconds, jobsByResult, percentiles, theme, utilisation, type Range,
+  baseOptions, buckets, niceStep, fmtPercent, fmtSeconds, jobsByResult, percentiles, theme, utilisation, type Range,
 } from '../charts'
 import ChartCanvas from './ChartCanvas.vue'
 
@@ -79,7 +79,11 @@ function lines(p: { p50: (number | null)[]; p90: (number | null)[] }): ChartConf
         { label: 'p90', data: p.p90, borderColor: t.p90, backgroundColor: t.p90, borderDash: [5, 4], ...common },
       ],
     },
-    options: baseOptions(t, fmtSeconds),
+    options: (() => {
+      const o = baseOptions(t, fmtSeconds)
+      const max = Math.max(0, ...p.p90.map((v) => v ?? 0), ...p.p50.map((v) => v ?? 0))
+      return { ...o, scales: { ...o.scales, y: { ...o.scales.y, ticks: { ...o.scales.y.ticks, stepSize: niceStep(max) } } } }
+    })(),
   }
 }
 const waitChart = computed(() => lines(waits.value))

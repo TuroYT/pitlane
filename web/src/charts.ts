@@ -101,6 +101,12 @@ export function baseOptions(t: Theme, yFormat?: (v: number) => string) {
   }
 }
 
+/** A round step (seconds) giving at most 4 intervals up to max: 5 s, 10 s, 30 s, 1 min, 2 min, 5 min… */
+export function niceStep(max: number): number | undefined {
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400]
+  return steps.find((s) => max / s <= 4)
+}
+
 export const fmtSeconds = (v: number) => (v === 0 ? '0' : duration(v))
 export const fmtPercent = (v: number) => `${Math.round(v)}%`
 
