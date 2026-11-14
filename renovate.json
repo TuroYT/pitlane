@@ -7,12 +7,17 @@
     ":semanticCommits"
   ],
   "minimumReleaseAge": "3 days",
-  "postUpdateOptions": ["gomodTidy"],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
   "customManagers": [
     {
-      "description": "Images pulled by Pitlane at run time, pinned as name:tag@sha256:digest",
+      "description": "Images pinned as \"name:tag@sha256:digest\" outside Dockerfiles (run-time images, setup-qemu-action input)",
       "customType": "regex",
-      "managerFilePatterns": ["/^internal/pool/images\\.go$/"],
+      "managerFilePatterns": [
+        "/^internal/pool/images\\.go$/",
+        "/^\\.github/workflows/release\\.yml$/"
+      ],
       "matchStrings": [
         "\"(?<depName>[a-z0-9][a-z0-9./-]*):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
       ],
@@ -21,8 +26,12 @@
     {
       "description": "Runner image tag used by dev builds: the latest Pitlane release",
       "customType": "regex",
-      "managerFilePatterns": ["/^internal/pool/images\\.go$/"],
-      "matchStrings": ["devRunnerTag = \"(?<currentValue>v[0-9][^\"]*)\""],
+      "managerFilePatterns": [
+        "/^internal/pool/images\\.go$/"
+      ],
+      "matchStrings": [
+        "devRunnerTag = \"(?<currentValue>v[0-9][^\"]*)\""
+      ],
       "depNameTemplate": "ghcr.io/turoyt/pitlane-runner",
       "datasourceTemplate": "docker"
     }
@@ -30,7 +39,9 @@
   "packageRules": [
     {
       "description": "Keep the runner base image and the fallback runner image on the same version",
-      "matchDepNames": ["ghcr.io/actions/actions-runner"],
+      "matchDepNames": [
+        "ghcr.io/actions/actions-runner"
+      ],
       "groupName": "actions-runner",
       "minimumReleaseAge": "1 day"
     },
@@ -43,23 +54,43 @@
     },
     {
       "description": "Pitlane's own images are released from this repository",
-      "matchDepNames": ["ghcr.io/turoyt/pitlane", "ghcr.io/turoyt/pitlane-runner"],
+      "matchDepNames": [
+        "ghcr.io/turoyt/pitlane",
+        "ghcr.io/turoyt/pitlane-runner"
+      ],
       "groupName": "pitlane release images",
       "minimumReleaseAge": null
     },
     {
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "github actions",
-      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"]
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pinDigest"
+      ]
     },
     {
-      "matchManagers": ["npm"],
-      "matchUpdateTypes": ["minor", "patch"],
+      "matchManagers": [
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "groupName": "web dependencies (non-major)"
     },
     {
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["minor", "patch"],
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "groupName": "go modules (non-major)"
     }
   ]
