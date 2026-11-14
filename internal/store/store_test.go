@@ -97,3 +97,25 @@ func TestTargetMaxJobMinutes(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisteredRunners(t *testing.T) {
+	s := open(t)
+	if err := s.AddRunner(RegisteredRunner{ID: 7, TargetID: 1, Name: "pitlane-a"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.AddRunner(RegisteredRunner{ID: 8, TargetID: 2, Name: "pitlane-b"})
+	if id := s.RunnerIDByName("pitlane-a"); id != 7 {
+		t.Fatal(id)
+	}
+	if id := s.RunnerIDByName("nope"); id != 0 {
+		t.Fatal(id)
+	}
+	rs, err := s.RegisteredRunners(1)
+	if err != nil || len(rs) != 1 || rs[0].Name != "pitlane-a" || rs[0].CreatedAt == 0 {
+		t.Fatalf("%+v %v", rs, err)
+	}
+	_ = s.DeleteRunner(7)
+	if rs, _ := s.RegisteredRunners(1); len(rs) != 0 {
+		t.Fatalf("not deleted: %+v", rs)
+	}
+}

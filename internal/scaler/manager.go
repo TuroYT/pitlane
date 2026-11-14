@@ -20,6 +20,7 @@ import (
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
 
+	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
@@ -37,6 +38,9 @@ func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" &
 // Manager runs one listener per target.
 type Manager struct {
 	Version string
+	// ListRunners lists a target's self-hosted runners through the REST API
+	// (used to find orphan runners). Nil disables orphan cleanup.
+	ListRunners func(ctx context.Context, t store.Target) ([]gh.Runner, error)
 
 	store   *store.Store
 	pool    *pool.Pool
@@ -73,6 +77,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		if o.Created.Year() < 2000 {
 			r.busySince = time.Now()
 		}
+		r.runnerID = m.store.RunnerIDByName(o.Name)
 		if !o.Running {
 			go m.finishRunner(nil, r)
 			continue
@@ -92,6 +97,8 @@ func (m *Manager) loop(ctx context.Context) {
 	defer clean.Stop()
 	timeouts := time.NewTicker(30 * time.Second)
 	defer timeouts.Stop()
+	orphans := time.NewTicker(orphanInterval)
+	defer orphans.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -104,6 +111,8 @@ func (m *Manager) loop(ctx context.Context) {
 			m.housekeeping()
 		case <-timeouts.C:
 			m.enforceTimeouts()
+		case <-orphans.C:
+			go m.cleanupOrphansAll()
 		}
 	}
 }
@@ -296,6 +305,8 @@ type target struct {
 	runners     map[string]*runner
 	starting    int // runners being prepared/started in the background
 	reconcileMu sync.Mutex
+	orphanMu    sync.Mutex
+	orphanAt    time.Time // last orphan cleanup
 }
 
 func newTarget(m *Manager, t store.Target) *target {
@@ -433,6 +444,7 @@ func (t *target) listen() error {
 	t.mu.Unlock()
 	t.setStatus("listening", "")
 	t.log.Info("listening for jobs", "scaleSet", ss.ID, "label", cfg.ScaleSetName)
+	go t.cleanupOrphans()
 	err = lst.Run(t.ctx, &scaler{t: t, session: session})
 	if errors.Is(err, context.Canceled) {
 		return nil
@@ -530,6 +542,7 @@ func (t *target) reconcile() {
 			if err := t.client.RemoveRunner(t.ctx, r.runnerID); err != nil {
 				continue
 			}
+			t.m.forgetRunner(r.runnerID, nil)
 		}
 		t.log.Info("removing idle runner", "runner", r.name)
 		t.m.pool.Remove(context.Background(), r.containerID)
@@ -586,10 +599,16 @@ func (t *target) startRunner(lease pool.Lease) error {
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)
 	}
+	if jit.Runner != nil {
+		// Recorded before the container exists: if Pitlane dies now, the
+		// orphan cleanup still finds this registration.
+		_ = t.m.store.AddRunner(store.RegisteredRunner{ID: int64(jit.Runner.ID), TargetID: cfg.ID, Name: name})
+	}
 	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.EncodedJITConfig, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
 	if err != nil {
 		if jit.Runner != nil {
-			_ = client.RemoveRunner(context.Background(), int64(jit.Runner.ID))
+			id := int64(jit.Runner.ID)
+			t.m.forgetRunner(id, client.RemoveRunner(context.Background(), id))
 		}
 		return err
 	}
@@ -626,7 +645,8 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 		client := t.client
 		t.mu.Unlock()
 		if client != nil && r.runnerID != 0 {
-			_ = client.RemoveRunner(ctx, r.runnerID) // usually already gone (ephemeral)
+			// Usually already gone (ephemeral): NotFound also clears the record.
+			m.forgetRunner(r.runnerID, client.RemoveRunner(ctx, r.runnerID))
 		}
 	}
 	m.pool.Release(ctx, r.lease)

@@ -64,6 +64,13 @@ var migrations = []string{
 	`CREATE TABLE sessions (token TEXT PRIMARY KEY, login TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
 	`ALTER TABLE targets ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE targets ADD COLUMN max_job_minutes INTEGER NOT NULL DEFAULT 360`,
+	// Runners Pitlane registered on GitHub and has not seen removed yet.
+	`CREATE TABLE runners (
+		runner_id INTEGER PRIMARY KEY,
+		target_id INTEGER NOT NULL,
+		name TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -419,4 +426,55 @@ func (s *Store) SessionLogin(token string) (string, bool) {
 func (s *Store) DeleteSession(token string) error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
 	return err
+}
+
+// ----------------------------------------------------------------- runners
+
+// RegisteredRunner is a runner Pitlane registered on GitHub (JIT config).
+type RegisteredRunner struct {
+	ID        int64
+	TargetID  int64
+	Name      string
+	CreatedAt int64
+}
+
+// AddRunner records a runner registered on GitHub.
+func (s *Store) AddRunner(r RegisteredRunner) error {
+	if r.CreatedAt == 0 {
+		r.CreatedAt = time.Now().Unix()
+	}
+	_, err := s.db.Exec(`INSERT INTO runners (runner_id, target_id, name, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(runner_id) DO UPDATE SET target_id = excluded.target_id, name = excluded.name`, r.ID, r.TargetID, r.Name, r.CreatedAt)
+	return err
+}
+
+// DeleteRunner forgets a runner once it is gone from GitHub.
+func (s *Store) DeleteRunner(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM runners WHERE runner_id = ?`, id)
+	return err
+}
+
+// RunnerIDByName returns the GitHub ID of a registered runner (0 if unknown).
+func (s *Store) RunnerIDByName(name string) int64 {
+	var id int64
+	_ = s.db.QueryRow(`SELECT runner_id FROM runners WHERE name = ? ORDER BY created_at DESC LIMIT 1`, name).Scan(&id)
+	return id
+}
+
+// RegisteredRunners lists the runners registered for a target.
+func (s *Store) RegisteredRunners(targetID int64) ([]RegisteredRunner, error) {
+	rows, err := s.db.Query(`SELECT runner_id, target_id, name, created_at FROM runners WHERE target_id = ? ORDER BY created_at`, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RegisteredRunner
+	for rows.Next() {
+		var r RegisteredRunner
+		if err := rows.Scan(&r.ID, &r.TargetID, &r.Name, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

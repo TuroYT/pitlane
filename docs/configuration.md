@@ -28,6 +28,10 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Job limit (min) | 360 | A runner whose job runs longer is killed; its slot is cleaned and released as after any job. `0` = no limit. |
 | Strict | on for public repositories | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |
 
+## Automatic maintenance
+
+- **Orphan runners.** A runner container that dies before deregistering (out of memory, host reboot) leaves an offline runner on GitHub. Pitlane records the ID of every runner it registers and, at start and every 10 minutes, removes those that GitHub reports offline and not busy, that have no Pitlane container and that were registered more than 15 minutes ago. Online, busy or unknown runners are never removed. It needs the REST runner list (`administration` permission of the GitHub App, or `repo` / `admin:org` for a token); runners registered by Pitlane versions before this feature are not tracked.
+
 ## Environment variables / flags
 
 | Variable | Flag | Default | |

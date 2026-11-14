@@ -341,3 +341,36 @@ func do(ctx context.Context, method, u, auth string, body any, out any) error {
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
+// Runner is a self-hosted runner as listed by the REST API.
+type Runner struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"` // "online" or "offline"
+	Busy   bool   `json:"busy"`
+}
+
+// ListRunners returns the self-hosted runners of a repository (repo != "")
+// or an organization. token is an installation token or a personal access
+// token. At most 1,000 runners are returned.
+func ListRunners(ctx context.Context, token, owner, repo string) ([]Runner, error) {
+	base := fmt.Sprintf("%s/orgs/%s/actions/runners", apiBase, url.PathEscape(owner))
+	if repo != "" {
+		base = fmt.Sprintf("%s/repos/%s/%s/actions/runners", apiBase, url.PathEscape(owner), url.PathEscape(repo))
+	}
+	var out []Runner
+	for page := 1; page <= 10; page++ {
+		var res struct {
+			Total   int      `json:"total_count"`
+			Runners []Runner `json:"runners"`
+		}
+		if err := do(ctx, http.MethodGet, fmt.Sprintf("%s?per_page=100&page=%d", base, page), "Bearer "+token, nil, &res); err != nil {
+			return nil, err
+		}
+		out = append(out, res.Runners...)
+		if len(res.Runners) < 100 || len(out) >= res.Total {
+			break
+		}
+	}
+	return out, nil
+}

@@ -881,6 +881,20 @@ func (s *Server) token(ctx context.Context, t store.Target) (string, error) {
 	return client.InstallationToken(ctx, t.InstallationID)
 }
 
+// GitHubRunners lists the self-hosted runners of a target through the REST
+// API (used by the scaler to find orphan runners).
+func (s *Server) GitHubRunners(ctx context.Context, t store.Target) ([]gh.Runner, error) {
+	tok, err := s.token(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	repo := ""
+	if t.Kind == "repo" {
+		repo = t.Repo
+	}
+	return gh.ListRunners(ctx, tok, t.Owner, repo)
+}
+
 // handleCompare compares the median duration of each successful job on
 // Pitlane with the same job on GitHub-hosted runners (from the Actions
 // history of every enabled repository). Cached for 15 minutes.
