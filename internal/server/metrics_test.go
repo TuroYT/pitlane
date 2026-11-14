@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TuroYT/pitlane/internal/cache"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/store"
@@ -82,6 +83,7 @@ func TestWriteMetrics(t *testing.T) {
 		Results:   map[string]int64{"succeeded": 3, "failed": 1},
 		Durations: []float64{10, 20, 30, 40},
 		DiskFree:  5 << 30, DiskTotal: 100 << 30, DiskOK: true,
+		ActionsCache: &cache.Stats{Entries: 3, Bytes: 1024, Hits: 5, Misses: 2, Saves: 3},
 	})
 	out := b.String()
 	for _, want := range []string{
@@ -101,6 +103,10 @@ func TestWriteMetrics(t *testing.T) {
 		`pitlane_job_wait_seconds{quantile="0.5"} NaN`,
 		"pitlane_job_wait_seconds_count 0",
 		"pitlane_disk_free_bytes 5368709120",
+		"pitlane_actions_cache_bytes 1024",
+		"pitlane_actions_cache_entries 3",
+		`pitlane_actions_cache_requests_total{result="hit"} 5`,
+		`pitlane_actions_cache_requests_total{result="save"} 3`,
 	} {
 		if !strings.Contains(out, want+"\n") {
 			t.Errorf("missing %q in:\n%s", want, out)

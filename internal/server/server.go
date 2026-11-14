@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TuroYT/pitlane/internal/cache"
 	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
@@ -50,7 +51,8 @@ type Server struct {
 	store *store.Store
 	pool  *pool.Pool
 	mgr   *scaler.Manager
-	upd   http.Handler // /api/updates (internal/update)
+	upd   http.Handler  // /api/updates (internal/update)
+	cache *cache.Server // actions cache, nil when not serving
 	log   *slog.Logger
 	web   fs.FS
 	hub   *hub
@@ -74,6 +76,10 @@ func New(cfg Config, st *store.Store, p *pool.Pool, log *slog.Logger, web fs.FS)
 
 // SetManager wires the scaler manager (created after the server so it can notify the hub).
 func (s *Server) SetManager(m *scaler.Manager) { s.mgr = m }
+
+// SetActionsCache wires the actions cache server (its stats are shown in
+// Settings and /metrics); nil when it is not serving.
+func (s *Server) SetActionsCache(c *cache.Server) { s.cache = c }
 
 // SetUpdates wires the update API handler, served under /api/updates.
 func (s *Server) SetUpdates(h http.Handler) { s.upd = h }
@@ -384,6 +390,11 @@ type Settings struct {
 	// ("" removes it).
 	MetricsToken    *string `json:"metricsToken,omitempty"`
 	MetricsTokenSet bool    `json:"metricsTokenSet"`
+	// Actions cache served from the host (internal/cache). Its stats are
+	// read-only, nil when the cache listener is not running.
+	ActionsCache      bool         `json:"actionsCache"`
+	ActionsCacheGB    int          `json:"actionsCacheGb"`
+	ActionsCacheStats *cache.Stats `json:"actionsCacheStats,omitempty"`
 }
 
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
@@ -397,17 +408,19 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 // LoadPoolConfig reads the pool configuration from the store.
 func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
-		StateFile:     filepath.Join(dataDir, "slots.json"),
-		Slots:         st.GetInt("slots", DefaultSlots()),
-		RunnerImage:   st.Get("runner_image", ""),
-		DindImage:     st.Get("dind_image", ""),
-		CPUShares:     int64(st.GetInt("cpu_shares", 0)),
-		MemoryMB:      int64(st.GetInt("memory_mb", 0)),
-		CacheScope:    st.Get("cache_scope", "owner"),
-		Mirror:        st.Get("mirror", "true") == "true",
-		NoQEMU:        st.Get("qemu", "true") != "true",
-		KeepBuildGB:   st.GetInt("keep_build_gb", 20),
-		MinFreeDiskGB: st.GetInt("min_free_disk_gb", 20),
+		StateFile:      filepath.Join(dataDir, "slots.json"),
+		Slots:          st.GetInt("slots", DefaultSlots()),
+		RunnerImage:    st.Get("runner_image", ""),
+		DindImage:      st.Get("dind_image", ""),
+		CPUShares:      int64(st.GetInt("cpu_shares", 0)),
+		MemoryMB:       int64(st.GetInt("memory_mb", 0)),
+		CacheScope:     st.Get("cache_scope", "owner"),
+		Mirror:         st.Get("mirror", "true") == "true",
+		NoQEMU:         st.Get("qemu", "true") != "true",
+		KeepBuildGB:    st.GetInt("keep_build_gb", 20),
+		MinFreeDiskGB:  st.GetInt("min_free_disk_gb", 20),
+		ActionsCache:   st.Get("actions_cache", "true") == "true",
+		ActionsCacheGB: st.GetInt("actions_cache_gb", 20),
 	}
 }
 
@@ -421,12 +434,22 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
 		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
+		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheStats: s.actionsCacheStats(),
 	})
+}
+
+func (s *Server) actionsCacheStats() *cache.Stats {
+	if s.cache == nil {
+		return nil
+	}
+	st := s.cache.Stats()
+	return &st
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// Fields missing from the request keep their current value.
-	in := Settings{MinFreeDiskGB: s.pool.Config().MinFreeDiskGB}
+	cur := s.pool.Config()
+	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -467,6 +490,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "qemu": strconv.FormatBool(in.QEMU), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
 		"allowed_users": in.AllowedUsers, "history_days": strconv.Itoa(max(1, in.HistoryDays)),
 		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
+		"actions_cache":    strconv.FormatBool(in.ActionsCache), "actions_cache_gb": strconv.Itoa(max(1, in.ActionsCacheGB)),
 	}
 	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
 		kv["base_url"] = b

@@ -117,3 +117,20 @@ func TestGitHubJobRedirect(t *testing.T) {
 		t.Fatalf("unknown runner: %d", w.Code)
 	}
 }
+
+// The actions cache is on by default and its settings survive a round trip.
+func TestActionsCacheSettings(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if c := LoadPoolConfig(st, t.TempDir()); !c.ActionsCache || c.ActionsCacheGB != 20 {
+		t.Fatalf("defaults: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	}
+	_ = st.Set("actions_cache", "false")
+	_ = st.Set("actions_cache_gb", "50")
+	if c := LoadPoolConfig(st, t.TempDir()); c.ActionsCache || c.ActionsCacheGB != 50 {
+		t.Fatalf("stored: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	}
+}
