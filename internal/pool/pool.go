@@ -171,6 +171,17 @@ type slotOps interface {
 	wipe(ctx context.Context, slot int) error
 	// removeVolume deletes a Docker volume (nil when it does not exist).
 	removeVolume(ctx context.Context, name string) error
+	// recreate replaces the slot container (its volumes are kept).
+	recreate(ctx context.Context, slot int) error
+	// imageID returns the ID of a local image.
+	imageID(ctx context.Context, ref string) (string, error)
+	// copyExternals copies the runner image's externals into the slot's
+	// externals volume, replacing its content.
+	copyExternals(ctx context.Context, slot int, img string) error
+	// slotStoreEmpty reports whether the slot has no pnpm store content yet.
+	slotStoreEmpty(ctx context.Context, slot int) bool
+	// mergeStore merges the slot's pnpm store with the canonical store vol.
+	mergeStore(ctx context.Context, slot int, vol string) (mergeStats, error)
 }
 
 func (p *Pool) ops() slotOps {
@@ -201,6 +212,41 @@ func (d dockerSlotOps) wipe(ctx context.Context, slot int) error {
 		return err
 	}
 	return d.p.ensureSlot(ctx, slot)
+}
+
+func (d dockerSlotOps) recreate(ctx context.Context, slot int) error {
+	_ = d.p.cli.ContainerRemove(ctx, slotName(slot), container.RemoveOptions{Force: true})
+	return d.p.ensureSlot(ctx, slot)
+}
+
+func (d dockerSlotOps) imageID(ctx context.Context, ref string) (string, error) {
+	info, err := d.p.cli.ImageInspect(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	return info.ID, nil
+}
+
+func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) error {
+	p := d.p
+	// Always a full copy: the volume is reachable from the privileged slot
+	// daemon, so nothing inside it (such as a marker file) can be trusted.
+	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/`
+	c, err := p.cli.ContainerCreate(ctx, &container.Config{
+		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script},
+		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
+	}, &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: slotExternals(i), Target: "/x"}}}, nil, nil, "")
+	if err != nil {
+		return err
+	}
+	defer p.Remove(context.Background(), c.ID)
+	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
+		return err
+	}
+	if code := p.Wait(ctx, c.ID); code != 0 {
+		return fmt.Errorf("copy runner externals into slot %d: exit code %d", i, code)
+	}
+	return nil
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -967,7 +1013,7 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	}
 	if l.Strict {
 		p.forgetStore(l.Slot)
-	} else if !p.stores.isSynced(l.Slot, pnpmStoreVolume(p.Config().CacheScope, l.Owner)) && p.slotStoreEmpty(ctx, l.Slot) {
+	} else if !p.stores.isSynced(l.Slot, pnpmStoreVolume(p.Config().CacheScope, l.Owner)) && p.ops().slotStoreEmpty(ctx, l.Slot) {
 		// New or wiped slot: fill its pnpm store from the owner's canonical
 		// one before the job installs (a store left by an earlier job of
 		// the same owner is merged after this job instead, off the clock).
@@ -1102,8 +1148,7 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 	}
 	if upgrade {
 		p.log.Info("upgrading slot after its job", "slot", l.Slot)
-		_ = p.cli.ContainerRemove(ctx, slotName(l.Slot), container.RemoveOptions{Force: true})
-		if err := p.ensureSlot(ctx, l.Slot); err != nil {
+		if err := p.ops().recreate(ctx, l.Slot); err != nil {
 			p.setStatus(l.Slot, "error", err.Error())
 			return
 		}
@@ -1125,12 +1170,12 @@ func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
 // in Pitlane's state file, never in the volume, which slot jobs can reach);
 // between jobs of the same owner it is shared like the other caches.
 func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
-	info, err := p.cli.ImageInspect(ctx, img)
+	id, err := p.ops().imageID(ctx, img)
 	if err != nil {
 		return err
 	}
 	p.mu.Lock()
-	done := p.externals[i] == info.ID
+	done := p.externals[i] == id
 	p.mu.Unlock()
 	if done {
 		return nil
@@ -1143,25 +1188,11 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 		return ctx.Err()
 	}
 	p.log.Info("copying runner externals into slot", "slot", i)
-	// Always a full copy: the volume is reachable from the privileged slot
-	// daemon, so nothing inside it (such as a marker file) can be trusted.
-	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/`
-	c, err := p.cli.ContainerCreate(ctx, &container.Config{
-		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script},
-		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
-	}, &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: slotExternals(i), Target: "/x"}}}, nil, nil, "")
-	if err != nil {
+	if err := p.ops().copyExternals(ctx, i, img); err != nil {
 		return err
-	}
-	defer p.Remove(context.Background(), c.ID)
-	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
-		return err
-	}
-	if code := p.Wait(ctx, c.ID); code != 0 {
-		return fmt.Errorf("copy runner externals into slot %d: exit code %d", i, code)
 	}
 	p.mu.Lock()
-	p.externals[i] = info.ID
+	p.externals[i] = id
 	p.saveLocked()
 	p.mu.Unlock()
 	return nil

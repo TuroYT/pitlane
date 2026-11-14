@@ -21,6 +21,12 @@ type fakeSlotOps struct {
 	wipes   int
 	wipeErr error
 	removed []string
+	// externals and pnpm store
+	image     string
+	copies    int
+	copyErr   error
+	merges    []string
+	recreates int
 }
 
 func (f *fakeSlotOps) removeVolume(_ context.Context, name string) error {
@@ -44,6 +50,38 @@ func (f *fakeSlotOps) wipe(context.Context, int) error {
 	defer f.mu.Unlock()
 	f.wipes++
 	return f.wipeErr
+}
+
+func (f *fakeSlotOps) recreate(context.Context, int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recreates++
+	return nil
+}
+
+func (f *fakeSlotOps) imageID(context.Context, string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.image == "" {
+		return "sha256:runner", nil
+	}
+	return f.image, nil
+}
+
+func (f *fakeSlotOps) copyExternals(context.Context, int, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.copies++
+	return f.copyErr
+}
+
+func (f *fakeSlotOps) slotStoreEmpty(context.Context, int) bool { return true }
+
+func (f *fakeSlotOps) mergeStore(_ context.Context, _ int, vol string) (mergeStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.merges = append(f.merges, vol)
+	return mergeStats{}, nil
 }
 
 func listDir(t *testing.T, dir string) []string {
