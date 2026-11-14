@@ -101,12 +101,30 @@ func (s *Server) EnsureSetupToken() string {
 		return ""
 	}
 	if b, err := os.ReadFile(file); err == nil && len(strings.TrimSpace(string(b))) > 0 {
-		s.setupToken = strings.TrimSpace(string(b))
-		return s.setupToken
+		tok := strings.TrimSpace(string(b))
+		s.setSetupToken(tok)
+		return tok
 	}
-	s.setupToken = randomHex(12)
-	_ = os.WriteFile(file, []byte(s.setupToken+"\n"), 0o600)
+	tok := randomHex(12)
+	s.setSetupToken(tok)
+	if err := os.WriteFile(file, []byte(tok+"\n"), 0o600); err != nil {
+		s.log.Warn("cannot write the setup token file (the token is in this log)", "file", file, "error", err)
+	}
+	return tok
+}
+
+// The setup token is read by request handlers and cleared by the first
+// sign-in: guarded by s.mu.
+func (s *Server) getSetupToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.setupToken
+}
+
+func (s *Server) setSetupToken(tok string) {
+	s.mu.Lock()
+	s.setupToken = tok
+	s.mu.Unlock()
 }
 
 func randomHex(n int) string {
@@ -197,11 +215,12 @@ func (s *Server) allowed(login string) bool {
 }
 
 func (s *Server) hasSetupCookie(r *http.Request) bool {
-	if s.setupToken == "" {
+	tok := s.getSetupToken()
+	if tok == "" {
 		return false
 	}
 	c, err := r.Cookie(setupCookie)
-	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.setupToken)) == 1
+	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1
 }
 
 func (s *Server) auth(h http.HandlerFunc) http.Handler {
@@ -275,12 +294,13 @@ func (s *Server) handleSetupUnlock(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || s.setupToken == "" ||
-		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(body.Token)), []byte(s.setupToken)) != 1 {
+	tok := s.getSetupToken()
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || tok == "" ||
+		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(body.Token)), []byte(tok)) != 1 {
 		writeErr(w, http.StatusForbidden, "invalid setup token")
 		return
 	}
-	s.setCookie(w, r, setupCookie, s.setupToken, 3600)
+	s.setCookie(w, r, setupCookie, tok, 3600)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -421,7 +441,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.EnsureSetupToken() // deletes the token file
-		s.setupToken = ""
+		s.setSetupToken("")
 		s.log.Info("first admin registered", "login", login)
 	}
 	if !s.allowed(login) {

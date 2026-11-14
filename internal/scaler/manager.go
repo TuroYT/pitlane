@@ -527,7 +527,8 @@ func (t *target) reconcile() {
 	defer t.reconcileMu.Unlock()
 
 	t.mu.Lock()
-	if t.client == nil {
+	client := t.client // replaced by listen(): read under the lock only
+	if client == nil {
 		t.mu.Unlock()
 		return
 	}
@@ -570,7 +571,7 @@ func (t *target) reconcile() {
 			break
 		}
 		if r.runnerID != 0 {
-			if err := t.client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
 				continue
 			}
 			t.m.forgetRunner(r.runnerID, nil)
