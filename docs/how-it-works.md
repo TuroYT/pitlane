@@ -72,5 +72,8 @@ it, and a slot changing owner drops its store before its first job.
 ## Lifecycle and restarts
 
 Stopping Pitlane stops the listeners but leaves busy runners running. On start,
-Pitlane adopts them, and slots keep their cache across restarts. Disabling a
+Pitlane adopts them, and slots keep their cache across restarts. A runner whose
+repository Pitlane cannot tell (container without a valid target label, or a
+repository deleted or disabled meanwhile) is stopped at start, like a job over
+its time limit, and its slot is rebuilt before any reuse. Disabling a
 repository deletes its scale set on GitHub once its running jobs finish.

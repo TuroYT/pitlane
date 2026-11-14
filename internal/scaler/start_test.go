@@ -200,3 +200,103 @@ func TestCleanupOrphans(t *testing.T) {
 		})
 	}
 }
+
+// A runner container left by a previous run that no listener will adopt
+// (target label missing or invalid, target deleted or disabled) is stopped
+// gracefully and finished at once, its slot released as strict: it is never
+// left running untracked with its slot held.
+func TestStartStopsUntrackedRunners(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	on, err := st.CreateTarget(store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, err := st.CreateTarget(store.Target{Kind: "org", Owner: "other", Enabled: false, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().Add(-10 * time.Minute)
+	p := newFakePool(0)
+	p.orphans = []pool.Orphan{
+		{ID: "c-ok", Name: "pitlane-ok", Slot: 0, TargetID: on.ID, Owner: "acme", Running: true, Created: created},
+		// What the pool reports for a container without a valid target label.
+		{ID: "c-nolabel", Name: "pitlane-nolabel", Slot: 1, Strict: true, Untrusted: true, Running: true, Created: created},
+		{ID: "c-deleted", Name: "pitlane-deleted", Slot: 2, TargetID: 999, Owner: "gone", Running: true, Created: created},
+		{ID: "c-disabled", Name: "pitlane-disabled", Slot: 3, TargetID: off.ID, Owner: "other", Running: true, Created: created},
+		{ID: "c-exited", Name: "pitlane-exited", Slot: 4, TargetID: 999, Owner: "gone", Created: created},
+		{ID: "c-noslot", Name: "pitlane-noslot", Slot: -1, Strict: true, Untrusted: true, Running: true, Created: created},
+	}
+	api := newFakeAPI()
+	m := New(st, p, t.TempDir(), func() Credentials { return Credentials{PAT: "x"} }, func() {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.connect = func(Credentials, store.Target, string) (scaleSetAPI, error) { return api, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	<-api.session.running
+
+	waitFor(t, "untracked runners finished", func() bool {
+		s := p.snapshot()
+		return len(s.released) == 4 && len(s.removed) == 5
+	})
+	s := p.snapshot()
+	slices.Sort(s.stopped)
+	if want := []string{"c-deleted", "c-disabled", "c-nolabel", "c-noslot"}; !slices.Equal(s.stopped, want) {
+		t.Fatalf("stopped %v, want %v (running untracked containers only)", s.stopped, want)
+	}
+	slots := map[int]bool{}
+	for _, l := range s.released {
+		if !l.Strict || l.Owner != pool.StrictOwner || l.TargetID != 0 {
+			t.Fatalf("untracked runner released as %+v, want strict", l)
+		}
+		slots[l.Slot] = true
+	}
+	if !slots[1] || !slots[2] || !slots[3] || !slots[4] || slots[0] {
+		t.Fatalf("released slots %v", slots)
+	}
+	if slices.Contains(s.removed, "c-ok") {
+		t.Fatal("runner of an enabled target must be adopted, not removed")
+	}
+	m.mu.Lock()
+	target, adoptedLeft := m.targets[on.ID], len(m.adopted)
+	m.mu.Unlock()
+	if target == nil || adoptedLeft != 0 {
+		t.Fatalf("untracked runners must not be kept for adoption (left %d)", adoptedLeft)
+	}
+	target.mu.Lock()
+	_, ok := target.runners["pitlane-ok"]
+	n := len(target.runners)
+	target.mu.Unlock()
+	if !ok || n != 1 {
+		t.Fatalf("enabled target adopted %d runners", n)
+	}
+}
+
+// A failed graceful stop still removes the container (forcibly) and
+// releases its slot.
+func TestStartUntrackedRunnerStopFails(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p := newFakePool(0)
+	p.stopErr = errors.New("daemon busy")
+	p.orphans = []pool.Orphan{{ID: "c-x", Name: "pitlane-x", Slot: 0, Strict: true, Untrusted: true, Running: true}}
+	m := New(st, p, t.TempDir(), func() Credentials { return Credentials{} }, func() {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "untracked runner removed", func() bool { s := p.snapshot(); return len(s.released) == 1 && len(s.removed) == 1 })
+	if l := p.snapshot().released[0]; !l.Strict || l.Slot != 0 {
+		t.Fatalf("released as %+v", l)
+	}
+}
