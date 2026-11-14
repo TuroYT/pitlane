@@ -420,52 +420,19 @@ func (t *target) cfg() store.Target {
 
 func (t *target) update(n store.Target) {
 	t.mu.Lock()
-	wasStrict := t.t.Strict
 	t.t = n
 	lst := t.lst
 	t.mu.Unlock()
 	if lst != nil {
 		lst.SetMaxRunners(n.MaxRunners)
 	}
-	if n.Strict && !wasStrict {
-		// Idle runners were started without strict isolation: replace them.
-		go func() {
-			t.recycleIdle()
-			t.reconcile()
-		}()
-		return
-	}
 	go t.reconcile()
 }
 
-// recycleIdle removes the idle runners (deregistered first: GitHub refuses
-// when a job was just assigned, the runner then stays). reconcile starts
-// their replacements.
-func (t *target) recycleIdle() {
-	t.reconcileMu.Lock()
-	defer t.reconcileMu.Unlock()
-	t.mu.Lock()
-	client := t.client
-	var idle []*runner
-	for _, r := range t.runners {
-		if !r.busy && !r.exited {
-			idle = append(idle, r)
-		}
-	}
-	t.mu.Unlock()
-	for _, r := range idle {
-		if r.runnerID != 0 {
-			if client == nil {
-				continue
-			}
-			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
-				continue
-			}
-			t.m.forgetRunner(r.runnerID, nil)
-		}
-		t.log.Info("replacing idle runner started without strict isolation", "runner", r.name)
-		t.m.pool.Remove(context.Background(), r.containerID)
-	}
+// staleForStrict reports whether an idle runner was started without strict
+// isolation for a target that is strict now: reconcile replaces it.
+func staleForStrict(r *runner, strict bool) bool {
+	return strict && !r.lease.Strict && !r.busy && !r.exited
 }
 
 func (t *target) waitingSince() time.Time {
@@ -645,9 +612,13 @@ func (t *target) reconcile() {
 	cfg := t.t
 	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, time.Now())))
 	have := t.starting
-	var idle []*runner
+	var idle, stale []*runner
 	for _, r := range t.runners {
 		if r.exited {
+			continue
+		}
+		if staleForStrict(r, cfg.Strict) {
+			stale = append(stale, r) // not counted: replaced right away
 			continue
 		}
 		have++
@@ -672,6 +643,19 @@ func (t *target) reconcile() {
 		go t.launch(lease)
 	}
 	missing := max(0, want-have-started)
+
+	// The target became strict: its idle runners started without strict
+	// isolation go (retried at every reconcile until none is left).
+	for _, r := range stale {
+		if r.runnerID != 0 {
+			if err := client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+				continue // a job was just assigned to it, or GitHub is unreachable
+			}
+			t.m.forgetRunner(r.runnerID, nil)
+		}
+		t.log.Info("replacing idle runner started without strict isolation", "runner", r.name)
+		t.m.pool.Remove(context.Background(), r.containerID)
+	}
 
 	// Scale down: idle runners beyond what is needed are deregistered first
 	// (GitHub refuses if a job was just assigned) and only then killed.
@@ -715,6 +699,11 @@ func (t *target) launch(lease pool.Lease) {
 		if !errors.Is(err, pool.ErrSlotRebuilding) {
 			t.m.pool.Release(context.Background(), lease)
 		}
+		return
+	}
+	if cfg := t.cfg(); cfg.Strict && !lease.Strict {
+		// Switched to strict while the slot was being prepared.
+		t.m.pool.Release(context.Background(), lease)
 		return
 	}
 	if err := t.startRunner(lease); err != nil {

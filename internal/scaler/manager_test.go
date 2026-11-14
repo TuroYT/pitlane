@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/TuroYT/pitlane/internal/gh"
+	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
@@ -74,6 +75,25 @@ func TestJobStart(t *testing.T) {
 		{"before the runner existed", created.Add(-time.Second), now},
 	} {
 		if got := jobStart(tc.assigned, created, now); !got.Equal(tc.want) {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestStaleForStrict(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		r      runner
+		strict bool
+		want   bool
+	}{
+		{"idle non-strict runner of a strict target", runner{}, true, true},
+		{"busy: its job finishes first", runner{busy: true}, true, false},
+		{"already exited", runner{exited: true}, true, false},
+		{"strict runner", runner{lease: pool.Lease{Strict: true}}, true, false},
+		{"non-strict target", runner{}, false, false},
+	} {
+		if got := staleForStrict(&tc.r, tc.strict); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
 	}

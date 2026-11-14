@@ -431,7 +431,10 @@ func (s *Store) SetStrictRequirement(id int64, reason string) (flipped bool, err
 // UpdateTarget saves the mutable fields of a target (not the strict
 // requirement, see SetStrictRequirement).
 func (s *Store) UpdateTarget(t Target) error {
-	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?, strict = ?, max_job_minutes = ? WHERE id = ?`,
+	// Strict cannot be written off while it is required, whatever the caller
+	// read before (the requirement may have been set since).
+	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?,
+		strict = CASE WHEN strict_required != '' THEN 1 ELSE ? END, max_job_minutes = ? WHERE id = ?`,
 		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, boolInt(t.Strict), max(0, t.MaxJobMinutes), t.ID)
 	return err
 }

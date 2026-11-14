@@ -320,4 +320,13 @@ func TestStrictRequirement(t *testing.T) {
 	if got.StrictRequired != "public repository" || got.ScaleSetID != 42 || got.MaxRunners != 7 || !got.Strict {
 		t.Fatalf("%+v", got)
 	}
+	// A writer holding a copy read before the requirement cannot turn
+	// strict off.
+	got.Strict = false
+	if err := s.UpdateTarget(got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.Target(tg.ID); !got.Strict {
+		t.Fatal("strict written off while required")
+	}
 }
