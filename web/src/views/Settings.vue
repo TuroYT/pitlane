@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, post, type Settings } from '../api'
+import { api, cacheSummary, post, type Settings } from '../api'
 import Updates from '../components/Updates.vue'
 
 const s = ref<Settings | null>(null)
@@ -20,6 +20,7 @@ async function save(clearMetricsToken = false) {
   error.value = ''
   const body: Settings = { ...s.value }
   delete body.metricsToken
+  delete body.actionsCacheStats
   if (clearMetricsToken) body.metricsToken = ''
   else if (metricsToken.value.trim()) body.metricsToken = metricsToken.value.trim()
   try {
@@ -80,6 +81,20 @@ async function save(clearMetricsToken = false) {
         <input v-model="s.mirror" type="checkbox" /> Local Docker Hub mirror (faster pulls, no rate limits)
       </label>
       <label class="inline">
+        <input v-model="s.actionsCache" type="checkbox" /> Serve <code>actions/cache</code> from this host
+        (also <code>setup-*</code> actions with <code>cache:</code>)
+      </label>
+      <label v-if="s.actionsCache">
+        Actions cache size (GB)
+        <input v-model.number="s.actionsCacheGb" type="number" min="1" />
+        <small>
+          Entries stay per repository and branch, never shared across owners; the least recently used go first beyond this size.
+          Strict jobs keep using GitHub's cache.
+          <template v-if="s.actionsCacheStats"><br />{{ cacheSummary(s.actionsCacheStats) }}</template>
+          <template v-else><br />The cache listener is not running (see Pitlane's log): jobs use GitHub's cache.</template>
+        </small>
+      </label>
+      <label class="inline">
         <input v-model="s.qemu" type="checkbox" /> Multi-architecture builds (QEMU emulation, applied at next restart)
       </label>
       <label>
@@ -89,7 +104,7 @@ async function save(clearMetricsToken = false) {
       <label>
         Minimum free disk space (GB)
         <input v-model.number="s.minFreeDiskGb" type="number" min="0" />
-        <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 = never prune.</small>
+        <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the least recently used actions cache entries, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 = never prune.</small>
       </label>
     </section>
 

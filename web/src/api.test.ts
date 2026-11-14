@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, LIVE_RETRY_MS, ago, api, bytes, connectLive, disconnectLive, duration, live, onUnauthorized, post, targetName } from './api'
+import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, live, onUnauthorized, post, targetName } from './api'
 
 function reply(status: number, body: unknown, statusText = '') {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText })
@@ -181,5 +181,14 @@ describe('formatters', () => {
   it('targetName', () => {
     expect(targetName({ kind: 'repo', owner: 'acme', repo: 'api' })).toBe('acme/api')
     expect(targetName({ kind: 'org', owner: 'acme' })).toBe('acme (organization)')
+  })
+})
+
+describe('cacheSummary', () => {
+  it('summarizes the actions cache', () => {
+    expect(cacheSummary({ entries: 2, bytes: 3 * 1024 ** 3, limitBytes: 0, hits: 3, misses: 1, saves: 2, evictions: 0 }))
+      .toBe('3.0 GB in 2 entries. Since start: 3 restored, 1 missed (75% hits), 2 saved, 0 evicted.')
+    expect(cacheSummary({ entries: 1, bytes: 0, limitBytes: 0, hits: 0, misses: 0, saves: 0, evictions: 0 }))
+      .toBe('0 B in 1 entry. Since start: 0 restored, 0 missed, 0 saved, 0 evicted.')
   })
 })
