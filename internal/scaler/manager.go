@@ -53,7 +53,10 @@ type Manager struct {
 	targets map[int64]*target
 	adopted map[int64][]*runner
 	lost    map[int64]map[string]lostJob // found at startup, handed to targets by Sync
-	ctx     context.Context
+	// ctx is set by Start; until then Sync does nothing (the UI is served
+	// while slots start, and runners left by a previous run are not adopted
+	// yet).
+	ctx context.Context
 }
 
 // New creates a manager. changed is called whenever visible state changes.
@@ -66,7 +69,6 @@ func New(st *store.Store, p *pool.Pool, dataDir string, creds func() Credentials
 
 // Start adopts runners left by a previous process and starts every enabled target.
 func (m *Manager) Start(ctx context.Context) error {
-	m.ctx = ctx
 	orphans, err := m.pool.RunnerContainers(ctx)
 	if err != nil {
 		return err
@@ -85,10 +87,17 @@ func (m *Manager) Start(ctx context.Context) error {
 			continue
 		}
 		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot)
+		m.mu.Lock()
 		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
+		m.mu.Unlock()
 		running[o.Name] = r
 	}
 	m.findLostJobs(ctx, running)
+	// Only now may Sync start listeners: adopted runners and lost jobs are
+	// known, so they are handed to their target.
+	m.mu.Lock()
+	m.ctx = ctx
+	m.mu.Unlock()
 	m.Sync()
 	go m.loop(ctx)
 	return nil
@@ -147,7 +156,15 @@ func (m *Manager) housekeeping() {
 }
 
 // Sync starts, restarts or stops listeners so they match the stored targets.
+// Before Start it only notifies the UI: Start syncs once it is ready.
 func (m *Manager) Sync() {
+	m.mu.Lock()
+	started := m.ctx != nil
+	m.mu.Unlock()
+	if !started {
+		m.changed()
+		return
+	}
 	targets, err := m.store.Targets()
 	if err != nil {
 		m.log.Error("load targets", "error", err)
