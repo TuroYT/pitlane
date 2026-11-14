@@ -8,8 +8,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -71,6 +73,9 @@ var migrations = []string{
 		name TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	)`,
+	// Sessions now store the SHA-256 of their token: sessions stored with a
+	// plaintext token are dropped (their users sign in again).
+	`DELETE FROM sessions`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -429,21 +434,33 @@ func (s *Store) PruneJobs(olderThan time.Duration) error {
 
 // ---------------------------------------------------------------- sessions
 
+// sessionKey is what the database keeps of a session token: its SHA-256, so
+// a leaked database (or backup) does not leak usable sessions. Tokens are
+// random, a plain hash is enough.
+func sessionKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 // CreateSession stores a session token for login.
 func (s *Store) CreateSession(token, login string, ttl time.Duration) error {
-	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at) VALUES (?, ?, ?)`, token, login, time.Now().Add(ttl).Unix())
+	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at) VALUES (?, ?, ?)`, sessionKey(token), login, time.Now().Add(ttl).Unix())
 	return err
 }
 
 // SessionLogin returns the login of a valid session.
 func (s *Store) SessionLogin(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	key := sessionKey(token)
 	var login string
 	var exp int64
-	if err := s.db.QueryRow(`SELECT login, expires_at FROM sessions WHERE token = ?`, token).Scan(&login, &exp); err != nil {
+	if err := s.db.QueryRow(`SELECT login, expires_at FROM sessions WHERE token = ?`, key).Scan(&login, &exp); err != nil {
 		return "", false
 	}
 	if time.Now().Unix() > exp {
-		s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, key)
 		return "", false
 	}
 	return login, true
@@ -451,7 +468,13 @@ func (s *Store) SessionLogin(token string) (string, bool) {
 
 // DeleteSession removes a session.
 func (s *Store) DeleteSession(token string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, sessionKey(token))
+	return err
+}
+
+// PruneSessions removes expired sessions.
+func (s *Store) PruneSessions() error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, time.Now().Unix())
 	return err
 }
 

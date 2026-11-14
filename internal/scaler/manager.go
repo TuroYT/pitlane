@@ -146,7 +146,12 @@ func (m *Manager) reconcileAll() {
 
 func (m *Manager) housekeeping() {
 	retention := time.Duration(m.store.GetInt("history_days", 30)) * 24 * time.Hour
-	_ = m.store.PruneJobs(retention)
+	if err := m.store.PruneJobs(retention); err != nil {
+		m.log.Warn("prune job history", "error", err)
+	}
+	if err := m.store.PruneSessions(); err != nil {
+		m.log.Warn("prune expired sessions", "error", err)
+	}
 	entries, _ := os.ReadDir(m.logDir)
 	for _, e := range entries {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func open(t *testing.T) *Store {
@@ -161,5 +162,54 @@ func TestInFlightJobs(t *testing.T) {
 	}
 	if len(jobs) != 1 || jobs[0].JobID != "running" || jobs[0].RunnerName != "pitlane-a" || jobs[0].TargetID != 1 {
 		t.Fatalf("got %+v", jobs)
+	}
+}
+
+func TestSessionsStoreTokenHash(t *testing.T) {
+	s := open(t)
+	if err := s.CreateSession("secret-token", "alice", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT token FROM sessions`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == "secret-token" || stored != sessionKey("secret-token") {
+		t.Fatalf("token stored as %q", stored)
+	}
+	if login, ok := s.SessionLogin("secret-token"); !ok || login != "alice" {
+		t.Fatalf("lookup by token failed: %q %v", login, ok)
+	}
+	if _, ok := s.SessionLogin(stored); ok {
+		t.Fatal("the stored hash must not work as a token")
+	}
+	if _, ok := s.SessionLogin(""); ok {
+		t.Fatal("empty token accepted")
+	}
+	if err := s.DeleteSession("secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.SessionLogin("secret-token"); ok {
+		t.Fatal("deleted session still valid")
+	}
+}
+
+func TestPruneSessions(t *testing.T) {
+	s := open(t)
+	if err := s.CreateSession("old", "alice", -time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession("new", "bob", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PruneSessions(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("sessions left: %d %v", n, err)
+	}
+	if _, ok := s.SessionLogin("new"); !ok {
+		t.Fatal("valid session pruned")
 	}
 }
