@@ -58,3 +58,23 @@ func TestOrphanDecision(t *testing.T) {
 		}
 	}
 }
+
+func TestJobStart(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-5 * time.Minute)
+	assigned := now.Add(-40 * time.Second)
+	for _, tc := range []struct {
+		name     string
+		assigned time.Time
+		want     time.Time
+	}{
+		{"assignment time", assigned, assigned},
+		{"unknown", time.Time{}, now},
+		{"in the future", now.Add(time.Minute), now},
+		{"before the runner existed", created.Add(-time.Second), now},
+	} {
+		if got := jobStart(tc.assigned, created, now); !got.Equal(tc.want) {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}

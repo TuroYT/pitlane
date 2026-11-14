@@ -111,7 +111,7 @@ func (m *Manager) loop(ctx context.Context) {
 	defer tick.Stop()
 	clean := time.NewTicker(time.Hour)
 	defer clean.Stop()
-	timeouts := time.NewTicker(30 * time.Second)
+	timeouts := time.NewTicker(10 * time.Second) // in memory only: cheap
 	defer timeouts.Stop()
 	orphans := time.NewTicker(orphanInterval)
 	defer orphans.Stop()
@@ -751,6 +751,17 @@ func archiveLog(w io.Writer, max int64, copyTo func(io.Writer) error) error {
 	return err
 }
 
+// jobStart is when a runner's job started, for its time limit: GitHub's
+// assignment time, since the JobStarted message can arrive tens of seconds
+// later. A zero, future or impossible time (before the runner existed, e.g.
+// a skewed clock) falls back to now.
+func jobStart(assigned, runnerCreated, now time.Time) time.Time {
+	if assigned.IsZero() || assigned.After(now) || assigned.Before(runnerCreated) {
+		return now
+	}
+	return assigned
+}
+
 // timedOut reports whether a runner's job ran longer than limit (0 = no limit).
 func timedOut(r *runner, limit time.Duration, now time.Time) bool {
 	return limit > 0 && r.busy && !r.exited && !r.killed && !r.busySince.IsZero() && now.Sub(r.busySince) > limit
@@ -860,7 +871,7 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.t.mu.Lock()
 		if r, ok := s.t.runners[j.RunnerName]; ok {
 			if !r.busy || r.busySince.IsZero() {
-				r.busySince = time.Now()
+				r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, time.Now())
 			}
 			r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
 			job.Slot = r.lease.Slot
