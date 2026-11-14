@@ -350,6 +350,10 @@ func slotExternals(i int) string { return fmt.Sprintf("pitlane-slot-%d-externals
 
 const externalsDir = "/home/runner/externals"
 
+// pnpmStoreDir lives in the slot work volume (kept between jobs of the same
+// owner, wiped on owner change and for strict jobs).
+const pnpmStoreDir = ".pnpm-store"
+
 func (p *Pool) setStatus(i int, status, errMsg string) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
@@ -785,7 +789,7 @@ var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
 func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	if l.wipe {
 		p.log.Info("slot changes owner, wiping its caches", "slot", l.Slot, "owner", l.Owner)
-		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions"
+		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions " + workDir + "/" + pnpmStoreDir
 		if _, code, err := p.exec(ctx, slotName(l.Slot), script); err != nil || code != 0 {
 			// Never hand out a slot that may still hold another owner's data.
 			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", l.Slot, "code", code, "error", err)
@@ -873,7 +877,7 @@ docker network prune -f >/dev/null 2>&1
 docker volume prune -af >/dev/null 2>&1
 docker image prune -f >/dev/null 2>&1
 docker builder prune -f --keep-storage %dgb >/dev/null 2>&1
-find %s -mindepth 1 -maxdepth 1 ! -name _actions -exec rm -rf {} + 2>/dev/null
+find %s -mindepth 1 -maxdepth 1 ! -name _actions ! -name `+pnpmStoreDir+` -exec rm -rf {} + 2>/dev/null
 chown %s %s
 true`, cfg.KeepBuildGB, workDir, runnerUID, workDir)
 	if _, _, err := p.exec(ctx, slotName(l.Slot), script); err != nil {
@@ -1042,7 +1046,9 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		"ImageOS=" + cfg.ImageOS,
 		"XDG_CACHE_HOME=/home/runner/.cache",
 		"npm_config_cache=/home/runner/.cache/npm",
-		"npm_config_store_dir=/home/runner/.cache/pnpm-store",
+		// Same filesystem as the workspace: pnpm hardlinks packages into
+		// node_modules instead of copying them (minutes saved per install).
+		"npm_config_store_dir=" + workDir + "/" + pnpmStoreDir,
 		"YARN_CACHE_FOLDER=/home/runner/.cache/yarn",
 		"BUN_INSTALL_CACHE_DIR=/home/runner/.cache/bun",
 		"GOMODCACHE=/home/runner/.cache/go-mod",
