@@ -168,7 +168,9 @@ type Pool struct {
 type slotOps interface {
 	exec(ctx context.Context, container, script string) (string, int, error)
 	auditBinfmt(ctx context.Context)
-	rebuild(ctx context.Context, slot int) // in the background
+	// wipe deletes the slot container and its volumes from the host side
+	// and recreates them empty.
+	wipe(ctx context.Context, slot int) error
 }
 
 func (p *Pool) ops() slotOps {
@@ -187,8 +189,11 @@ func (d dockerSlotOps) exec(ctx context.Context, container, script string) (stri
 
 func (d dockerSlotOps) auditBinfmt(ctx context.Context) { d.p.auditBinfmt(ctx) }
 
-func (d dockerSlotOps) rebuild(_ context.Context, slot int) {
-	go d.p.rebuildSlot(context.Background(), slot)
+func (d dockerSlotOps) wipe(ctx context.Context, slot int) error {
+	if err := d.p.resetSlot(ctx, slot); err != nil {
+		return err
+	}
+	return d.p.ensureSlot(ctx, slot)
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -777,6 +782,19 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 
 // rebuildSlot deletes a slot with all its volumes and starts it again empty.
 func (p *Pool) rebuildSlot(ctx context.Context, i int) {
+	if err := p.resetSlot(ctx, i); err != nil {
+		p.setStatus(i, "error", "rebuild: "+err.Error())
+		return
+	}
+	p.startSlot(ctx, i)
+}
+
+// resetSlot deletes a slot's container and volumes through the host's Docker
+// API, never trusting anything inside the slot: its jobs were root on its
+// daemon and could have tampered with its filesystem or left processes. The
+// slot stays dirty (with its previous owner) until everything is gone; it
+// then has no owner. The slot container is not recreated.
+func (p *Pool) resetSlot(ctx context.Context, i int) error {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
 		s.dirty = true // cleared only once everything is really gone
@@ -785,14 +803,12 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	p.forgetStore(i)
 	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
 	if err != nil && !errdefs.IsNotFound(err) {
-		p.setStatus(i, "error", "rebuild: "+err.Error())
-		return
+		return err
 	}
 	if err := p.DropSlotCache(ctx, i); err != nil {
 		// Keep the previous owner: the slot will be wiped again before any
 		// other owner can get it.
-		p.setStatus(i, "error", "rebuild: "+err.Error())
-		return
+		return err
 	}
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
@@ -804,7 +820,7 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	delete(p.externals, i)
 	p.saveLocked()
 	p.mu.Unlock()
-	p.startSlot(ctx, i)
+	return nil
 }
 
 // DropSlotCache deletes a retired slot's volumes (frees disk).
@@ -881,29 +897,35 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64, strict
 	return Lease{Slot: idx, Owner: owner, TargetID: targetID, Strict: strict, wipe: needWipe}, true
 }
 
-// ErrSlotRebuilding means Prepare failed to wipe the slot; it is being
-// rebuilt and must not be released.
+// ErrSlotRebuilding means Prepare failed to wipe the slot; it is left dirty
+// for the retry loop to rebuild and must not be released.
 var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
+
+// wipeFailed takes a slot whose wipe failed out of service: dirty (its
+// previous owner is kept) and in error, so the retry loop rebuilds it.
+func (p *Pool) wipeFailed(i int, err error) {
+	p.mu.Lock()
+	if s, ok := p.slots[i]; ok {
+		s.dirty = true
+	}
+	p.mu.Unlock()
+	p.setStatus(i, "error", "wipe failed, slot will be rebuilt: "+err.Error())
+}
 
 // Prepare readies a reserved slot for a runner: it wipes the slot when it
 // last served another owner and refreshes the runner externals if needed.
 func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 	if l.wipe {
-		p.log.Info("slot changes owner, wiping its caches", "slot", l.Slot, "owner", l.Owner)
-		p.forgetStore(l.Slot)
-		// The whole work directory goes, not only the caches: Release is best
-		// effort and may not have emptied the previous job's workspace (failed
-		// cleanup, Pitlane stopped between the job's end and its release).
-		if _, code, err := p.ops().exec(ctx, slotName(l.Slot), wipeScript); err != nil || code != 0 {
+		// The slot is rebuilt from the host side (a fresh daemon start, about
+		// 15 s): nothing inside it is trusted, and Release may not have
+		// emptied the previous job's workspace (failed cleanup, Pitlane
+		// stopped between the job's end and its release). The previous
+		// owner's caches are useless to the new one anyway.
+		p.log.Info("slot changes owner, rebuilding it", "slot", l.Slot, "owner", l.Owner)
+		if err := p.ops().wipe(ctx, l.Slot); err != nil {
 			// Never hand out a slot that may still hold another owner's data.
-			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", l.Slot, "code", code, "error", err)
-			p.mu.Lock()
-			if s, ok := p.slots[l.Slot]; ok {
-				s.dirty = true // previous owner is kept
-			}
-			p.mu.Unlock()
-			p.setStatus(l.Slot, "starting", "")
-			p.ops().rebuild(ctx, l.Slot)
+			p.log.Error("slot wipe failed, it will be rebuilt", "slot", l.Slot, "error", err)
+			p.wipeFailed(l.Slot, err)
 			return ErrSlotRebuilding
 		}
 		p.mu.Lock()
@@ -933,12 +955,12 @@ func strictVolumes(runner string) (cache, tools string) {
 	return "pitlane-strict-" + runner + "-cache", "pitlane-strict-" + runner + "-tools"
 }
 
-// releaseStrict wipes everything a strict job could have touched. On any
-// failure the slot is rebuilt from scratch rather than reused.
+// releaseStrict wipes everything a strict job could have touched: the slot
+// is rebuilt from the host side, its throwaway caches removed. On any
+// failure it stays dirty and is rebuilt rather than reused.
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.setStatus(l.Slot, "cleaning", "")
-	p.forgetStore(l.Slot)
-	_, code, err := p.ops().exec(ctx, slotName(l.Slot), wipeScript)
+	err := p.ops().wipe(ctx, l.Slot)
 	if l.Runner != "" {
 		c, t := strictVolumes(l.Runner)
 		for _, v := range []string{c, t} {
@@ -951,15 +973,9 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 		}
 	}
 	p.ops().auditBinfmt(ctx)
-	if err != nil || code != 0 {
-		p.log.Error("strict cleanup failed, rebuilding the slot", "slot", l.Slot, "code", code, "error", err)
-		p.mu.Lock()
-		if s, ok := p.slots[l.Slot]; ok {
-			s.dirty = true
-		}
-		p.mu.Unlock()
-		p.setStatus(l.Slot, "starting", "")
-		p.ops().rebuild(ctx, l.Slot)
+	if err != nil {
+		p.log.Error("strict cleanup failed, the slot will be rebuilt", "slot", l.Slot, "error", err)
+		p.wipeFailed(l.Slot, err)
 		return
 	}
 	p.mu.Lock()
@@ -977,12 +993,6 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	}
 	p.setStatus(l.Slot, "ready", "")
 }
-
-// wipeScript empties a slot for a new owner (or around a strict job): every
-// container, image, volume and build cache of its daemon, and the whole work
-// directory. It fails on the first error.
-var wipeScript = "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; " +
-	clearDir(workDir) + "; chown " + runnerUID + " " + workDir
 
 // clearDir returns a command removing everything in dir (hidden files
 // included) except the top-level entries named in keep.
