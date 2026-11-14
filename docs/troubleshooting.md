@@ -29,9 +29,12 @@ The **Public URL** must match the GitHub App's callback URL
 Use `PITLANE_LOG_LEVEL=debug` for more detail.
 
 **Multi-architecture builds (`docker/setup-qemu-action`) fail with `exec format error`.**
-QEMU emulation needs `binfmt_misc`, which an unprivileged LXC container cannot
-register. Run Pitlane in a VM or a privileged container for multi-arch builds,
-or keep those jobs on GitHub-hosted runners (`runs-on: ubuntu-latest`).
+Pitlane mounts `binfmt_misc` and registers the QEMU emulators when it starts
+(this is needed in unprivileged LXC containers, where nothing else keeps
+`binfmt_misc` mounted). If the log says `binfmt_misc not mountable`, Pitlane
+runs in a container that may not mount it (e.g. Docker Compose without extra
+privileges): run it with systemd on the host, or keep multi-arch jobs on
+GitHub-hosted runners.
 
 **Windows or macOS jobs.** Pitlane only provides Linux runners; keep
 `windows-latest` / `macos-latest` jobs on GitHub-hosted runners.

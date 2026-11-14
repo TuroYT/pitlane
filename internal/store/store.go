@@ -348,6 +348,15 @@ func (s *Store) SetJobSlot(runnerName string, slot int) error {
 	return err
 }
 
+// JobByRunner returns the job a runner picked up.
+func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
+	var j Job
+	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result
+		FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
+		Scan(&j.ID, &j.TargetID, &j.JobID, &j.RunID, &j.Owner, &j.Repo, &j.WorkflowRef, &j.JobName, &j.Event, &j.RunnerName, &j.Slot, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.Result)
+	return j, err
+}
+
 // Jobs returns the most recent jobs.
 func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result

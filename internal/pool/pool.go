@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -222,6 +223,7 @@ func (p *Pool) Start(ctx context.Context) error {
 		p.cfg.RunnerImage = OfficialRunnerImage
 		p.mu.Unlock()
 	}
+	p.ensureQEMU(ctx)
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
 	}
@@ -450,6 +452,38 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 	// The work directory is shared with runner containers (uid 1001).
 	_, _, err = p.exec(ctx, name, "chown "+runnerUID+" "+workDir)
 	return err
+}
+
+// ensureQEMU makes multi-architecture builds work. Since Linux 6.7,
+// binfmt_misc registrations belong to the user namespace and live only as long
+// as the filesystem stays mounted somewhere. In unprivileged LXC containers
+// nothing mounts it, so the registration made by setup-qemu-action vanishes
+// as soon as its helper container exits. Pitlane keeps it mounted and
+// registers the QEMU emulators once at start.
+func (p *Pool) ensureQEMU(ctx context.Context) {
+	const mnt = "/proc/sys/fs/binfmt_misc"
+	if _, err := os.Stat(mnt + "/register"); err != nil {
+		if err := syscall.Mount("binfmt_misc", mnt, "binfmt_misc", 0, ""); err != nil {
+			p.log.Info("binfmt_misc not mountable, multi-arch builds (QEMU) unavailable", "error", err)
+			return
+		}
+	}
+	const img = "tonistiigi/binfmt:latest"
+	if err := p.EnsureImage(ctx, img, false); err != nil {
+		p.log.Warn("QEMU emulators", "error", err)
+		return
+	}
+	c, err := p.cli.ContainerCreate(ctx, &container.Config{
+		Image: img, Cmd: []string{"--install", "all"}, Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
+	}, &container.HostConfig{Privileged: true}, nil, nil, "")
+	if err != nil {
+		p.log.Warn("QEMU emulators", "error", err)
+		return
+	}
+	defer p.cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
+	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err == nil && p.Wait(ctx, c.ID) == 0 {
+		p.log.Info("QEMU emulators registered: multi-arch builds are available")
+	}
 }
 
 // connectMirror attaches the mirror to the slot's own network so slots never
@@ -982,6 +1016,46 @@ func (p *Pool) ensureVolume(ctx context.Context, name string) error {
 	p.chowned[name] = true
 	p.mu.Unlock()
 	return nil
+}
+
+// TailJobOutput streams the step output of a running job. The runner writes
+// it to _diag/pages/*.log (4 KB pages) before uploading it to GitHub; pages
+// are read as they grow, oldest first, until the runner exits.
+func (p *Pool) TailJobOutput(ctx context.Context, id string, w io.Writer) error {
+	const dir = "/home/runner/_diag/pages"
+	offsets := map[string]int{}
+	for {
+		listing, code, err := p.exec(ctx, id, `cd `+dir+` 2>/dev/null && ls -tr | while read f; do echo "$f $(wc -c < "$f")"; done`)
+		if err != nil || code != 0 {
+			if info, ierr := p.cli.ContainerInspect(ctx, id); ierr != nil || info.State == nil || !info.State.Running {
+				return nil // runner finished
+			}
+		}
+		for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 2 || !strings.HasSuffix(f[0], ".log") || strings.ContainsAny(f[0], "/'\"$`") {
+				continue
+			}
+			size, _ := strconv.Atoi(f[1])
+			off := offsets[f[0]]
+			if size <= off {
+				continue
+			}
+			chunk, _, err := p.exec(ctx, id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, dir, f[0], size-off))
+			if err != nil {
+				continue
+			}
+			offsets[f[0]] = off + len(chunk)
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // exec runs a shell script inside a container and returns its output.

@@ -218,6 +218,48 @@ func LatestRunnerVersion(ctx context.Context) (string, error) {
 	return strings.TrimPrefix(rel.TagName, "v"), nil
 }
 
+// JobLog downloads the log of the job a given runner ran in a workflow run.
+// token is an installation token or a personal access token.
+func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {
+	var jobs struct {
+		Jobs []struct {
+			ID         int64  `json:"id"`
+			RunnerName string `json:"runner_name"`
+		} `json:"jobs"`
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID)
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
+		return nil, err
+	}
+	var jobID int64
+	for _, j := range jobs.Jobs {
+		if j.RunnerName == runnerName {
+			jobID = j.ID
+		}
+	}
+	if jobID == 0 {
+		return nil, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "pitlane")
+	// The API redirects to a signed blob URL; Go drops the Authorization
+	// header on the cross-host redirect.
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download job log: %s", resp.Status)
+	}
+	return resp.Body, nil
+}
+
 func do(ctx context.Context, method, u, auth string, body any, out any) error {
 	var rd io.Reader
 	if body != nil {

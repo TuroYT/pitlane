@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/targets/{id}", s.auth(s.handleDeleteTarget))
 	mux.Handle("GET /api/jobs", s.auth(s.handleJobs))
 	mux.Handle("GET /api/runners/{name}/logs", s.auth(s.handleLogs))
+	mux.Handle("GET /api/runners/{name}/job-log", s.auth(s.handleJobLog))
 	mux.Handle("GET /api/settings", s.auth(s.handleGetSettings))
 	mux.Handle("PUT /api/settings", s.auth(s.handlePutSettings))
 
@@ -776,6 +777,57 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	_, _ = io.Copy(w, f)
+}
+
+// handleJobLog streams the step output of the job a runner ran: live from the
+// runner while it runs, from the GitHub API once it is done.
+func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !validName(name) {
+		writeErr(w, http.StatusBadRequest, "invalid runner name")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	if id, ok := s.mgr.RunnerContainer(name); ok {
+		fl, _ := w.(http.Flusher)
+		var out io.Writer = w
+		if fl != nil {
+			out = flushWriter{w, fl}
+		}
+		_ = s.pool.TailJobOutput(r.Context(), id, out)
+		return
+	}
+	job, err := s.store.JobByRunner(r.Context(), name)
+	if err != nil || job.RunID == 0 {
+		writeErr(w, http.StatusNotFound, "no job recorded for this runner")
+		return
+	}
+	token := s.cfg.PAT
+	if token == "" {
+		t, err := s.store.Target(job.TargetID)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "repository is no longer enabled")
+			return
+		}
+		pem, _ := s.store.GetSecret("app_pem")
+		appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
+		client, err := gh.NewAppClient(appID, pem)
+		if err == nil {
+			token, err = client.InstallationToken(r.Context(), t.InstallationID)
+		}
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	rc, err := gh.JobLog(r.Context(), token, job.Owner, job.Repo, job.RunID, name)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer rc.Close()
+	_, _ = io.Copy(w, rc)
 }
 
 // ----------------------------------------------------------------- settings
