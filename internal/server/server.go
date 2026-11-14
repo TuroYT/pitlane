@@ -744,21 +744,28 @@ var validName = func(s string) bool {
 
 // targetOptions are the fields of a creation request whose absence matters.
 type targetOptions struct {
-	Strict *bool // nil: decided by the server
+	Strict     *bool // nil: decided by the server
+	MinRunners *int  // nil: depends on strict mode
 }
 
 // newTarget decodes a target creation request. Fields left out get their
-// defaults (one warm runner, GitHub's job time limit, one runner per slot).
+// defaults (one warm runner, GitHub's job time limit, one runner per slot);
+// applyStrictPolicy then settles strict mode and the warm runners.
 func newTarget(body io.Reader, slots int) (store.Target, targetOptions, error) {
 	var req struct {
 		store.Target
-		Strict *bool `json:"strict"`
+		Strict     *bool `json:"strict"`
+		MinRunners *int  `json:"minRunners"`
 	}
-	req.MinRunners, req.MaxJobMinutes = store.DefaultMinRunners, store.DefaultMaxJobMinutes
+	req.MaxJobMinutes = store.DefaultMaxJobMinutes
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		return req.Target, targetOptions{}, err
 	}
-	t, opts := req.Target, targetOptions{Strict: req.Strict}
+	t, opts := req.Target, targetOptions{Strict: req.Strict, MinRunners: req.MinRunners}
+	t.MinRunners = store.DefaultMinRunners
+	if req.MinRunners != nil {
+		t.MinRunners = *req.MinRunners
+	}
 	t.Strict, t.StrictRequired, t.StrictForcedAt = false, "", 0 // set by applyStrictPolicy
 	if (t.Kind != "repo" && t.Kind != "org") || !validName(t.Owner) || (t.Kind == "repo" && !validName(t.Repo)) {
 		return t, opts, errors.New("invalid target")
@@ -791,7 +798,10 @@ func (e strictRequiredError) Error() string {
 // request asked (nil: nothing) and what GitHub said. A target that must run
 // strict cannot be created without it; when GitHub cannot be asked, the
 // target is strict (fail closed) and the periodic check settles it later.
-func applyStrictPolicy(t *store.Target, asked *bool, reason string, checkErr error) error {
+// Unless the request set them, warm runners follow: none for a strict
+// target, one otherwise.
+func applyStrictPolicy(t *store.Target, opts targetOptions, reason string, checkErr error) error {
+	asked := opts.Strict
 	switch {
 	case checkErr != nil:
 		t.Strict = true
@@ -802,6 +812,9 @@ func applyStrictPolicy(t *store.Target, asked *bool, reason string, checkErr err
 		t.Strict, t.StrictRequired = true, reason
 	default:
 		t.Strict = asked != nil && *asked
+	}
+	if opts.MinRunners == nil {
+		t.MinRunners = min(store.DefaultWarmRunners(t.Strict), t.MaxRunners)
 	}
 	return nil
 }
@@ -856,7 +869,7 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	if checkErr != nil {
 		s.log.Warn("cannot check whether the new target must run strict: enabling strict mode", "target", t.FullName(), "error", checkErr)
 	}
-	if err := applyStrictPolicy(&t, opts.Strict, reason, checkErr); err != nil {
+	if err := applyStrictPolicy(&t, opts, reason, checkErr); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

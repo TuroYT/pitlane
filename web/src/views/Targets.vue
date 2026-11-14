@@ -95,7 +95,8 @@ function copy(text: string) {
       </p>
       <p class="muted small">
         <strong>Warm runners</strong>: each one keeps one slot reserved for that repository, so its jobs start instantly
-        (no runner start-up), but that slot cannot run jobs of other repositories. New repositories get one; set 0 to free its slot.
+        (no runner start-up), but that slot cannot run jobs of other repositories. New repositories get one, strict (public)
+        ones none, so no idle runner waits for a pull request from a fork; set 0 to free its slot.
       </p>
       <div class="table-wrap">
         <table class="table">

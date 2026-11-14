@@ -133,3 +133,22 @@ func TestOrgTargetStrictWhenRunnerGroupAllowsPublic(t *testing.T) {
 		t.Fatalf("strict turned off on an org open to public repositories: %d %s", code, body)
 	}
 }
+
+func TestWarmRunnerDefaults(t *testing.T) {
+	s := newStrictServer(t, fakeGitHub{"acme/pub": store.StrictPublicRepo, "acme/priv": "", "acme/priv2": "", "acme/pub2": store.StrictPublicRepo})
+	for _, tc := range []struct {
+		body string
+		warm int
+	}{
+		{`{"kind":"repo","owner":"acme","repo":"pub"}`, 0},
+		{`{"kind":"repo","owner":"acme","repo":"priv"}`, store.DefaultMinRunners},
+		{`{"kind":"repo","owner":"acme","repo":"priv2","strict":true}`, 0},
+		{`{"kind":"repo","owner":"acme","repo":"pub2","minRunners":1}`, 1}, // explicit: kept
+		{`{"kind":"repo","owner":"acme","repo":"unknown"}`, 0},             // fail closed: strict
+	} {
+		code, tg, body := call(t, s.handleCreateTarget, "POST", "/api/targets", "", tc.body)
+		if code != 200 || tg.MinRunners != tc.warm {
+			t.Errorf("%s: code %d warm %d, want %d (%s)", tc.body, code, tg.MinRunners, tc.warm, body)
+		}
+	}
+}

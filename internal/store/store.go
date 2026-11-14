@@ -322,6 +322,19 @@ const DefaultMaxJobMinutes = 360
 // keep their own value.
 const DefaultMinRunners = 1
 
+// DefaultStrictMinRunners is the number of warm runners of a new strict
+// target: none, so a public repository has no idle runner registered and
+// waiting for a pull request from a fork.
+const DefaultStrictMinRunners = 0
+
+// DefaultWarmRunners returns the warm runner count of a new target.
+func DefaultWarmRunners(strict bool) int {
+	if strict {
+		return DefaultStrictMinRunners
+	}
+	return DefaultMinRunners
+}
+
 // FullName returns "owner/repo" or "owner".
 func (t Target) FullName() string {
 	if t.Kind == "repo" {

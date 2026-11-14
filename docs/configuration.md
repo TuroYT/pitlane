@@ -23,7 +23,7 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Label | `pitlane` | The value for `runs-on:`. |
-| Warm runners | 1 for new repositories | Runners kept registered and idle, so jobs start in about a second. Each one holds a slot. Set `0` to free the slot when no job runs. Targets created before this default keep their value. |
+| Warm runners | 1 for new targets, 0 for new strict targets | Runners kept registered and idle, so jobs start in about a second. Each one holds a slot. Set `0` to free the slot when no job runs. A strict (public) target gets none, so no idle runner sits registered waiting for a pull request from a fork; you can still set one. Targets created before this default keep their value. |
 | Max parallel | number of slots | Upper bound for this target. |
 | Job limit (min) | 360 | A runner whose job runs longer is stopped (SIGTERM, so the job is reported as failed on GitHub at once, then SIGKILL after 30 s); its slot is cleaned and released as after any job. `0` = no limit. |
 | Strict | on for public repositories (enforced, see below) | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |

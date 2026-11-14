@@ -63,9 +63,12 @@ func TestCSRFRequiresHeader(t *testing.T) {
 }
 
 func TestNewTargetDefaults(t *testing.T) {
-	tg, _, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
+	tg, opts, err := newTarget(strings.NewReader(`{"kind":"repo","owner":"acme","repo":"api"}`), 4)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if opts.MinRunners != nil || opts.Strict != nil {
+		t.Fatalf("nothing asked: %+v", opts)
 	}
 	if tg.MinRunners != store.DefaultMinRunners || tg.MaxRunners != 4 || tg.MaxJobMinutes != store.DefaultMaxJobMinutes || !tg.Enabled {
 		t.Fatalf("defaults: %+v", tg)
