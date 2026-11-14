@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/server"
 	"github.com/TuroYT/pitlane/internal/store"
+	"github.com/TuroYT/pitlane/internal/update"
 	"github.com/TuroYT/pitlane/web"
 )
 
@@ -75,7 +77,11 @@ func main() {
 		}
 		log.Warn("login is disabled (--insecure-no-auth): anyone reaching this address controls Pitlane", "addr", *listen)
 	}
-	if err := run(log, *listen, *dataDir, *baseURL, *noAuth); err != nil {
+	err := run(log, *listen, *dataDir, *baseURL, *noAuth)
+	if errors.Is(err, errRestart) {
+		reexec(log)
+	}
+	if err != nil {
 		log.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -107,6 +113,27 @@ func isLoopback(listen string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// errRestart asks main to start the (just updated) binary again.
+var errRestart = errors.New("restart requested")
+
+// reexec replaces the process with the binary now at its path, keeping the
+// PID (systemd keeps tracking it) and the arguments. Busy runners are Docker
+// containers, not children, so they keep running and are adopted on start.
+func reexec(log *slog.Logger) {
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err == nil {
+		log.Info("restarting into the updated binary", "path", exe)
+		// The path is our own binary, just replaced by a verified release.
+		err = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec // G204: own executable
+	}
+	// Exec failed: exit non-zero so the service manager starts us again.
+	log.Error("re-exec failed, exiting so the service manager restarts Pitlane", "error", err)
+	os.Exit(1)
+}
+
 func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -135,6 +162,27 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	mgr.StrictReason = srv.StrictReason
 	srv.SetManager(mgr)
 
+	var restart atomic.Bool
+	upd := &update.Updater{
+		Version: version, Store: st, GitHub: &update.GitHub{}, Probe: update.DefaultProbe(version),
+		Images: update.DockerImages{Cli: p.Docker(), PullFunc: func(ctx context.Context, ref string) error {
+			return p.EnsureImage(ctx, ref, true)
+		}},
+		RunnerImage: func() string { return p.Config().RunnerImage },
+		Busy: func() bool {
+			for _, sl := range p.Slots() {
+				if sl.Status == "busy" {
+					return true
+				}
+			}
+			return false
+		},
+		Restart: func() { restart.Store(true); stop() },
+		Notify:  srv.Notify,
+		Log:     log.With("component", "update"),
+	}
+	srv.SetUpdates(upd.Handler())
+
 	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		log.Info("pitlane listening", "addr", listen, "version", version)
@@ -155,6 +203,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 		return err
 	}
 	srv.Notify()
+	go upd.Run(ctx)
 
 	<-ctx.Done()
 	log.Info("shutting down (busy runners keep running and are adopted on restart)")
@@ -163,6 +212,9 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		_ = httpSrv.Close() // long-lived event streams (open browser tabs)
+	}
+	if restart.Load() {
+		return errRestart
 	}
 	return nil
 }

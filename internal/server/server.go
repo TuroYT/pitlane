@@ -47,6 +47,7 @@ type Server struct {
 	store *store.Store
 	pool  *pool.Pool
 	mgr   *scaler.Manager
+	upd   http.Handler // /api/updates (internal/update)
 	log   *slog.Logger
 	web   fs.FS
 	hub   *hub
@@ -67,6 +68,9 @@ func New(cfg Config, st *store.Store, p *pool.Pool, log *slog.Logger, web fs.FS)
 
 // SetManager wires the scaler manager (created after the server so it can notify the hub).
 func (s *Server) SetManager(m *scaler.Manager) { s.mgr = m }
+
+// SetUpdates wires the update API handler, served under /api/updates.
+func (s *Server) SetUpdates(h http.Handler) { s.upd = h }
 
 // Notify signals UI subscribers that state changed.
 func (s *Server) Notify() { s.hub.notify() }
@@ -165,6 +169,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/settings", s.auth(s.handleGetSettings))
 	mux.Handle("GET /api/compare", s.auth(s.handleCompare))
 	mux.Handle("PUT /api/settings", s.auth(s.handlePutSettings))
+	mux.Handle("/api/updates", s.auth(s.handleUpdates))
+	mux.Handle("/api/updates/", s.auth(s.handleUpdates))
 
 	mux.HandleFunc("/", s.handleWeb)
 	return s.csrf(mux)
@@ -1277,6 +1283,14 @@ type Settings struct {
 	// ("" removes it).
 	MetricsToken    *string `json:"metricsToken,omitempty"`
 	MetricsTokenSet bool    `json:"metricsTokenSet"`
+}
+
+func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
+	if s.upd == nil {
+		writeErr(w, http.StatusNotFound, "updates are not available")
+		return
+	}
+	s.upd.ServeHTTP(w, r)
 }
 
 // LoadPoolConfig reads the pool configuration from the store.
