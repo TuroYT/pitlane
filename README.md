@@ -27,7 +27,7 @@ GitHub-hosted runners.
 On a Linux host with systemd (Docker is installed if missing):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/install.sh | sudo sh
+curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh | sudo sh
 ```
 
 Or with Docker Compose:
@@ -40,7 +40,7 @@ PITLANE_BASE_URL=http://my-server:8080 docker compose up -d
 Or on Proxmox VE (creates a ready-to-use LXC container):
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/proxmox/pitlane-lxc.sh)"
+bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"
 ```
 
 Then:

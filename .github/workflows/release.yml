@@ -53,10 +53,16 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X main.version=$VERSION" -o dist/pitlane_linux_$arch ./cmd/pitlane
           done
-          (cd dist && sha256sum pitlane_linux_* > checksums.txt && cat checksums.txt)
+          # The installers are release assets too, so that everything a
+          # user downloads comes from the same tag.
+          cp deploy/install.sh deploy/proxmox/pitlane-lxc.sh dist/
+          (cd dist && sha256sum pitlane_linux_* install.sh pitlane-lxc.sh > checksums.txt && cat checksums.txt)
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/pitlane_linux_*
+          subject-path: |
+            dist/pitlane_linux_*
+            dist/install.sh
+            dist/pitlane-lxc.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
@@ -143,5 +149,5 @@ jobs:
         run: |
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
-          gh release create "$TAG" dist/pitlane_linux_* dist/checksums.txt \
+          gh release create "$TAG" dist/pitlane_linux_* dist/install.sh dist/pitlane-lxc.sh dist/checksums.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$TAG" $pre
