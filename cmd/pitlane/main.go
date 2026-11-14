@@ -79,7 +79,7 @@ func run(log *slog.Logger, listen, dataDir, baseURL string, noAuth bool) error {
 	}
 	defer st.Close()
 
-	p, err := pool.New(server.LoadPoolConfig(st), log.With("component", "pool"))
+	p, err := pool.New(server.LoadPoolConfig(st, dataDir), log.With("component", "pool"))
 	if err != nil {
 		return fmt.Errorf("docker: %w", err)
 	}

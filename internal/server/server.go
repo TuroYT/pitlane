@@ -796,8 +796,9 @@ type Settings struct {
 }
 
 // LoadPoolConfig reads the pool configuration from the store.
-func LoadPoolConfig(st *store.Store) pool.Config {
+func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
+		StateFile:   filepath.Join(dataDir, "slots.json"),
 		Slots:       st.GetInt("slots", DefaultSlots()),
 		RunnerImage: st.Get("runner_image", ""),
 		DindImage:   st.Get("dind_image", ""),
@@ -856,7 +857,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	go func() {
-		if err := s.pool.Configure(context.Background(), LoadPoolConfig(s.store)); err != nil {
+		if err := s.pool.Configure(context.Background(), LoadPoolConfig(s.store, s.cfg.DataDir)); err != nil {
 			s.log.Error("apply settings", "error", err)
 		}
 		s.Notify()

@@ -7,10 +7,12 @@ package pool
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -69,6 +71,7 @@ type Config struct {
 	Mirror      bool   // run a pull-through Docker Hub mirror
 	KeepBuildGB int    // buildx cache kept per slot after each job
 	ImageOS     string // value of ImageOS for setup-* actions
+	StateFile   string // where slot ownership is persisted (outside any slot's reach)
 }
 
 func (c *Config) defaults() {
@@ -112,6 +115,14 @@ type slot struct {
 	dirty bool
 }
 
+// persistedSlot is what survives a Pitlane restart. It lives in Pitlane's
+// data directory, which jobs cannot reach, so it can be trusted.
+type persistedSlot struct {
+	Owner     string `json:"owner"`
+	TargetID  int64  `json:"targetId"`
+	Externals string `json:"externals"` // runner image ID copied into the externals volume
+}
+
 // Pool owns the slots.
 type Pool struct {
 	cli *client.Client
@@ -123,6 +134,7 @@ type Pool struct {
 	chowned   map[string]bool
 	externals map[int]string // slot -> runner image ID copied into its externals volume
 	released  chan struct{}
+	restored  map[int]persistedSlot
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -132,7 +144,33 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, externals: map[int]string{}, released: make(chan struct{}, 1)}, nil
+	p := &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, externals: map[int]string{},
+		restored: map[int]persistedSlot{}, released: make(chan struct{}, 1)}
+	if b, err := os.ReadFile(cfg.StateFile); err == nil {
+		_ = json.Unmarshal(b, &p.restored)
+		for i, st := range p.restored {
+			if st.Externals != "" {
+				p.externals[i] = st.Externals
+			}
+		}
+	}
+	return p, nil
+}
+
+// saveLocked persists slot ownership. Callers hold p.mu.
+func (p *Pool) saveLocked() {
+	if p.cfg.StateFile == "" {
+		return
+	}
+	out := map[int]persistedSlot{}
+	for i, s := range p.slots {
+		out[i] = persistedSlot{Owner: s.Owner, TargetID: s.TargetID, Externals: p.externals[i]}
+	}
+	b, _ := json.Marshal(out)
+	tmp := p.cfg.StateFile + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+		_ = os.Rename(tmp, p.cfg.StateFile)
+	}
 }
 
 // Docker exposes the Docker client (used for logs).
@@ -229,7 +267,8 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 			s.retire = false
 			continue
 		}
-		p.slots[i] = &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix()}}
+		st := p.restored[i]
+		p.slots[i] = &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID}}
 		toStart = append(toStart, i)
 	}
 	var toRemove []int
@@ -312,6 +351,10 @@ func (p *Pool) startSlot(ctx context.Context, i int) {
 		return
 	}
 	if !busy {
+		// Copy the runner externals now rather than when a job is waiting.
+		if err := p.ensureExternals(ctx, i, p.Config().RunnerImage); err != nil {
+			p.log.Warn("prepare runner externals", "slot", i, "error", err)
+		}
 		p.setStatus(i, "ready", "")
 	}
 	p.log.Info("slot ready", "slot", i)
@@ -458,6 +501,7 @@ func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	delete(p.chowned, slotWork(i))
 	delete(p.chowned, slotExternals(i))
 	delete(p.externals, i)
+	p.saveLocked()
 	p.mu.Unlock()
 	p.startSlot(ctx, i)
 }
@@ -474,8 +518,10 @@ func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
 
 // Lease is a slot reserved for one runner.
 type Lease struct {
-	Slot  int
-	Owner string
+	Slot     int
+	Owner    string
+	TargetID int64
+	wipe     bool // the slot last served another owner: Prepare wipes it
 }
 
 // Acquire reserves a free slot, preferring one that already ran jobs for the
@@ -508,31 +554,46 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 	}
 	needWipe := p.cfg.CacheScope == "owner" && best.Owner != "" && best.Owner != owner
 	best.Status, best.Since = "busy", time.Now().Unix()
-	if !needWipe {
+	if !needWipe && (best.Owner != owner || best.TargetID != targetID) {
 		best.Owner, best.TargetID = owner, targetID
+		p.saveLocked()
 	}
 	idx := best.Index
 	p.mu.Unlock()
+	return Lease{Slot: idx, Owner: owner, TargetID: targetID, wipe: needWipe}, true
+}
 
-	if needWipe {
-		p.log.Info("slot changes owner, wiping its caches", "slot", idx, "owner", owner)
+// ErrSlotRebuilding means Prepare failed to wipe the slot; it is being
+// rebuilt and must not be released.
+var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
+
+// Prepare readies a reserved slot for a runner: it wipes the slot when it
+// last served another owner and refreshes the runner externals if needed.
+func (p *Pool) Prepare(ctx context.Context, l Lease) error {
+	if l.wipe {
+		p.log.Info("slot changes owner, wiping its caches", "slot", l.Slot, "owner", l.Owner)
 		script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; rm -rf " + workDir + "/_actions"
-		if _, code, err := p.exec(ctx, slotName(idx), script); err != nil || code != 0 {
+		if _, code, err := p.exec(ctx, slotName(l.Slot), script); err != nil || code != 0 {
 			// Never hand out a slot that may still hold another owner's data.
-			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", idx, "code", code, "error", err)
+			p.log.Error("slot wipe failed, rebuilding it from scratch", "slot", l.Slot, "code", code, "error", err)
 			p.mu.Lock()
-			best.dirty = true // previous owner is kept
+			if s, ok := p.slots[l.Slot]; ok {
+				s.dirty = true // previous owner is kept
+			}
 			p.mu.Unlock()
-			p.setStatus(idx, "starting", "")
-			go p.rebuildSlot(context.Background(), idx)
-			return Lease{}, false
+			p.setStatus(l.Slot, "starting", "")
+			go p.rebuildSlot(context.Background(), l.Slot)
+			return ErrSlotRebuilding
 		}
 		p.mu.Lock()
-		best.Owner, best.TargetID = owner, targetID
-		delete(p.externals, idx) // re-copied from the image before the next runner
+		if s, ok := p.slots[l.Slot]; ok {
+			s.Owner, s.TargetID = l.Owner, l.TargetID
+		}
+		delete(p.externals, l.Slot) // re-copied from the image below
+		p.saveLocked()
 		p.mu.Unlock()
 	}
-	return Lease{Slot: idx, Owner: owner}, true
+	return p.ensureExternals(ctx, l.Slot, p.Config().RunnerImage)
 }
 
 // Release cleans what the job left in the slot (containers, networks,
@@ -585,8 +646,9 @@ func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
 }
 
 // ensureExternals copies the runner image's externals into the slot volume.
-// The copy is redone after every Pitlane start, runner image change and slot
-// owner change; between jobs of the same owner it is shared like other caches.
+// The copy is redone when the runner image or the slot owner changes (tracked
+// in Pitlane's state file, never in the volume, which slot jobs can reach);
+// between jobs of the same owner it is shared like the other caches.
 func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	info, err := p.cli.ImageInspect(ctx, img)
 	if err != nil {
@@ -617,6 +679,7 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	}
 	p.mu.Lock()
 	p.externals[i] = info.ID
+	p.saveLocked()
 	p.mu.Unlock()
 	return nil
 }
@@ -689,9 +752,6 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		}
 	}
 	slotIdx := spec.Lease.Slot
-	if err := p.ensureExternals(ctx, slotIdx, cfg.RunnerImage); err != nil {
-		return "", err
-	}
 	env := []string{
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=" + spec.JITConfig,
 		"DOCKER_HOST=tcp://127.0.0.1:2375",

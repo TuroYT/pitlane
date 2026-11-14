@@ -283,6 +283,7 @@ type target struct {
 	waiting     int
 	waitSince   time.Time
 	runners     map[string]*runner
+	starting    int // runners being prepared/started in the background
 	reconcileMu sync.Mutex
 }
 
@@ -478,7 +479,7 @@ func (t *target) reconcile() {
 	}
 	cfg := t.t
 	want := min(cfg.MaxRunners, cfg.MinRunners+t.desired)
-	have := 0
+	have := t.starting
 	var idle []*runner
 	for _, r := range t.runners {
 		if r.exited {
@@ -491,19 +492,19 @@ func (t *target) reconcile() {
 	}
 	t.mu.Unlock()
 
+	// Runners are prepared and started in parallel, in the background: the
+	// listener is never blocked and a slow start does not delay the others.
 	started := 0
 	for i := 0; i < want-have; i++ {
 		lease, ok := t.m.pool.Acquire(t.ctx, cfg.Owner, cfg.ID)
 		if !ok {
 			break
 		}
-		if err := t.startRunner(lease); err != nil {
-			t.log.Error("start runner", "error", err)
-			go t.m.pool.Release(context.Background(), lease)
-			t.setStatus("error", err.Error())
-			break
-		}
 		started++
+		t.mu.Lock()
+		t.starting++
+		t.mu.Unlock()
+		go t.launch(lease)
 	}
 	missing := max(0, want-have-started)
 
@@ -533,6 +534,27 @@ func (t *target) reconcile() {
 	t.mu.Unlock()
 	if changed {
 		t.m.changed()
+	}
+}
+
+func (t *target) launch(lease pool.Lease) {
+	defer func() {
+		t.mu.Lock()
+		t.starting--
+		t.mu.Unlock()
+		t.m.changed()
+	}()
+	if err := t.m.pool.Prepare(t.ctx, lease); err != nil {
+		t.log.Error("prepare slot", "slot", lease.Slot, "error", err)
+		if !errors.Is(err, pool.ErrSlotRebuilding) {
+			t.m.pool.Release(context.Background(), lease)
+		}
+		return
+	}
+	if err := t.startRunner(lease); err != nil {
+		t.log.Error("start runner", "error", err)
+		t.m.pool.Release(context.Background(), lease)
+		t.setStatus("error", err.Error())
 	}
 }
 
