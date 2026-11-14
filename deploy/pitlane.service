@@ -1,0 +1,19 @@
+[Unit]
+Description=Pitlane - autoscaled self-hosted GitHub Actions runners
+Documentation=https://github.com/TuroYT/pitlane
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/pitlane/pitlane.env
+ExecStart=/usr/local/bin/pitlane
+Restart=always
+RestartSec=5
+# Busy runners keep running during a restart and are adopted again.
+KillMode=process
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

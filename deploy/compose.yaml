@@ -1,0 +1,20 @@
+# Pitlane with Docker Compose.
+#   1. Set PITLANE_BASE_URL to the address you will open in your browser.
+#   2. docker compose up -d
+#   3. Open that address and follow the setup (token: docker compose logs pitlane | grep token)
+services:
+  pitlane:
+    image: ghcr.io/turoyt/pitlane:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PITLANE_BASE_URL: ${PITLANE_BASE_URL:-http://localhost:8080}
+    volumes:
+      - pitlane-data:/data
+      # Pitlane drives Docker to start its slots and runners. Jobs never get
+      # this socket: each slot has its own isolated Docker-in-Docker daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pitlane-data:

@@ -1,0 +1,40 @@
+# Copy this workflow into a repository enabled in Pitlane, then run it from
+# the Actions tab. It exercises everything a typical CI needs: service
+# containers, Docker builds and package caches. Run it twice: the second run
+# shows the effect of Pitlane's warm caches.
+name: pitlane-smoke
+on: workflow_dispatch
+
+jobs:
+  smoke:
+    runs-on: pitlane
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Runner info
+        run: |
+          echo "slot=$PITLANE_SLOT host=$(hostname) cpus=$(nproc)"
+          free -h
+          docker version --format 'docker server {{.Server.Version}}'
+      - name: Talk to the service container
+        run: docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5432
+      - name: npm install (cached between jobs)
+        run: |
+          mkdir -p /tmp/app && cd /tmp/app
+          npm init -y >/dev/null
+          time npm install --no-audit --no-fund express@4 lodash@4 >/dev/null
+      - name: Docker build (layer cache kept in the slot)
+        run: |
+          mkdir -p /tmp/img && cd /tmp/img
+          printf 'FROM node:22-alpine\nRUN apk add --no-cache git\nRUN echo built > /built\n' > Dockerfile
+          time docker buildx build --load -t pitlane-smoke:latest .

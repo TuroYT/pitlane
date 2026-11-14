@@ -1,7 +1,0 @@
-name: spike
-on: workflow_dispatch
-jobs:
-  hello:
-    runs-on: pitlane-spike
-    steps:
-      - run: echo "hello from $(hostname)"; nproc; free -h

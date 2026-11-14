@@ -1,0 +1,687 @@
+// Package scaler connects GitHub runner scale sets to the Docker slot pool.
+// One listener runs per enabled target; when GitHub assigns jobs to a scale
+// set, the matching number of ephemeral runners is started in free slots.
+package scaler
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/actions/scaleset"
+	"github.com/actions/scaleset/listener"
+
+	"github.com/TuroYT/pitlane/internal/pool"
+	"github.com/TuroYT/pitlane/internal/store"
+)
+
+// Credentials used to talk to GitHub. Either the App fields or PAT is set.
+type Credentials struct {
+	AppClientID string
+	AppPEM      string
+	PAT         string
+}
+
+// Valid reports whether credentials are usable.
+func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" && c.AppPEM != "") }
+
+// Manager runs one listener per target.
+type Manager struct {
+	Version string
+
+	store   *store.Store
+	pool    *pool.Pool
+	log     *slog.Logger
+	logDir  string
+	creds   func() Credentials
+	changed func()
+
+	mu      sync.Mutex
+	targets map[int64]*target
+	adopted map[int64][]*runner
+	ctx     context.Context
+}
+
+// New creates a manager. changed is called whenever visible state changes.
+func New(st *store.Store, p *pool.Pool, dataDir string, creds func() Credentials, changed func(), log *slog.Logger) *Manager {
+	logDir := filepath.Join(dataDir, "logs")
+	_ = os.MkdirAll(logDir, 0o700)
+	return &Manager{store: st, pool: p, log: log, logDir: logDir, creds: creds, changed: changed,
+		targets: map[int64]*target{}, adopted: map[int64][]*runner{}}
+}
+
+// Start adopts runners left by a previous process and starts every enabled target.
+func (m *Manager) Start(ctx context.Context) error {
+	m.ctx = ctx
+	orphans, err := m.pool.RunnerContainers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, o := range orphans {
+		r := &runner{name: o.Name, containerID: o.ID, lease: pool.Lease{Slot: o.Slot, Owner: o.Owner}, busy: true, startedAt: time.Now()}
+		if !o.Running {
+			go m.finishRunner(nil, r)
+			continue
+		}
+		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot)
+		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
+	}
+	m.Sync()
+	go m.loop(ctx)
+	return nil
+}
+
+func (m *Manager) loop(ctx context.Context) {
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
+	clean := time.NewTicker(time.Hour)
+	defer clean.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.pool.Released():
+			m.reconcileAll()
+		case <-tick.C:
+			m.reconcileAll()
+		case <-clean.C:
+			m.housekeeping()
+		}
+	}
+}
+
+func (m *Manager) reconcileAll() {
+	m.mu.Lock()
+	ts := make([]*target, 0, len(m.targets))
+	for _, t := range m.targets {
+		ts = append(ts, t)
+	}
+	m.mu.Unlock()
+	// Oldest demand first so a busy target cannot starve the others.
+	sort.Slice(ts, func(i, j int) bool { return ts[i].waitingSince().Before(ts[j].waitingSince()) })
+	for _, t := range ts {
+		t.reconcile()
+	}
+}
+
+func (m *Manager) housekeeping() {
+	retention := time.Duration(m.store.GetInt("history_days", 30)) * 24 * time.Hour
+	_ = m.store.PruneJobs(retention)
+	entries, _ := os.ReadDir(m.logDir)
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {
+			_ = os.Remove(filepath.Join(m.logDir, e.Name()))
+		}
+	}
+}
+
+// Sync starts, restarts or stops listeners so they match the stored targets.
+func (m *Manager) Sync() {
+	targets, err := m.store.Targets()
+	if err != nil {
+		m.log.Error("load targets", "error", err)
+		return
+	}
+	want := map[int64]store.Target{}
+	for _, t := range targets {
+		if t.Enabled {
+			want[t.ID] = t
+		}
+	}
+	m.mu.Lock()
+	for id, t := range m.targets {
+		w, ok := want[id]
+		if !ok || w.ScaleSetName != t.cfg().ScaleSetName || w.InstallationID != t.cfg().InstallationID {
+			delete(m.targets, id)
+			go t.stop(!ok)
+			continue
+		}
+		t.update(w)
+	}
+	creds := m.creds()
+	for id, w := range want {
+		if _, ok := m.targets[id]; ok || !creds.Valid() {
+			continue
+		}
+		t := newTarget(m, w)
+		for _, r := range m.adopted[id] {
+			t.runners[r.name] = r
+			go t.watch(r)
+		}
+		delete(m.adopted, id)
+		m.targets[id] = t
+		go t.run(m.ctx)
+	}
+	m.mu.Unlock()
+	m.changed()
+}
+
+// Restart restarts every listener (e.g. after credentials change).
+func (m *Manager) Restart() {
+	m.mu.Lock()
+	for id, t := range m.targets {
+		delete(m.targets, id)
+		go t.stop(false)
+	}
+	m.mu.Unlock()
+	m.Sync()
+}
+
+// Shutdown stops listeners; busy runners keep running and are adopted on restart.
+func (m *Manager) Shutdown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.targets {
+		t.cancel()
+	}
+}
+
+// RunnerContainer returns the container of a live runner.
+func (m *Manager) RunnerContainer(name string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.targets {
+		t.mu.Lock()
+		r, ok := t.runners[name]
+		t.mu.Unlock()
+		if ok {
+			return r.containerID, true
+		}
+	}
+	return "", false
+}
+
+// LogFile returns the path of a finished runner's log.
+func (m *Manager) LogFile(name string) string {
+	return filepath.Join(m.logDir, filepath.Base(name)+".log")
+}
+
+// ----------------------------------------------------------------- snapshot
+
+// RunnerState is shown in the UI.
+type RunnerState struct {
+	Name      string `json:"name"`
+	Slot      int    `json:"slot"`
+	Busy      bool   `json:"busy"`
+	JobName   string `json:"jobName"`
+	Repo      string `json:"repo"`
+	StartedAt int64  `json:"startedAt"`
+}
+
+// TargetState is shown in the UI.
+type TargetState struct {
+	store.Target
+	Status  string        `json:"status"`
+	Error   string        `json:"error,omitempty"`
+	Desired int           `json:"desired"`
+	Waiting int           `json:"waiting"`
+	Runners []RunnerState `json:"runners"`
+}
+
+// Snapshot returns the live state of every target.
+func (m *Manager) Snapshot() []TargetState {
+	targets, _ := m.store.Targets()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]TargetState, 0, len(targets))
+	for _, st := range targets {
+		ts := TargetState{Target: st, Status: "disabled", Runners: []RunnerState{}}
+		if t, ok := m.targets[st.ID]; ok {
+			t.mu.Lock()
+			ts.Status, ts.Error, ts.Desired, ts.Waiting = t.status, t.err, t.desired, t.waiting
+			ts.ScaleSetID = t.scaleSetID
+			for _, r := range t.runners {
+				ts.Runners = append(ts.Runners, RunnerState{Name: r.name, Slot: r.lease.Slot, Busy: r.busy, JobName: r.jobName, Repo: r.repo, StartedAt: r.startedAt.Unix()})
+			}
+			t.mu.Unlock()
+			sort.Slice(ts.Runners, func(i, j int) bool { return ts.Runners[i].Slot < ts.Runners[j].Slot })
+		} else if st.Enabled && !m.creds().Valid() {
+			ts.Status = "no-credentials"
+		}
+		out = append(out, ts)
+	}
+	return out
+}
+
+// ------------------------------------------------------------------ target
+
+type runner struct {
+	name        string
+	containerID string
+	runnerID    int64
+	lease       pool.Lease
+	busy        bool
+	exited      bool
+	jobName     string
+	repo        string
+	startedAt   time.Time
+}
+
+type target struct {
+	m      *Manager
+	log    *slog.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu          sync.Mutex
+	t           store.Target
+	client      *scaleset.Client
+	lst         *listener.Listener
+	scaleSetID  int
+	status      string
+	err         string
+	desired     int
+	waiting     int
+	waitSince   time.Time
+	runners     map[string]*runner
+	reconcileMu sync.Mutex
+}
+
+func newTarget(m *Manager, t store.Target) *target {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{},
+		log: m.log.With("target", t.FullName())}
+}
+
+func (t *target) cfg() store.Target {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.t
+}
+
+func (t *target) update(n store.Target) {
+	t.mu.Lock()
+	t.t = n
+	lst := t.lst
+	t.mu.Unlock()
+	if lst != nil {
+		lst.SetMaxRunners(n.MaxRunners)
+	}
+	go t.reconcile()
+}
+
+func (t *target) waitingSince() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.waiting == 0 {
+		return time.Now()
+	}
+	return t.waitSince
+}
+
+func (t *target) setStatus(status, errMsg string) {
+	t.mu.Lock()
+	t.status, t.err = status, errMsg
+	t.mu.Unlock()
+	t.m.changed()
+}
+
+func (t *target) run(parent context.Context) {
+	go func() {
+		select {
+		case <-parent.Done():
+			t.cancel()
+		case <-t.ctx.Done():
+		}
+	}()
+	backoff := 5 * time.Second
+	for t.ctx.Err() == nil {
+		start := time.Now()
+		err := t.listen()
+		if t.ctx.Err() != nil {
+			break
+		}
+		if time.Since(start) > 5*time.Minute {
+			backoff = 5 * time.Second
+		}
+		msg := "listener stopped"
+		if err != nil {
+			msg = err.Error()
+		}
+		t.log.Error("listener failed, retrying", "error", msg, "in", backoff)
+		t.setStatus("error", msg)
+		select {
+		case <-t.ctx.Done():
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 2*time.Minute)
+	}
+}
+
+func (t *target) newClient() (*scaleset.Client, error) {
+	creds := t.m.creds()
+	cfg := t.cfg()
+	info := scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: cfg.ScaleSetID}
+	if creds.AppClientID != "" && creds.AppPEM != "" && cfg.InstallationID != 0 {
+		return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
+			GitHubConfigURL: cfg.URL(),
+			GitHubAppAuth:   scaleset.GitHubAppAuth{ClientID: creds.AppClientID, InstallationID: cfg.InstallationID, PrivateKey: creds.AppPEM},
+			SystemInfo:      info,
+		})
+	}
+	if creds.PAT != "" {
+		return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
+			GitHubConfigURL: cfg.URL(), PersonalAccessToken: creds.PAT, SystemInfo: info,
+		})
+	}
+	return nil, errors.New("no GitHub credentials for this target (install the GitHub App on " + cfg.Owner + ")")
+}
+
+func (t *target) listen() error {
+	client, err := t.newClient()
+	if err != nil {
+		return err
+	}
+	cfg := t.cfg()
+	ss, err := client.GetRunnerScaleSet(t.ctx, 1, cfg.ScaleSetName)
+	if err != nil {
+		return fmt.Errorf("get scale set: %w", err)
+	}
+	if ss == nil {
+		ss, err = client.CreateRunnerScaleSet(t.ctx, &scaleset.RunnerScaleSet{
+			Name:          cfg.ScaleSetName,
+			RunnerGroupID: 1,
+			Labels:        []scaleset.Label{{Name: cfg.ScaleSetName}},
+			RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+		})
+		if err != nil {
+			return fmt.Errorf("create scale set: %w", err)
+		}
+		t.log.Info("scale set created", "id", ss.ID, "label", cfg.ScaleSetName)
+	}
+	client.SetSystemInfo(scaleset.SystemInfo{System: "pitlane", Version: t.m.Version, Subsystem: "listener", ScaleSetID: ss.ID})
+	if cfg.ScaleSetID != ss.ID {
+		cfg.ScaleSetID = ss.ID
+		if err := t.m.store.UpdateTarget(cfg); err != nil {
+			t.log.Warn("save scale set id", "error", err)
+		}
+	}
+	host, _ := os.Hostname()
+	session, err := client.MessageSessionClient(t.ctx, ss.ID, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
+	if err != nil {
+		return fmt.Errorf("open session: %w", err)
+	}
+	defer session.Close(context.Background())
+	lst, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: cfg.MaxRunners, Logger: t.log.WithGroup("listener")})
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.client, t.lst, t.scaleSetID = client, lst, ss.ID
+	t.t.ScaleSetID = ss.ID
+	t.mu.Unlock()
+	t.setStatus("listening", "")
+	t.log.Info("listening for jobs", "scaleSet", ss.ID, "label", cfg.ScaleSetName)
+	err = lst.Run(t.ctx, &scaler{t: t, session: session})
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+// stop cancels the listener. When remove is set the scale set is deleted on
+// GitHub once its busy runners are done.
+func (t *target) stop(remove bool) {
+	t.cancel()
+	t.mu.Lock()
+	for _, r := range t.runners {
+		if !r.busy {
+			t.m.pool.Remove(context.Background(), r.containerID)
+		}
+	}
+	t.mu.Unlock()
+	if !remove {
+		return
+	}
+	deadline := time.Now().Add(6 * time.Hour)
+	for time.Now().Before(deadline) {
+		t.mu.Lock()
+		n := len(t.runners)
+		client, id := t.client, t.scaleSetID
+		t.mu.Unlock()
+		if n == 0 {
+			if client != nil && id != 0 {
+				if err := client.DeleteRunnerScaleSet(context.Background(), id); err != nil {
+					t.log.Warn("delete scale set", "error", err)
+				} else {
+					t.log.Info("scale set deleted", "id", id)
+				}
+			}
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// reconcile starts runners until the target has what GitHub asked for (or
+// no slot is free), and removes idle runners that are no longer needed.
+func (t *target) reconcile() {
+	if t.ctx.Err() != nil {
+		return
+	}
+	t.reconcileMu.Lock()
+	defer t.reconcileMu.Unlock()
+
+	t.mu.Lock()
+	if t.client == nil {
+		t.mu.Unlock()
+		return
+	}
+	cfg := t.t
+	want := min(cfg.MaxRunners, cfg.MinRunners+t.desired)
+	have := 0
+	var idle []*runner
+	for _, r := range t.runners {
+		if r.exited {
+			continue
+		}
+		have++
+		if !r.busy && time.Since(r.startedAt) > 30*time.Second {
+			idle = append(idle, r)
+		}
+	}
+	t.mu.Unlock()
+
+	started := 0
+	for i := 0; i < want-have; i++ {
+		lease, ok := t.m.pool.Acquire(t.ctx, cfg.Owner, cfg.ID)
+		if !ok {
+			break
+		}
+		if err := t.startRunner(lease); err != nil {
+			t.log.Error("start runner", "error", err)
+			go t.m.pool.Release(context.Background(), lease)
+			t.setStatus("error", err.Error())
+			break
+		}
+		started++
+	}
+	missing := max(0, want-have-started)
+
+	// Scale down: idle runners beyond what is needed are deregistered first
+	// (GitHub refuses if a job was just assigned) and only then killed.
+	excess := have + started - want
+	for _, r := range idle {
+		if excess <= 0 {
+			break
+		}
+		if r.runnerID != 0 {
+			if err := t.client.RemoveRunner(t.ctx, r.runnerID); err != nil {
+				continue
+			}
+		}
+		t.log.Info("removing idle runner", "runner", r.name)
+		t.m.pool.Remove(context.Background(), r.containerID)
+		excess--
+	}
+
+	t.mu.Lock()
+	if missing > 0 && t.waiting == 0 {
+		t.waitSince = time.Now()
+	}
+	changed := t.waiting != missing || started > 0
+	t.waiting = missing
+	t.mu.Unlock()
+	if changed {
+		t.m.changed()
+	}
+}
+
+func randomSuffix() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (t *target) startRunner(lease pool.Lease) error {
+	cfg := t.cfg()
+	t.mu.Lock()
+	client, ssID := t.client, t.scaleSetID
+	t.mu.Unlock()
+	name := "pitlane-" + randomSuffix()
+	jit, err := client.GenerateJitRunnerConfig(t.ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name, WorkFolder: "_work"}, ssID)
+	if err != nil {
+		return fmt.Errorf("generate JIT config: %w", err)
+	}
+	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.EncodedJITConfig, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
+	if err != nil {
+		if jit.Runner != nil {
+			_ = client.RemoveRunner(context.Background(), int64(jit.Runner.ID))
+		}
+		return err
+	}
+	r := &runner{name: name, containerID: id, lease: lease, startedAt: time.Now()}
+	if jit.Runner != nil {
+		r.runnerID = int64(jit.Runner.ID)
+	}
+	t.mu.Lock()
+	t.runners[name] = r
+	t.mu.Unlock()
+	t.log.Info("runner started", "runner", name, "slot", lease.Slot)
+	go t.watch(r)
+	return nil
+}
+
+func (t *target) watch(r *runner) {
+	code := t.m.pool.Wait(context.Background(), r.containerID)
+	t.log.Info("runner exited", "runner", r.name, "code", code)
+	t.m.finishRunner(t, r)
+}
+
+// finishRunner archives logs, removes the container, frees the slot and
+// makes sure the runner is gone from GitHub.
+func (m *Manager) finishRunner(t *target, r *runner) {
+	ctx := context.Background()
+	if f, err := os.OpenFile(m.LogFile(r.name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		_ = m.pool.Logs(ctx, r.containerID, false, f)
+		f.Close()
+	}
+	m.pool.Remove(ctx, r.containerID)
+	if t != nil {
+		t.mu.Lock()
+		r.exited = true
+		client := t.client
+		t.mu.Unlock()
+		if client != nil && r.runnerID != 0 {
+			_ = client.RemoveRunner(ctx, r.runnerID) // usually already gone (ephemeral)
+		}
+	}
+	m.pool.Release(ctx, r.lease)
+	if t != nil {
+		t.mu.Lock()
+		delete(t.runners, r.name)
+		t.mu.Unlock()
+	}
+	m.changed()
+}
+
+// ------------------------------------------------------------------ scaler
+
+type scaler struct {
+	t       *target
+	session *scaleset.MessageSessionClient
+}
+
+func unix(ts time.Time) int64 {
+	if ts.IsZero() || ts.Year() < 2000 {
+		return 0
+	}
+	return ts.Unix()
+}
+
+func shortRef(ref string) string {
+	// "owner/repo/.github/workflows/ci.yml@refs/heads/main" -> "ci.yml"
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	return filepath.Base(ref)
+}
+
+func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
+	cfg := s.t.cfg()
+	return store.Job{TargetID: cfg.ID, JobID: b.JobID, RunID: b.WorkflowRunID, Owner: b.OwnerName, Repo: b.RepositoryName,
+		WorkflowRef: shortRef(b.JobWorkflowRef), JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
+}
+
+func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg == nil {
+		s.t.reconcile()
+		return nil
+	}
+	st := s.t.m.store
+	if len(msg.JobAvailableMessages) > 0 {
+		ids := make([]int64, 0, len(msg.JobAvailableMessages))
+		for _, j := range msg.JobAvailableMessages {
+			ids = append(ids, j.RunnerRequestID)
+			_ = st.UpsertJob(s.job(j.JobMessageBase))
+		}
+		if _, err := s.session.AcquireJobs(ctx, ids); err != nil {
+			return fmt.Errorf("acquire jobs: %w", err)
+		}
+	}
+	for _, j := range msg.JobStartedMessages {
+		job := s.job(j.JobMessageBase)
+		job.RunnerName = j.RunnerName
+		job.StartedAt = unix(j.RunnerAssignTime)
+		if job.StartedAt == 0 {
+			job.StartedAt = time.Now().Unix()
+		}
+		s.t.mu.Lock()
+		if r, ok := s.t.runners[j.RunnerName]; ok {
+			r.busy, r.jobName, r.repo = true, j.JobDisplayName, j.RepositoryName
+			job.Slot = r.lease.Slot
+		}
+		s.t.mu.Unlock()
+		_ = st.UpsertJob(job)
+	}
+	for _, j := range msg.JobCompletedMessages {
+		job := s.job(j.JobMessageBase)
+		job.RunnerName = j.RunnerName
+		job.Result = j.Result
+		job.FinishedAt = unix(j.FinishTime)
+		if job.FinishedAt == 0 {
+			job.FinishedAt = time.Now().Unix()
+		}
+		if job.Result == "" {
+			job.Result = "canceled"
+		}
+		_ = st.UpsertJob(job)
+	}
+	if msg.Statistics != nil {
+		s.t.mu.Lock()
+		s.t.desired = msg.Statistics.TotalAssignedJobs
+		s.t.mu.Unlock()
+	}
+	s.t.m.changed()
+	s.t.reconcile()
+	return nil
+}

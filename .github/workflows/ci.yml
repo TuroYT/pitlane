@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Set the repository variable PITLANE_RUNNER (e.g. "pitlane") to dogfood
+# Pitlane; otherwise GitHub-hosted runners are used.
+jobs:
+  test:
+    runs-on: ${{ vars.PITLANE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: make web
+      - run: test -z "$(gofmt -l ./cmd ./internal ./web)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: make build
