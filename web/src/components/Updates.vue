@@ -167,7 +167,7 @@ onUnmounted(() => window.clearTimeout(timer))
     <div v-if="prefs" class="stack">
       <label class="inline">
         <input type="checkbox" v-model="prefs.autoUpdate" :disabled="!p.capability.canSelfUpdate" />
-        Install updates automatically (patch and minor releases of the same major version, never pre-releases, only when no job runs)
+        Install updates automatically (patch and minor releases of the same major version; while in 0.x only patch releases; never pre-releases; only when no job runs)
       </label>
       <div v-if="prefs.autoUpdate" class="grid2">
         <label>

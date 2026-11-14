@@ -34,15 +34,16 @@ func TestAutoDecision(t *testing.T) {
 		t.Fatalf("patch in window refused: %s", why)
 	}
 	minor := base
-	minor.Candidate = Release{Tag: "v0.3.0"}
+	minor.Current, minor.Candidate = "1.2.0", Release{Tag: "v1.3.0"}
 	if ok, why := AutoDecision(minor); !ok {
-		t.Errorf("minor refused: %s", why)
+		t.Errorf("minor refused after 1.0: %s", why)
 	}
 	cases := map[string]func(*AutoInput){
 		"off":                func(in *AutoInput) { in.Enabled = false },
 		"outside window":     func(in *AutoInput) { in.Now = at(12) },
 		"a job is running":   func(in *AutoInput) { in.Busy = true },
 		"new major":          func(in *AutoInput) { in.Current, in.Candidate = "1.4.0", Release{Tag: "v2.0.0"} },
+		"new minor in 0.x":   func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0"} },
 		"pre-release flag":   func(in *AutoInput) { in.Candidate.Prerelease = true },
 		"pre-release tag":    func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0-rc.1"} },
 		"older":              func(in *AutoInput) { in.Candidate = Release{Tag: "v0.1.9"} },
@@ -70,6 +71,10 @@ func TestAutoCandidate(t *testing.T) {
 	}
 	if _, ok := AutoCandidate(rels, "1.4.2"); ok {
 		t.Error("candidate when up to date within the major")
+	}
+	zero := []Release{{Tag: "v0.3.0"}, {Tag: "v0.2.3"}, {Tag: "v0.2.1"}}
+	if r, ok := AutoCandidate(zero, "0.2.0"); !ok || r.Tag != "v0.2.3" {
+		t.Errorf("0.x: got %v %v, want the latest patch v0.2.3", r.Tag, ok)
 	}
 	if _, ok := AutoCandidate(rels, "dev"); ok {
 		t.Error("candidate for a dev build")

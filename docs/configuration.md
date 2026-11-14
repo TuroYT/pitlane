@@ -69,7 +69,7 @@ Rollback: `sudo mv /usr/local/bin/pitlane.prev /usr/local/bin/pitlane && sudo sy
 
 Self-update is not offered, and the exact command is shown instead, when Pitlane runs in a container (`docker compose pull && docker compose up -d`), when its binary's directory is not writable (re-run `install.sh` with `PITLANE_VERSION`), for a development build, or when `PITLANE_SELF_UPDATE=false` is set.
 
-**Install updates automatically** (off by default) installs, inside a daily window (local time, default 03:00-05:00), the highest patch or minor release of the running major version, never a pre-release, and only while no job runs. A failed automatic attempt is retried the next day. New major versions are always manual.
+**Install updates automatically** (off by default) installs, inside a daily window (local time, default 03:00-05:00), the highest patch or minor release of the running major version (while Pitlane is in 0.x, where a minor release may break things, only patch releases of the running minor version), never a pre-release, and only while no job runs. A failed automatic attempt is retried the next day. New major versions (and, in 0.x, new minor versions) are always installed manually, with **Update now**.
 
 The checksum only proves that the binary is the one listed in its release. A future step should also verify a signature or a GitHub build attestation of the release (see the release workflow): the `update.Verifier` hook in `internal/update` runs after the checksum check, before anything is installed.
 
