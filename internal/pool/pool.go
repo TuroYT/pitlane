@@ -156,7 +156,8 @@ type Pool struct {
 	cache     CacheBroker // actions cache server, nil when not serving
 	cachePort int
 	selfOnce  sync.Once
-	self      string // container Pitlane runs in ("" on the host)
+	self      *selfInfo  // container Pitlane runs in (nil on the host)
+	fwdMu     sync.Mutex // cache forwarder creation
 
 	sops slotOps // nil: Docker (tests set a fake)
 }

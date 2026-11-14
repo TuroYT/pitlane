@@ -115,7 +115,7 @@ scrape_configs:
 | `PITLANE_DATA` | `--data` | `/var/lib/pitlane` | Database, master key, logs. **Back it up.** |
 | `PITLANE_BASE_URL` | `--base-url` | saved by the setup | URL you open in the browser (see [Base URL](#base-url)). |
 | `PITLANE_TRUSTED_PROXIES` | `--trusted-proxies` | | Comma-separated IPs or CIDRs of reverse proxies allowed to set the `Host` and `X-Forwarded-Proto` headers the base URL is derived from (loopback always is). |
-| `PITLANE_CACHE_LISTEN` | `--cache-listen` | `:8091` | Address of the actions cache. Runners reach it on the slot network's gateway (the host), or on Pitlane's own address on the slot network when Pitlane runs in a container. `off` disables it; if it cannot listen, Pitlane logs an error and jobs use GitHub's cache. Each request needs a per-job token. |
+| `PITLANE_CACHE_LISTEN` | `--cache-listen` | `:8091` | Address of the actions cache. Runners reach it on the slot network's gateway (the host). When Pitlane runs in a container, it starts `pitlane-cache-forward` (its own image, `nobody`, no capabilities, read-only) on the slot networks, which relays only this port to Pitlane. `off` disables it; if it cannot listen, Pitlane logs an error and jobs use GitHub's cache. Each request needs a per-job token. |
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; anything else stops Pitlane at start. |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
 | `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Pitlane then refuses to start unless `PITLANE_LISTEN` is a loopback address (`127.0.0.1`, `::1`, `localhost`). |

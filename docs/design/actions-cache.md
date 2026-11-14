@@ -151,8 +151,12 @@ already recommends the slot's local build cache instead.
 - The runner reaches it at the slot network's gateway (the host) on that port:
   `PITLANE_CACHE_URL=http://<gateway>:8091/<token>/`. When Pitlane itself runs
   in a container (Compose), a published port is not reachable from another
-  bridge network (Docker's inter-network isolation), so Pitlane joins each
-  slot network, like the mirror, and advertises its address there. The shim
+  bridge network (Docker's inter-network isolation), and joining the slot
+  networks itself would hand jobs a direct path to Pitlane's UI and API. Pitlane
+  starts instead `pitlane-cache-forward` (its own image running
+  `pitlane cache-forward`, as `nobody`, no capabilities, read-only root), which
+  joins the slot networks like the mirror and relays only the cache port to
+  Pitlane's container by name. The shim
   appends `$GITHUB_REPOSITORY/`.
 - Storage: `<data dir>/actions-cache/`, one `<id>.json` (metadata) and one
   `<id>.tgz` (archive) per entry, uploads in `tmp/`. The index is rebuilt by

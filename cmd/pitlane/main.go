@@ -42,6 +42,21 @@ func main() {
 		case "version", "--version", "-v":
 			fmt.Println("pitlane", version)
 			return
+		case "cache-forward":
+			// Run by Pitlane itself, in the actions cache forwarder container
+			// (see internal/pool/actionscache.go): cache-forward <listen> <target>.
+			if len(os.Args) != 4 {
+				fmt.Fprintln(os.Stderr, "usage: pitlane cache-forward <listen> <target>")
+				os.Exit(2)
+			}
+			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := cache.Forward(ctx, os.Args[2], os.Args[3], log); err != nil {
+				log.Error("fatal", "error", err)
+				os.Exit(1)
+			}
+			return
 		case "setup-token":
 			dir := env("PITLANE_DATA", "/var/lib/pitlane")
 			if len(os.Args) > 2 {

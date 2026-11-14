@@ -3,12 +3,14 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 
 	"github.com/TuroYT/pitlane/internal/cache"
@@ -107,21 +109,29 @@ func (p *Pool) adoptCache(o Orphan, repo string) {
 	}
 }
 
+// cacheForwarder relays the cache port when Pitlane runs in a container.
+const cacheForwarder = "pitlane-cache-forward"
+
 // cacheHost returns the address where a slot's runners reach Pitlane's
-// cache listener: when Pitlane itself runs in a container (Compose), its own
-// address on the slot network, which it joins like the mirror does (a
-// published port would not be reachable from another bridge network);
-// otherwise the slot network's gateway, i.e. the host.
+// cache listener. On the host, it is the slot network's gateway. When Pitlane
+// runs in a container (Compose), a published port is not reachable from
+// another bridge network, and joining the slot networks itself would expose
+// its UI and API to jobs: an unprivileged forwarder container that only
+// relays the cache port joins them instead, like the mirror.
 func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
 	self := p.selfContainer(ctx)
-	if self == "" {
+	if self == nil {
 		return p.slotGateway(ctx, slot)
 	}
-	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), self, nil)
+	_, port := p.cacheBroker()
+	if err := p.ensureForwarder(ctx, *self, port); err != nil {
+		return "", err
+	}
+	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), cacheForwarder, nil)
 	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
 		return "", err
 	}
-	info, err := p.cli.ContainerInspect(ctx, self)
+	info, err := p.cli.ContainerInspect(ctx, cacheForwarder)
 	if err != nil {
 		return "", err
 	}
@@ -130,12 +140,19 @@ func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
 			return n.IPAddress, nil
 		}
 	}
-	return "", errors.New("pitlane has no address on " + slotNetwork(slot))
+	return "", errors.New("the cache forwarder has no address on " + slotNetwork(slot))
 }
 
-// selfContainer returns the ID of the container Pitlane runs in, "" when it
-// runs on the host. It is looked up once.
-func (p *Pool) selfContainer(ctx context.Context) string {
+// selfInfo describes the container Pitlane runs in.
+type selfInfo struct {
+	ID, Image, Exe string
+	Network        string // a network of Pitlane's container the forwarder joins
+	Target         string // Pitlane's address on it (name, or IP on the default bridge)
+}
+
+// selfContainer returns the container Pitlane runs in, nil when it runs on
+// the host. It is looked up once.
+func (p *Pool) selfContainer(ctx context.Context) *selfInfo {
 	p.selfOnce.Do(func() {
 		if _, err := os.Stat("/.dockerenv"); err != nil {
 			return
@@ -144,14 +161,64 @@ func (p *Pool) selfContainer(ctx context.Context) string {
 		if err != nil {
 			return
 		}
-		info, err := p.cli.ContainerInspect(ctx, host)
+		exe, err := os.Executable()
 		if err != nil {
+			return
+		}
+		info, err := p.cli.ContainerInspect(ctx, host)
+		if err != nil || info.NetworkSettings == nil || info.Config == nil {
 			p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
 			return
 		}
-		p.self = info.ID
+		self := &selfInfo{ID: info.ID, Image: info.Image, Exe: exe}
+		for name, n := range info.NetworkSettings.Networks {
+			if n == nil || n.IPAddress == "" || strings.HasPrefix(name, "pitlane-") {
+				continue
+			}
+			target := strings.TrimPrefix(info.Name, "/")
+			if name == "bridge" { // no name resolution on the default bridge
+				target = n.IPAddress
+			}
+			if self.Network == "" || name < self.Network {
+				self.Network, self.Target = name, target
+			}
+		}
+		if self.Network == "" {
+			p.log.Warn("Pitlane's container has no network the actions cache forwarder can join: runners reach it through the slot gateway")
+			return
+		}
+		p.self = self
 	})
 	return p.self
+}
+
+// ensureForwarder (re)creates the forwarder for this Pitlane container.
+func (p *Pool) ensureForwarder(ctx context.Context, self selfInfo, port int) error {
+	p.fwdMu.Lock()
+	defer p.fwdMu.Unlock()
+	spec := self.ID + "/" + strconv.Itoa(port)
+	if info, err := p.cli.ContainerInspect(ctx, cacheForwarder); err == nil {
+		if info.Config != nil && info.Config.Labels[LabelSpec] == spec && info.State != nil && info.State.Running {
+			return nil
+		}
+		_ = p.cli.ContainerRemove(ctx, cacheForwarder, container.RemoveOptions{Force: true})
+	}
+	ps := strconv.Itoa(port)
+	_, err := p.cli.ContainerCreate(ctx, &container.Config{
+		Image: self.Image, Entrypoint: []string{self.Exe}, Cmd: []string{"cache-forward", ":" + ps, net.JoinHostPort(self.Target, ps)},
+		User:   "65534:65534", // nobody: it only relays bytes
+		Labels: map[string]string{LabelManaged: "true", LabelRole: "cache-forward", LabelSpec: spec},
+	}, &container.HostConfig{
+		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    []string{"no-new-privileges"},
+		ReadonlyRootfs: true,
+		LogConfig:      runnerLogConfig(),
+	}, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{self.Network: {}}}, nil, cacheForwarder)
+	if err != nil {
+		return fmt.Errorf("create the actions cache forwarder: %w", err)
+	}
+	return p.cli.ContainerStart(ctx, cacheForwarder, container.StartOptions{})
 }
 
 // slotGateway returns the address of the host on a slot's network (its

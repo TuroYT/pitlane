@@ -115,9 +115,10 @@ iptables -C INPUT -j PITLANE-SLOTS-IN 2>/dev/null || iptables -I INPUT -j PITLAN
 ```
 
 The actions cache port is the one exception on the host: every request needs a
-per-job token. When Pitlane runs in a container, runners reach it on its own
-address on the slot network (covered by the first rule) and the exception is
-not needed.
+per-job token. When Pitlane runs in a container, runners reach the cache
+through `pitlane-cache-forward`, a container on the slot networks that only
+relays that port (covered by the first rule), and the exception is not needed.
+Pitlane's own container never joins the slot networks.
 
 `DOCKER-USER` only sees forwarded traffic (to the LAN and to other containers'
 published ports); connections to the host's own addresses go through `INPUT`,
