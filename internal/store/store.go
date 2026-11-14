@@ -598,8 +598,9 @@ func (s *Store) JobsPage(ctx context.Context, f JobFilter, limit, offset int) ([
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	// where is built from constant fragments only; values are bound parameters.
 	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
-		FROM jobs`+where+` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+		FROM jobs`+where+` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...) //nolint:gosec // G202: see above
 	if err != nil {
 		return nil, 0, err
 	}
