@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -365,5 +366,65 @@ func TestStrictRequirement(t *testing.T) {
 	}
 	if got, _ = s.Target(tg.ID); !got.Strict {
 		t.Fatal("strict written off while required")
+	}
+}
+
+func TestJobsPage(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	add := func(id, owner, repo, ref, result string, queued, finished int64) {
+		t.Helper()
+		if err := s.UpsertJob(Job{TargetID: 1, JobID: id, Owner: owner, Repo: repo, Slot: -1, QueuedAt: queued, FinishedAt: finished, Result: result,
+			WorkflowFullRef: owner + "/" + repo + "/.github/workflows/ci.yml@" + ref}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("a", "acme", "api", "refs/heads/main", "succeeded", 100, 110)
+	add("b", "acme", "api", "refs/heads/feat/Login", "Failed", 200, 210)
+	add("c", "acme", "web", "refs/pull/12/merge", "", 300, 0)
+	add("d", "other", "x", "refs/heads/main", "succeeded", 400, 410)
+
+	ids := func(f JobFilter, limit, offset int) (string, int) {
+		t.Helper()
+		jobs, total, err := s.JobsPage(ctx, f, limit, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := ""
+		for _, j := range jobs {
+			out += j.JobID
+		}
+		return out, total
+	}
+	for name, tc := range map[string]struct {
+		f      JobFilter
+		limit  int
+		offset int
+		want   string
+		total  int
+	}{
+		"newest first":        {JobFilter{}, 10, 0, "dcba", 4},
+		"page 2":              {JobFilter{}, 2, 2, "ba", 4},
+		"past the end":        {JobFilter{}, 2, 10, "", 4},
+		"repository":          {JobFilter{Owner: "ACME", Repo: "api"}, 10, 0, "ba", 2},
+		"running":             {JobFilter{Result: "running"}, 10, 0, "c", 1},
+		"result, any case":    {JobFilter{Result: "failed"}, 10, 0, "b", 1},
+		"branch substring":    {JobFilter{Ref: "login"}, 10, 0, "b", 1},
+		"pull request number": {JobFilter{Ref: "pull/12"}, 10, 0, "c", 1},
+		"ref only, not path":  {JobFilter{Ref: "workflows"}, 10, 0, "", 0},
+		"filters combine":     {JobFilter{Owner: "acme", Repo: "api", Ref: "main", Result: "succeeded"}, 10, 0, "a", 1},
+	} {
+		got, total := ids(tc.f, tc.limit, tc.offset)
+		if got != tc.want || total != tc.total {
+			t.Errorf("%s: got %q (total %d), want %q (total %d)", name, got, total, tc.want, tc.total)
+		}
+	}
+	repos, err := s.JobRepos(ctx)
+	if err != nil || strings.Join(repos, ",") != "acme/api,acme/web,other/x" {
+		t.Fatalf("repos %v %v", repos, err)
 	}
 }

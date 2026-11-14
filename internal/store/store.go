@@ -553,11 +553,79 @@ func (s *Store) InFlightJobs(ctx context.Context) ([]Job, error) {
 
 // Jobs returns the most recent jobs.
 func (s *Store) Jobs(ctx context.Context, limit int) ([]Job, error) {
+	jobs, _, err := s.JobsPage(ctx, JobFilter{}, limit, 0)
+	return jobs, err
+}
+
+// JobFilter narrows a job listing. Empty fields match everything.
+type JobFilter struct {
+	Owner, Repo string // repository (both set) or nothing
+	Result      string // "running" (not finished yet) or a result, case-insensitive
+	Ref         string // substring of the branch, tag or pull request ref, case-insensitive
+}
+
+func (f JobFilter) where() (string, []any) {
+	var conds []string
+	var args []any
+	if f.Owner != "" && f.Repo != "" {
+		conds = append(conds, "owner = ? COLLATE NOCASE AND repo = ? COLLATE NOCASE")
+		args = append(args, f.Owner, f.Repo)
+	}
+	switch r := strings.ToLower(strings.TrimSpace(f.Result)); r {
+	case "":
+	case "running":
+		conds = append(conds, "finished_at = 0")
+	default:
+		conds = append(conds, "finished_at != 0 AND lower(result) = ?")
+		args = append(args, r)
+	}
+	if ref := strings.ToLower(strings.TrimSpace(f.Ref)); ref != "" {
+		// Only the part after "@" (refs/heads/main, refs/pull/12/merge…).
+		conds = append(conds, "instr(workflow_full_ref, '@') > 0 AND instr(lower(substr(workflow_full_ref, instr(workflow_full_ref, '@') + 1)), ?) > 0")
+		args = append(args, ref)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// JobsPage returns one page of the most recent jobs matching f, and how many
+// jobs match in total.
+func (s *Store) JobsPage(ctx context.Context, f JobFilter, limit, offset int) ([]Job, int, error) {
+	where, args := f.where()
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, job_id, run_id, owner, repo, workflow_ref, job_name, event, runner_name, slot, queued_at, started_at, finished_at, result, workflow_full_ref
-		FROM jobs ORDER BY queued_at DESC, id DESC LIMIT ?`, limit)
+		FROM jobs`+where+` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	jobs, err := scanJobs(rows)
+	return jobs, total, err
+}
+
+// JobRepos lists the repositories ("owner/repo") that have jobs.
+func (s *Store) JobRepos(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT owner || '/' || repo FROM jobs WHERE owner != '' AND repo != '' ORDER BY 1 COLLATE NOCASE`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func scanJobs(rows *sql.Rows) ([]Job, error) {
 	defer rows.Close()
 	var out []Job
 	for rows.Next() {

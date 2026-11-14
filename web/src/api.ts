@@ -128,6 +128,19 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await request(path, init)
+  return res.json() as Promise<T>
+}
+
+/** A page of a list endpoint that reports its total in X-Total-Count. */
+export async function apiPage<T>(path: string): Promise<{ items: T[]; total: number }> {
+  const res = await request(path)
+  const items = (await res.json()) as T[]
+  const total = Number(res.headers.get('X-Total-Count'))
+  return { items, total: Number.isFinite(total) && total >= items.length ? total : items.length }
+}
+
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
   const headers: Record<string, string> = { 'X-Pitlane': '1' }
   if (init.body) headers['Content-Type'] = 'application/json'
   const res = await fetch(path, { ...init, headers: { ...headers, ...(init.headers as Record<string, string>) } })
@@ -140,7 +153,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(res.status, msg)
   }
-  return res.json() as Promise<T>
+  return res
 }
 
 export const post = <T>(path: string, body: unknown, method = 'POST') =>

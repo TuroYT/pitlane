@@ -165,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/targets/{id}", s.auth(s.handleUpdateTarget))
 	mux.Handle("DELETE /api/targets/{id}", s.auth(s.handleDeleteTarget))
 	mux.Handle("GET /api/jobs", s.auth(s.handleJobs))
+	mux.Handle("GET /api/jobs/repos", s.auth(s.handleJobRepos))
 	mux.Handle("GET /api/runners/{name}/logs", s.auth(s.handleLogs))
 	mux.Handle("GET /api/runners/{name}/job-log", s.auth(s.handleJobLog))
 	mux.Handle("GET /api/runners/{name}/github", s.auth(s.handleGitHubJob))
@@ -1031,11 +1032,26 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 // --------------------------------------------------------------- jobs, logs
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	jobs, err := s.store.Jobs(r.Context(), limit)
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	f := store.JobFilter{Result: q.Get("result"), Ref: q.Get("ref")}
+	if repo := q.Get("repo"); repo != "" {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || !validName(owner) || !validName(name) {
+			writeErr(w, http.StatusBadRequest, "repo must be owner/name")
+			return
+		}
+		f.Owner, f.Repo = owner, name
+	}
+	if len(f.Ref) > 200 || len(f.Result) > 20 {
+		writeErr(w, http.StatusBadRequest, "filter too long")
+		return
+	}
+	jobs, total, err := s.store.JobsPage(r.Context(), f, limit, max(0, offset))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1043,7 +1059,19 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if jobs == nil {
 		jobs = []store.Job{}
 	}
+	// The body stays a plain array (older callers); the total matching jobs
+	// is in a header, for pagination.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJSON(w, jobs)
+}
+
+func (s *Server) handleJobRepos(w http.ResponseWriter, r *http.Request) {
+	repos, err := s.store.JobRepos(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, repos)
 }
 
 type flushWriter struct {
