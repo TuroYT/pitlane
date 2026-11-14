@@ -127,10 +127,20 @@ export class ApiError extends Error {
   }
 }
 
+// Called when the session is gone (expired, signed out elsewhere, user
+// removed): App.vue sends the user to the login page.
+let unauthorized: () => void = () => {}
+
+/** Sets what happens when an API call reports that the session is gone. */
+export function onUnauthorized(fn: () => void) {
+  unauthorized = fn
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { 'X-Pitlane': '1' }
   if (init.body) headers['Content-Type'] = 'application/json'
   const res = await fetch(path, { ...init, headers: { ...headers, ...(init.headers as Record<string, string>) } })
+  if (res.status === 401) unauthorized()
   if (!res.ok) {
     let msg = res.statusText
     try {
@@ -151,21 +161,47 @@ export const post = <T>(path: string, body: unknown, method = 'POST') =>
 export const live = reactive<{ snap: Snapshot | null; connected: boolean }>({ snap: null, connected: false })
 
 let source: EventSource | null = null
+let retry: ReturnType<typeof setTimeout> | undefined
+
+/** Delay before reopening an event stream the browser gave up on. */
+export const LIVE_RETRY_MS = 5000
 
 export function connectLive() {
   if (source) return
-  source = new EventSource('/api/events')
-  source.onopen = () => (live.connected = true)
-  source.onmessage = (e) => {
+  clearTimeout(retry)
+  const es = new EventSource('/api/events')
+  source = es
+  es.onopen = () => (live.connected = true)
+  es.onmessage = (e) => {
     live.snap = JSON.parse(e.data)
     live.connected = true
   }
-  source.onerror = () => {
+  es.onerror = () => {
     live.connected = false
+    // The browser retries network errors on its own, but closes the stream
+    // for good on an HTTP error such as 401 (session expired): find out why.
+    if (es.readyState === EventSource.CLOSED && source === es) {
+      source = null
+      void streamClosed()
+    }
   }
 }
 
+async function streamClosed() {
+  try {
+    const s = await api<{ signedIn: boolean }>('/api/status')
+    if (!s.signedIn) {
+      unauthorized()
+      return
+    }
+  } catch {
+    /* Pitlane unreachable (restarting): retry below */
+  }
+  retry = setTimeout(connectLive, LIVE_RETRY_MS)
+}
+
 export function disconnectLive() {
+  clearTimeout(retry)
   source?.close()
   source = null
 }
