@@ -40,6 +40,10 @@ const (
 	// restart is released the same way. Missing (containers of older
 	// versions) counts as strict: fail closed.
 	LabelStrict = "dev.pitlane.strict"
+	// LabelRepo records the repository of a repository target's runner
+	// (absent for organization targets), so an adopted runner keeps the same
+	// actions cache restriction.
+	LabelRepo = "dev.pitlane.repo"
 
 	mirrorName    = "pitlane-mirror"
 	mirrorNetwork = "pitlane-mirror"
@@ -70,6 +74,10 @@ type Config struct {
 	// Minimum free disk space (GB) on Docker's filesystem: below it, idle
 	// caches are pruned after each job (0 = never prune).
 	MinFreeDiskGB int
+	// ActionsCache serves actions/cache from the Pitlane host (internal/cache)
+	// for non-strict jobs; ActionsCacheGB bounds what it stores.
+	ActionsCache   bool
+	ActionsCacheGB int
 }
 
 func (c *Config) defaults() {
@@ -90,6 +98,9 @@ func (c *Config) defaults() {
 	}
 	if c.ImageOS == "" {
 		c.ImageOS = "ubuntu24"
+	}
+	if c.ActionsCacheGB <= 0 {
+		c.ActionsCacheGB = 20
 	}
 }
 
@@ -141,6 +152,9 @@ type Pool struct {
 	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
 
 	stores storeSync // slot pnpm stores merged with their owner's canonical store
+
+	cache     CacheBroker // actions cache server, nil when not serving
+	cachePort int
 
 	sops slotOps // nil: Docker (tests set a fake)
 }
@@ -215,7 +229,7 @@ func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) err
 	p := d.p
 	// Always a full copy: the volume is reachable from the privileged slot
 	// daemon, so nothing inside it (such as a marker file) can be trusted.
-	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/`
+	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/ && ` + shimScript("/x")
 	c, err := p.cli.ContainerCreate(ctx, &container.Config{
 		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script},
 		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},

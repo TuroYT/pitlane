@@ -42,6 +42,7 @@ type RunnerSpec struct {
 	JITConfig string
 	TargetID  int64
 	Owner     string
+	Repo      string // repository of a repository target ("" for an organization)
 	Lease     Lease
 }
 
@@ -98,6 +99,9 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		// (meant for Kubernetes); keep the runner output readable instead.
 		"ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0",
 	}
+	if e := p.cacheEnv(ctx, cfg, spec); e != "" {
+		env = append(env, e)
+	}
 	hc := &container.HostConfig{
 		Init: ptr(true),
 		// Share the slot daemon's network namespace (like a Kubernetes pod):
@@ -123,14 +127,16 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		Labels: map[string]string{
 			LabelManaged: "true", LabelRole: "runner", LabelSlot: strconv.Itoa(slotIdx),
 			LabelTarget: strconv.FormatInt(spec.TargetID, 10), LabelRunner: spec.Name, LabelOwner: spec.Owner,
-			LabelStrict: strconv.FormatBool(spec.Lease.Strict),
+			LabelStrict: strconv.FormatBool(spec.Lease.Strict), LabelRepo: spec.Repo,
 		},
 	}, hc, nil, nil, spec.Name)
 	if err != nil {
+		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("create runner: %w", err)
 	}
 	if err := p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		_ = p.cli.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true})
+		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("start runner: %w", err)
 	}
 	p.MarkRunner(slotIdx, spec.Name)
@@ -245,6 +251,7 @@ func (p *Pool) adoptContainer(id string, labels map[string]string, state string,
 	if slotIdx < 0 {
 		return o // no slot to mark: the scaler only stops and removes it
 	}
+	p.adoptCache(o, labels[LabelRepo])
 	owner := o.Lease().Owner
 	p.mu.Lock()
 	defer p.mu.Unlock()

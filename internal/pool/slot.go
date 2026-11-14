@@ -147,6 +147,9 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	p.mu.Unlock()
 
+	if b, _ := p.cacheBroker(); b != nil && old.ActionsCacheGB != cfg.ActionsCacheGB {
+		b.SetLimit(int64(cfg.ActionsCacheGB) << 30)
+	}
 	if old.RunnerImage != cfg.RunnerImage {
 		go func() {
 			if err := p.EnsureImage(context.Background(), cfg.RunnerImage, false); err != nil {
@@ -421,6 +424,7 @@ func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
 	if err != nil {
 		return err
 	}
+	id = externalsKey(id)
 	p.mu.Lock()
 	done := p.externals[i] == id
 	p.mu.Unlock()

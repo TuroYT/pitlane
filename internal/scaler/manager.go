@@ -747,7 +747,7 @@ func (t *target) startRunner(lease pool.Lease) error {
 			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.runnerID, "error", err)
 		}
 	}
-	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.encoded, TargetID: cfg.ID, Owner: cfg.Owner, Lease: lease})
+	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.encoded, TargetID: cfg.ID, Owner: cfg.Owner, Repo: cfg.Repo, Lease: lease})
 	if err != nil {
 		if jit.runnerID != 0 {
 			t.m.forgetRunner(jit.runnerID, client.removeRunner(context.Background(), jit.runnerID))

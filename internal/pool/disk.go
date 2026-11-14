@@ -122,6 +122,15 @@ func (p *Pool) reclaimDisk(ctx context.Context, minFree int64, ops diskOps) int6
 		}
 	}
 
+	// Actions cache entries, least recently used first: they cost one
+	// download each, less than a per-owner volume.
+	if b, _ := p.cacheBroker(); b != nil {
+		before := free
+		if b.Evict(minFree-free) > 0 && !measure("actions cache entries", before) {
+			return done()
+		}
+	}
+
 	// Volumes: no runner may be created while they are inspected and removed
 	// (StartRunner holds the read side), so "unused" stays true.
 	p.volMu.Lock()
