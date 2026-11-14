@@ -87,6 +87,10 @@ function copy(text: string) {
       <p class="muted small">
         In a workflow, put <code>runs-on: &lt;label&gt;</code>. Repository-level and organization-level labels both work.
       </p>
+      <p class="muted small">
+        <strong>Warm runners</strong>: each one keeps one slot reserved for that repository, so its jobs start instantly
+        (no runner start-up), but that slot cannot run jobs of other repositories.
+      </p>
       <div class="table-wrap">
         <table class="table">
           <thead>
@@ -94,7 +98,7 @@ function copy(text: string) {
               <th>Repository / organization</th>
               <th>Label</th>
               <th>Status</th>
-              <th title="Runners kept ready even when no job is queued: jobs start instantly">Warm runners</th>
+              <th title="Runners kept registered and idle even when no job is queued: jobs start instantly, but each warm runner keeps one slot reserved for this target">Warm runners</th>
               <th title="Maximum parallel jobs for this target">Max parallel</th>
               <th title="A job running longer is stopped and its slot cleaned. 0 = no limit.">Job limit (min)</th>
               <th title="Strict isolation: fresh caches and a wiped Docker daemon for every job. Recommended for public repositories (pull requests from forks).">Strict</th>
