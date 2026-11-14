@@ -25,7 +25,7 @@ const paths: Record<string, string> = {
   slot: '<rect x="2.25" y="3.25" width="11.5" height="9.5" rx="1.5"/><path d="M5 6.25h6M5 9.25h3.5"/>',
 }
 
-const props = withDefaults(defineProps<{ name: string; size?: number; label?: string }>(), { size: 16 })
+const props = withDefaults(defineProps<{ name: string; size?: number; label?: string }>(), { size: 16, label: undefined })
 const body = computed(() => paths[props.name] ?? '')
 const spin = computed(() => props.name === 'running')
 </script>

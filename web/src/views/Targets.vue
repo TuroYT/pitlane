@@ -173,7 +173,7 @@ function copy(text: string) {
         <h2>Add repositories</h2>
         <div class="filters">
           <input v-model="search" placeholder="Filter repositories…" />
-          <button class="ghost small" @click="loadInstalls" :disabled="loading">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+          <button class="ghost small" :disabled="loading" @click="loadInstalls">{{ loading ? 'Loading…' : 'Refresh' }}</button>
           <a v-if="installUrl" class="button small" :href="installUrl" target="_blank" rel="noopener">Install on another account ↗</a>
         </div>
       </div>

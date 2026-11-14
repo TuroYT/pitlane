@@ -106,8 +106,8 @@ onBeforeUnmount(() => ctrl?.abort())
       </div>
       <div class="filters">
         <span class="badge" :class="streaming ? 'busy' : 'muted'">{{ streaming ? 'live' : 'finished' }}</span>
-        <label class="inline"><input type="checkbox" v-model="timestamps" /> Timestamps</label>
-        <label class="inline"><input type="checkbox" v-model="follow" /> Follow</label>
+        <label class="inline"><input v-model="timestamps" type="checkbox" /> Timestamps</label>
+        <label class="inline"><input v-model="follow" type="checkbox" /> Follow</label>
       </div>
     </div>
     <p class="muted small">
