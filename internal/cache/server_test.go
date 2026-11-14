@@ -290,6 +290,11 @@ func TestTokens(t *testing.T) {
 	if s.Register("pitlane-a", Identity{Owner: "acme"}) != tok {
 		t.Fatal("token changed")
 	}
+	// The token is bound to the identity it was issued for.
+	if other := s.Register("pitlane-a", Identity{Owner: "evil"}); other == tok || get(tok) != http.StatusUnauthorized {
+		t.Fatal("token still valid after the runner was registered for another owner")
+	}
+	s.Register("pitlane-a", Identity{Owner: "acme"})
 	s.Revoke("pitlane-a")
 	if code := get(tok); code != http.StatusUnauthorized {
 		t.Fatalf("revoked token: %d", code)
@@ -333,6 +338,17 @@ func TestUploadChecks(t *testing.T) {
 	if code := c.save("big", "v", make([]byte, 101)); code != http.StatusBadRequest {
 		t.Fatalf("over the limit: %d", code)
 	}
+	if r := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(`{"key":"nosize","version":"v"}`)); r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("reservation without a size: %d", r.StatusCode)
+	}
+	if r := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(`{"key":"r1","version":"v","cacheSize":60}`)); r.StatusCode != http.StatusCreated {
+		t.Fatalf("reserve: %d", r.StatusCode)
+	}
+	if r := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(`{"key":"r2","version":"v","cacheSize":60}`)); r.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("reservations over the limit together: %d", r.StatusCode)
+	}
+	s.Revoke("pitlane-a")
+	c = newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
 	res := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(`{"key":"k","version":"v","cacheSize":4}`))
 	var out struct{ CacheID int64 }
 	_ = json.NewDecoder(res.Body).Decode(&out)

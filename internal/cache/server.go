@@ -34,6 +34,7 @@ const (
 	maxKeys     = 10
 	maxChunk    = 256 << 20 // largest PATCH body accepted (the client sends 32 MB)
 	uploadTTL   = 24 * time.Hour
+	maxPending  = 32 // unfinished uploads per runner
 	apiPrefix   = "_apis/artifactcache/"
 	contentJSON = "application/json"
 )
@@ -50,7 +51,7 @@ type Server struct {
 	pending   map[int64]*upload
 	nextID    int64
 	total     int64 // bytes of committed entries
-	limit     int64 // 0 = unlimited
+	limit     int64 // 0 = unlimited (uploads are still bounded by their reserved size)
 	hits      int64
 	misses    int64
 	saves     int64
@@ -62,7 +63,7 @@ type upload struct {
 	runner  string
 	f       *os.File
 	started time.Time
-	limit   int64 // largest size accepted
+	limit   int64 // reserved size: nothing is written beyond it
 }
 
 // Open opens (or creates) the cache in dir.
@@ -233,7 +234,8 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if in.Key == "" || len(in.Key) > maxKeyLen || strings.Contains(in.Key, ",") || in.Version == "" || len(in.Version) > maxKeyLen || in.CacheSize < 0 {
+	// The client always sends the archive size: it bounds the upload.
+	if in.Key == "" || len(in.Key) > maxKeyLen || strings.Contains(in.Key, ",") || in.Version == "" || len(in.Version) > maxKeyLen || in.CacheSize <= 0 {
 		writeErr(w, http.StatusBadRequest, "invalid key or version")
 		return
 	}
@@ -249,10 +251,22 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request, c call) {
 		return
 	}
 	now := time.Now()
+	var reserved int64
+	mine := 0
 	for id, u := range s.pending {
 		if now.Sub(u.started) > uploadTTL {
 			s.dropUploadLocked(id, u)
+			continue
 		}
+		reserved += u.limit
+		if u.runner == c.runner {
+			mine++
+		}
+	}
+	// Unfinished uploads together stay within the limit too.
+	if mine >= maxPending || (s.limit > 0 && reserved+in.CacheSize > s.limit) {
+		writeErr(w, http.StatusTooManyRequests, "too many cache uploads in progress")
+		return
 	}
 	same := func(e *entry) bool {
 		return e.NS == c.ns && e.Key == in.Key && e.Version == in.Version && e.Scope == scope
@@ -277,12 +291,8 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusInternalServerError, "cannot create the upload")
 		return
 	}
-	limit := s.limit
-	if in.CacheSize > 0 {
-		limit = in.CacheSize
-	}
 	s.pending[id] = &upload{entry: entry{ID: id, NS: c.ns, Key: in.Key, Version: in.Version, Scope: scope},
-		runner: c.runner, f: f, started: now, limit: limit}
+		runner: c.runner, f: f, started: now, limit: in.CacheSize}
 	writeJSON(w, http.StatusCreated, map[string]int64{"cacheId": id})
 }
 
@@ -342,7 +352,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if u.limit > 0 && end >= u.limit {
+	if end >= u.limit {
 		writeErr(w, http.StatusBadRequest, "chunk beyond the reserved size")
 		return
 	}

@@ -19,7 +19,8 @@ if [ -n "$PITLANE_CACHE_URL" ] && [ -n "$GITHUB_REPOSITORY" ]; then
   export ACTIONS_CACHE_URL="$PITLANE_CACHE_URL$GITHUB_REPOSITORY/"
   unset ACTIONS_CACHE_SERVICE_V2
 fi
-exec "$0.pitlane" "$@"
+self=$(readlink -f "$0" 2>/dev/null) || self=$0
+exec "$self.pitlane" "$@"
 `
 
 // ShimVersion changes whenever NodeShim does, so that slots refresh their

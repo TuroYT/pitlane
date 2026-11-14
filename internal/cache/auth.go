@@ -44,20 +44,24 @@ func loadKey(dir string) ([]byte, error) {
 	return b, nil
 }
 
-func (s *Server) sign(runner string) string {
+// sign binds a token to the runner and the identity it was registered with:
+// a runner name registered again with another identity gets another token.
+func (s *Server) sign(runner string, id Identity) string {
 	m := hmac.New(sha256.New, s.key)
-	m.Write([]byte("pitlane-actions-cache:" + runner))
+	m.Write([]byte("pitlane-actions-cache\x00" + runner + "\x00" + strings.ToLower(id.Owner) + "\x00" + strings.ToLower(id.Repo)))
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 // Register lets a runner use the cache and returns its token. Tokens are
-// derived from the runner name, so registering the same runner again (an
-// adopted runner after a restart) gives the token it already has.
+// derived from the runner name and identity (runner names are random and
+// used once), so registering an adopted runner again after a restart gives
+// the token it already has. A token is only valid while its runner is
+// registered: Revoke ends it with the job.
 func (s *Server) Register(runner string, id Identity) string {
 	s.mu.Lock()
 	s.runners[runner] = id
 	s.mu.Unlock()
-	return runner + "." + s.sign(runner)
+	return runner + "." + s.sign(runner, id)
 }
 
 // Revoke invalidates a runner's token and drops its unfinished uploads.
@@ -79,13 +83,13 @@ func (s *Server) identify(token string) (string, Identity, bool) {
 		return "", Identity{}, false
 	}
 	runner, mac := token[:i], token[i+1:]
-	if !hmac.Equal([]byte(mac), []byte(s.sign(runner))) {
-		return "", Identity{}, false
-	}
 	s.mu.Lock()
 	id, ok := s.runners[runner]
 	s.mu.Unlock()
-	return runner, id, ok
+	if !ok || !hmac.Equal([]byte(mac), []byte(s.sign(runner, id))) {
+		return "", Identity{}, false
+	}
+	return runner, id, true
 }
 
 // GitHub logins and repository names.
