@@ -5,10 +5,13 @@ on:
   pull_request:
 
 # Set the repository variable PITLANE_RUNNER (e.g. "pitlane") to dogfood
-# Pitlane; otherwise GitHub-hosted runners are used.
+# Pitlane; otherwise GitHub-hosted runners are used. Pull requests from forks
+# always run on GitHub-hosted runners: every Pitlane job controls a privileged
+# Docker daemon (see docs/security.md). A fork can still edit this file in its
+# pull request, so keep "Require approval for all external contributors" on.
 jobs:
   test:
-    runs-on: ${{ vars.PITLANE_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.PITLANE_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
