@@ -91,6 +91,7 @@ The checksum only proves that the binary is the one listed in its release. A fut
 | `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |
 | `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
 | `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |
+| `pitlane_job_memory_peak_bytes` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of the peak memory (runner + slot) of the measured jobs finished in the last 7 days (see [resource usage per job](how-it-works.md#resource-usage-per-job)) |
 | `pitlane_disk_free_bytes`, `pitlane_disk_total_bytes` | gauge | filesystem of `/var/lib/docker` (or the data directory) |
 
 Access to `/metrics`: when a **metrics token** is set (Settings → Access), only `Authorization: Bearer <token>` is accepted. Without a token, signed-in users and clients connecting from the loopback address can read it. Requests carrying `X-Forwarded-For`, `X-Real-IP` or `Forwarded` never count as loopback, so a reverse proxy on the same host does not open it to everyone. With `--insecure-no-auth`, `/metrics` is open like the rest of the UI unless a token is set.
