@@ -26,7 +26,7 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Warm runners | 1 for new repositories | Runners kept registered and idle, so jobs start in about a second. Each one holds a slot. Set `0` to free the slot when no job runs. Targets created before this default keep their value. |
 | Max parallel | number of slots | Upper bound for this target. |
 | Job limit (min) | 360 | A runner whose job runs longer is stopped (SIGTERM, so the job is reported as failed on GitHub at once, then SIGKILL after 30 s); its slot is cleaned and released as after any job. `0` = no limit. |
-| Strict | on for public repositories | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache), but nothing a job does (e.g. a pull request from a fork) can reach another job. |
+| Strict | on for public repositories | Fresh throwaway caches and a fully wiped slot daemon before and after every job. Slower (no warm cache). It keeps caches and slot state from leaking between jobs, but it is **not a sandbox**: a malicious job (e.g. a pull request from a fork) can still take over the host. See [Security](security.md#strict-mode). |
 
 ## Automatic maintenance
 
@@ -69,15 +69,16 @@ scrape_configs:
 | `PITLANE_BASE_URL` | `--base-url` | request host | URL you open in the browser. |
 | `PITLANE_LOG_LEVEL` | `--log-level` | `info` | |
 | `PITLANE_GITHUB_TOKEN` | | | Use a personal access token instead of a GitHub App (advanced, see below). |
-| `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Only behind your own authentication. |
+| `PITLANE_INSECURE_NO_AUTH` | `--insecure-no-auth` | `false` | Disables login. Only with `--listen 127.0.0.1:…` behind a reverse proxy that authenticates every request. |
 | `DOCKER_HOST` | | local socket | Standard Docker client variables are honored. |
 
 ### Personal access token mode
 
 If you cannot create a GitHub App, set `PITLANE_GITHUB_TOKEN` to a token with the
 `repo` scope (repositories) or `admin:org` scope (organizations). GitHub sign-in is
-then unavailable, so put Pitlane behind your own authentication and start it with
-`--insecure-no-auth`. Add targets manually in **Repositories**.
+then unavailable, so start it with `--insecure-no-auth --listen 127.0.0.1:8080`
+behind a reverse proxy on the same host that authenticates every request (never
+on a reachable address). Add targets manually in **Repositories**.
 
 ## Files
 
