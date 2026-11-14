@@ -22,6 +22,7 @@ export interface Target {
   maxRunners: number
   scaleSetName: string
   scaleSetId: number
+  strict: boolean
 }
 
 export interface RunnerState {

@@ -681,6 +681,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		MinRunners   *int    `json:"minRunners"`
 		MaxRunners   *int    `json:"maxRunners"`
 		ScaleSetName *string `json:"scaleSetName"`
+		Strict       *bool   `json:"strict"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -691,6 +692,9 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.MinRunners != nil {
 		t.MinRunners = max(0, *body.MinRunners)
+	}
+	if body.Strict != nil {
+		t.Strict = *body.Strict
 	}
 	if body.MaxRunners != nil {
 		t.MaxRunners = max(1, *body.MaxRunners)

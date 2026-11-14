@@ -30,10 +30,10 @@ const targets = computed(() => live.snap?.targets ?? [])
 const existing = computed(() => new Set(targets.value.map((t) => (t.kind === 'repo' ? `repo:${t.owner}/${t.repo}` : `org:${t.owner}`).toLowerCase())))
 const has = (key: string) => existing.value.has(key.toLowerCase())
 
-async function enable(kind: 'repo' | 'org', owner: string, repo: string, installationId: number) {
+async function enable(kind: 'repo' | 'org', owner: string, repo: string, installationId: number, strict = false) {
   error.value = ''
   try {
-    await post('/api/targets', { kind, owner, repo, installationId })
+    await post('/api/targets', { kind, owner, repo, installationId, strict })
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -96,13 +96,14 @@ function copy(text: string) {
               <th>Status</th>
               <th title="Runners kept ready even when no job is queued: jobs start instantly">Warm runners</th>
               <th title="Maximum parallel jobs for this target">Max parallel</th>
+              <th title="Strict isolation: fresh caches and a wiped Docker daemon for every job. Recommended for public repositories (pull requests from forks).">Strict</th>
               <th>Enabled</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!targets.length">
-              <td colspan="7" class="muted center">Nothing yet: enable a repository below.</td>
+              <td colspan="8" class="muted center">Nothing yet: enable a repository below.</td>
             </tr>
             <tr v-for="t in targets" :key="t.id">
               <td>
@@ -126,6 +127,12 @@ function copy(text: string) {
               <td>
                 <input type="number" class="num" min="1" max="64" :value="t.maxRunners"
                   @change="update(t, { maxRunners: +($event.target as HTMLInputElement).value })" />
+              </td>
+              <td>
+                <label class="switch">
+                  <input type="checkbox" :checked="t.strict" @change="update(t, { strict: ($event.target as HTMLInputElement).checked })" />
+                  <span />
+                </label>
               </td>
               <td>
                 <label class="switch">
@@ -167,7 +174,7 @@ function copy(text: string) {
             <span>{{ r.name }} <span v-if="r.private" class="muted small">private</span>
               <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners">public</span></span>
             <button class="small" :class="{ primary: !has(`repo:${r.fullName}`) }" :disabled="has(`repo:${r.fullName}`)"
-              @click="enable('repo', inst.account, r.name, inst.id)">
+              @click="enable('repo', inst.account, r.name, inst.id, !r.private)">
               {{ has(`repo:${r.fullName}`) ? 'Enabled' : 'Enable' }}
             </button>
           </li>

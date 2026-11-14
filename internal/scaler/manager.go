@@ -496,7 +496,7 @@ func (t *target) reconcile() {
 	// listener is never blocked and a slow start does not delay the others.
 	started := 0
 	for i := 0; i < want-have; i++ {
-		lease, ok := t.m.pool.Acquire(t.ctx, cfg.Owner, cfg.ID)
+		lease, ok := t.m.pool.Acquire(t.ctx, cfg.Owner, cfg.ID, cfg.Strict)
 		if !ok {
 			break
 		}
@@ -570,6 +570,7 @@ func (t *target) startRunner(lease pool.Lease) error {
 	client, ssID := t.client, t.scaleSetID
 	t.mu.Unlock()
 	name := "pitlane-" + randomSuffix()
+	lease.Runner = name
 	jit, err := client.GenerateJitRunnerConfig(t.ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name, WorkFolder: "_work"}, ssID)
 	if err != nil {
 		return fmt.Errorf("generate JIT config: %w", err)

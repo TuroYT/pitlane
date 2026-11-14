@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,6 +122,10 @@ type slot struct {
 // before its first job. Parentheses never appear in GitHub logins.
 const UnknownOwner = "(unknown)"
 
+// StrictOwner marks a slot running a strict-isolation job: it is wiped before
+// and after, and never trusted by anyone else.
+const StrictOwner = "(strict)"
+
 // persistedSlot is what survives a Pitlane restart. It lives in Pitlane's
 // data directory, which jobs cannot reach, so it can be trusted.
 type persistedSlot struct {
@@ -142,6 +147,8 @@ type Pool struct {
 	released  chan struct{}
 	restored  map[int]persistedSlot
 	binfmt    map[string]string // binfmt_misc entries registered by Pitlane (name -> content)
+	qemuWant  bool              // QEMU should be (re)registered as soon as no job runs
+	qemuBusy  bool              // registration in progress: no slot is handed out
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
@@ -225,7 +232,9 @@ func (p *Pool) Start(ctx context.Context) error {
 		p.cfg.RunnerImage = OfficialRunnerImage
 		p.mu.Unlock()
 	}
-	p.ensureQEMU(ctx)
+	p.mu.Lock()
+	p.qemuWant = !cfg.NoQEMU
+	p.mu.Unlock()
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
 	}
@@ -244,6 +253,7 @@ func (p *Pool) retryFailed(ctx context.Context) {
 		case <-t.C:
 		}
 		p.auditBinfmt(ctx)
+		p.maybeRegisterQEMU(ctx)
 		p.mu.Lock()
 		var failed, dirty []int
 		for i, s := range p.slots {
@@ -518,13 +528,65 @@ func readBinfmt() map[string]string {
 // trustedQEMU keeps only the handlers Pitlane itself registers: QEMU
 // emulators whose interpreter is the static QEMU binary installed by binfmt.
 func trustedQEMU(all map[string]string) map[string]string {
+	// ELF e_machine of the host, as it appears at the end of a binfmt magic:
+	// a handler matching native binaries would intercept every program.
+	native := map[string]string{"amd64": "3e00", "arm64": "b700", "386": "0300", "riscv64": "f300", "ppc64le": "1500", "s390x": "0016"}[runtime.GOARCH]
 	out := map[string]string{}
 	for name, def := range all {
-		if strings.HasPrefix(name, "qemu-") && strings.Contains(def, "interpreter /usr/bin/"+name+"\n") {
-			out[name] = def
+		if !strings.HasPrefix(name, "qemu-") || !strings.Contains(def, "interpreter /usr/bin/"+name+"\n") {
+			continue
 		}
+		magic := ""
+		for _, l := range strings.Split(def, "\n") {
+			if v, ok := strings.CutPrefix(l, "magic "); ok {
+				magic = v
+			}
+		}
+		if magic == "" || (native != "" && strings.HasSuffix(magic, native)) {
+			continue
+		}
+		out[name] = def
 	}
 	return out
+}
+
+// maybeRegisterQEMU registers the QEMU handlers when requested and no job
+// runs. Slots are not handed out meanwhile, so no job can race the snapshot
+// of what Pitlane registered.
+func (p *Pool) maybeRegisterQEMU(ctx context.Context) {
+	p.mu.Lock()
+	idle := true
+	for _, s := range p.slots {
+		if s.Status == "busy" || s.Status == "cleaning" {
+			idle = false
+		}
+	}
+	if !p.qemuWant || !idle || p.cfg.NoQEMU {
+		p.mu.Unlock()
+		return
+	}
+	p.qemuBusy, p.qemuWant = true, false
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.qemuBusy = false
+		p.mu.Unlock()
+		p.signal()
+	}()
+	// Runner containers may exist that the slot table does not know about yet
+	// (adopted after a restart): never register while any runner is alive.
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(filters.Arg("label", LabelRole+"=runner"))})
+	if err != nil || len(list) > 0 {
+		p.mu.Lock()
+		p.qemuWant = true
+		p.mu.Unlock()
+		return
+	}
+	// Remove whatever is there (nothing should be), then register.
+	for name := range readBinfmt() {
+		_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
+	}
+	p.ensureQEMU(ctx)
 }
 
 // auditBinfmt runs after every job. Slot daemons are privileged, so a job
@@ -558,9 +620,17 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 			tampered = true
 		}
 	}
-	if tampered && len(base) > 0 && !p.Config().NoQEMU {
-		p.log.Warn("QEMU handlers were modified by a job, registering them again")
-		p.ensureQEMU(ctx)
+	if tampered && len(base) > 0 {
+		// Fail closed: drop every handler now; they are registered again
+		// only once no job runs (registration must not race with jobs).
+		p.log.Warn("QEMU handlers were modified by a job: removed, re-registering when idle")
+		for name := range readBinfmt() {
+			_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
+		}
+		p.mu.Lock()
+		p.binfmt = nil
+		p.qemuWant = !p.cfg.NoQEMU
+		p.mu.Unlock()
 	}
 }
 
@@ -645,14 +715,23 @@ type Lease struct {
 	Slot     int
 	Owner    string
 	TargetID int64
-	wipe     bool // the slot last served another owner: Prepare wipes it
+	Strict   bool   // strict isolation: fresh caches, slot wiped before and after
+	Runner   string // set by the scaler once the runner name is known
+	wipe     bool   // the slot last served another owner: Prepare wipes it
 }
 
 // Acquire reserves a free slot, preferring one that already ran jobs for the
 // same target, then the same owner (warmest cache). It returns false when
 // every slot is busy.
-func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease, bool) {
+func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64, strict bool) (Lease, bool) {
+	if strict {
+		owner = StrictOwner
+	}
 	p.mu.Lock()
+	if p.qemuBusy {
+		p.mu.Unlock()
+		return Lease{}, false
+	}
 	var best *slot
 	score := -1
 	for _, s := range p.slots {
@@ -661,6 +740,10 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 		}
 		sc := 0
 		switch {
+		case strict && s.Owner == "":
+			sc = 3 // already clean: no wipe needed
+		case strict:
+			sc = 0
 		case s.TargetID == targetID:
 			sc = 3
 		case s.Owner == owner:
@@ -676,7 +759,7 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 		p.mu.Unlock()
 		return Lease{}, false
 	}
-	needWipe := p.cfg.CacheScope == "owner" && best.Owner != "" && best.Owner != owner
+	needWipe := (p.cfg.CacheScope == "owner" || strict || best.Owner == StrictOwner) && best.Owner != "" && (best.Owner != owner || strict)
 	best.Status, best.Since = "busy", time.Now().Unix()
 	if !needWipe && (best.Owner != owner || best.TargetID != targetID) {
 		best.Owner, best.TargetID = owner, targetID
@@ -684,7 +767,7 @@ func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64) (Lease
 	}
 	idx := best.Index
 	p.mu.Unlock()
-	return Lease{Slot: idx, Owner: owner, TargetID: targetID, wipe: needWipe}, true
+	return Lease{Slot: idx, Owner: owner, TargetID: targetID, Strict: strict, wipe: needWipe}, true
 }
 
 // ErrSlotRebuilding means Prepare failed to wipe the slot; it is being
@@ -722,7 +805,61 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 
 // Release cleans what the job left in the slot (containers, networks,
 // volumes, workspace) while keeping images and build cache, then frees it.
+// strictVolumes returns the throwaway cache volumes of a strict runner.
+func strictVolumes(runner string) (cache, tools string) {
+	return "pitlane-strict-" + runner + "-cache", "pitlane-strict-" + runner + "-tools"
+}
+
+// releaseStrict wipes everything a strict job could have touched. On any
+// failure the slot is rebuilt from scratch rather than reused.
+func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
+	p.setStatus(l.Slot, "cleaning", "")
+	script := "set -e; docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null; docker builder prune -af >/dev/null; find " + workDir + " -mindepth 1 -maxdepth 1 -exec rm -rf {} +; chown " + runnerUID + " " + workDir
+	_, code, err := p.exec(ctx, slotName(l.Slot), script)
+	if l.Runner != "" {
+		c, t := strictVolumes(l.Runner)
+		for _, v := range []string{c, t} {
+			if rerr := p.cli.VolumeRemove(ctx, v, true); rerr != nil && !errdefs.IsNotFound(rerr) && err == nil {
+				err = rerr
+			}
+			p.mu.Lock()
+			delete(p.chowned, v)
+			p.mu.Unlock()
+		}
+	}
+	p.auditBinfmt(ctx)
+	if err != nil || code != 0 {
+		p.log.Error("strict cleanup failed, rebuilding the slot", "slot", l.Slot, "code", code, "error", err)
+		p.mu.Lock()
+		if s, ok := p.slots[l.Slot]; ok {
+			s.dirty = true
+		}
+		p.mu.Unlock()
+		p.setStatus(l.Slot, "starting", "")
+		go p.rebuildSlot(context.Background(), l.Slot)
+		return
+	}
+	p.mu.Lock()
+	if s, ok := p.slots[l.Slot]; ok {
+		s.Owner, s.TargetID = "", 0
+	}
+	delete(p.externals, l.Slot) // the privileged job could have altered it
+	p.saveLocked()
+	retire := p.slots[l.Slot] != nil && p.slots[l.Slot].retire
+	p.mu.Unlock()
+	if retire {
+		p.removeSlot(ctx, l.Slot)
+		p.signal()
+		return
+	}
+	p.setStatus(l.Slot, "ready", "")
+}
+
 func (p *Pool) Release(ctx context.Context, l Lease) {
+	if l.Strict {
+		p.releaseStrict(ctx, l)
+		return
+	}
 	p.setStatus(l.Slot, "cleaning", "")
 	cfg := p.Config()
 	script := fmt.Sprintf(`docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1
@@ -881,6 +1018,10 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 	cfg := p.Config()
 	cacheVol := cacheVolume(cfg.CacheScope, spec.Owner)
 	toolVol := strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
+	if spec.Lease.Strict {
+		// Throwaway caches, removed when the job ends.
+		cacheVol, toolVol = strictVolumes(spec.Name)
+	}
 	for _, v := range []string{cacheVol, toolVol} {
 		if err := p.ensureVolume(ctx, v); err != nil {
 			return "", err

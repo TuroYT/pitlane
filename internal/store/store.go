@@ -62,6 +62,7 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX jobs_queued ON jobs(queued_at DESC)`,
 	`CREATE TABLE sessions (token TEXT PRIMARY KEY, login TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
+	`ALTER TABLE targets ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -218,6 +219,9 @@ type Target struct {
 	MaxRunners     int    `json:"maxRunners"`
 	ScaleSetName   string `json:"scaleSetName"`
 	ScaleSetID     int    `json:"scaleSetId"`
+	// Strict isolation: no cache shared with other jobs, slot wiped before
+	// and after each job. Default for public repositories.
+	Strict bool `json:"strict"`
 }
 
 // FullName returns "owner/repo" or "owner".
@@ -231,13 +235,13 @@ func (t Target) FullName() string {
 // URL returns the GitHub URL the scale set is registered against.
 func (t Target) URL() string { return "https://github.com/" + t.FullName() }
 
-const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id`
+const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict`
 
 func scanTarget(sc interface{ Scan(...any) error }) (Target, error) {
 	var t Target
-	var enabled int
-	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID)
-	t.Enabled = enabled == 1
+	var enabled, strict int
+	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict)
+	t.Enabled, t.Strict = enabled == 1, strict == 1
 	return t, err
 }
 
@@ -272,9 +276,9 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 	if t.MaxRunners <= 0 {
 		t.MaxRunners = 4
 	}
-	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), time.Now().Unix())
 	if err != nil {
 		return t, err
 	}
@@ -284,8 +288,8 @@ func (s *Store) CreateTarget(t Target) (Target, error) {
 
 // UpdateTarget saves the mutable fields of a target.
 func (s *Store) UpdateTarget(t Target) error {
-	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ? WHERE id = ?`,
-		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, t.ID)
+	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?, strict = ? WHERE id = ?`,
+		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, boolInt(t.Strict), t.ID)
 	return err
 }
 
