@@ -136,15 +136,15 @@ func sacrifice(s *slot, keeps int) (tier int, lastUsed int64) {
 //     index.
 //
 // With slots reserved for strict jobs (StrictSlots), non-strict jobs never
-// get them, and strict jobs get them first, then overflow only to a slot
-// with no cache to lose (empty, unknown owner, left by a strict job): they
-// never wipe a warm slot outside the reserved ones and wait instead
-// (WaitStrictSlot).
+// get them, and strict jobs get them first, then overflow to a slot with no
+// cache to lose (empty, unknown owner, left by a strict job), then to a warm
+// slot whose owner keeps another warm one. They never wipe an owner's last
+// warm slot outside the reserved ones and wait instead (WaitStrictSlot):
+// a reserved slot frees up when its strict job ends.
 //
-// Without reserved slots, strict jobs wait (WaitStrictSlot) rather than wipe
-// a warm slot while a slot is being rebuilt after a strict job, for at most
-// strictWait. It returns the reason when no slot can be handed out. Callers
-// hold p.mu.
+// Strict jobs also wait (WaitStrictSlot) rather than wipe a warm slot while
+// a slot is being rebuilt after a strict job, for at most strictWait. It
+// returns the reason when no slot can be handed out. Callers hold p.mu.
 func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
 	owner, targetID, strict := r.Owner, r.TargetID, r.Strict
 	reserved := p.reservedLocked()
@@ -160,10 +160,6 @@ func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
 		if res && !strict {
 			continue
 		}
-		if strict && len(reserved) > 0 && !res && s.Owner != "" && !worthless(s.Owner) {
-			skipped = true
-			continue
-		}
 		if !p.needsWipe(s, owner, strict) {
 			a := affinity(s, owner, targetID, strict, res)
 			if clean == nil || a < bestAff || (a == bestAff && warmer(s, clean, a, r.Predicted)) {
@@ -172,7 +168,14 @@ func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
 			continue
 		}
 		keeps := p.othersWarmLocked(s)
+		if strict && len(reserved) > 0 && !res && !worthless(s.Owner) && keeps == 0 {
+			skipped = true // the owner's last warm cache: wait for a reserved slot
+			continue
+		}
 		tier, used := sacrifice(s, keeps)
+		if strict && res {
+			tier = -1 // a strict job wipes its reserved slot first
+		}
 		if dirty == nil || tier < bestTier || (tier == bestTier && (used < bestUsed || (used == bestUsed && s.Index < dirty.Index))) {
 			dirty, bestTier, bestUsed, bestKeeps = s, tier, used, keeps
 		}
@@ -185,7 +188,7 @@ func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
 	case dirty == nil:
 		return choice{}, WaitSlot
 	}
-	if strict && len(reserved) == 0 && !worthless(dirty.Owner) && p.strictCleaningLocked() {
+	if strict && !worthless(dirty.Owner) && p.strictCleaningLocked() {
 		now := p.clock()
 		if p.strictWaitSince.IsZero() {
 			p.strictWaitSince = now

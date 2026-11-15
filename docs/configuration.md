@@ -11,7 +11,7 @@ Who can sign in is set in **Users** (see [Users and roles](#users-and-roles)).
 | Memory limit per job | 0 (unlimited) | Hard limit for the runner and its slot daemon. |
 | Start a job only when its memory fits | on | Memory admission: a job waits while the predicted memory of the running jobs plus its own exceeds the host's memory minus the reserve; a job bigger than that runs alone. See [Scheduling](how-it-works.md#scheduling). |
 | Memory reserve (MB) | 2048 | Kept for the system, Docker, Pitlane and the page cache; at most half the host's memory. |
-| Reserved slots for strict jobs | automatic: 1 while a strict target is enabled, else 0 | Slots only strict jobs use (0 to slots − 1). Strict jobs overflow only to empty slots, so they never wipe a private repository's warm cache, but they may queue. 0 restores the previous behaviour. See [Slots reserved for strict jobs](how-it-works.md#slots-reserved-for-strict-jobs). |
+| Reserved slots for strict jobs | automatic: 1 while a strict target is enabled, else 0 | Slots only strict jobs use (0 to slots − 1). Strict jobs overflow to empty slots, then to a warm slot whose owner keeps another one: they never wipe an owner's last warm cache, and queue instead. 0 restores the previous behaviour. See [Slots reserved for strict jobs](how-it-works.md#slots-reserved-for-strict-jobs). |
 | CPU weight per job | 0 (Docker default) | `cpu-shares`. It only matters when the host is saturated; a lone job uses every core. |
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`, pinned by digest) used by every slot. |
