@@ -9,6 +9,9 @@ Who can sign in is set in **Users** (see [Users and roles](#users-and-roles)).
 | --- | --- | --- |
 | Parallel jobs (slots) | half the CPU cores (max 8) | One warm Docker daemon per slot. Reducing it retires idle slots first. |
 | Memory limit per job | 0 (unlimited) | Hard limit for the runner and its slot daemon. |
+| Start a job only when its memory fits | on | Memory admission: a job waits while the predicted memory of the running jobs plus its own exceeds the host's memory minus the reserve; a job bigger than that runs alone. See [Scheduling](how-it-works.md#scheduling). |
+| Memory reserve (MB) | 2048 | Kept for the system, Docker, Pitlane and the page cache; at most half the host's memory. |
+| Reserved slots for strict jobs | automatic: 1 while a strict target is enabled, else 0 | Slots only strict jobs use (0 to slots − 1). Strict jobs overflow only to empty slots, so they never wipe a private repository's warm cache, but they may queue. 0 restores the previous behaviour. See [Slots reserved for strict jobs](how-it-works.md#slots-reserved-for-strict-jobs). |
 | CPU weight per job | 0 (Docker default) | `cpu-shares`. It only matters when the host is saturated; a lone job uses every core. |
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`, pinned by digest) used by every slot. |
@@ -155,7 +158,11 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | `pitlane_slots` | gauge | `status` (starting, ready, busy, cleaning, error, retiring) |
 | `pitlane_slot_wipes_total` | counter | `reason` (`owner_change`, `strict`, `unknown_owner`): slots rebuilt empty before a job since start |
 | `pitlane_runners` | gauge | `target`, `label`, `state` (busy, idle) |
-| `pitlane_jobs_waiting` | gauge | `target`, `label`: jobs assigned by GitHub waiting for a free slot |
+| `pitlane_jobs_waiting` | gauge | `target`, `label`, `reason` (`slot`, `memory`, `strict_slot`): jobs assigned by GitHub that wait, by why (a target waits for one reason at a time, the others are 0) |
+| `pitlane_memory_budget_bytes` | gauge | memory jobs may use: host memory minus the reserve (0 when unknown) |
+| `pitlane_memory_predicted_bytes` | gauge | memory reserved for the running jobs by prediction |
+| `pitlane_memory_committed_bytes` | gauge | what the admission counts: per running job, the larger of its prediction and its current use |
+| `pitlane_memory_admission_enabled` | gauge | 1 when memory admission is on |
 | `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |
 | `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
 | `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |
