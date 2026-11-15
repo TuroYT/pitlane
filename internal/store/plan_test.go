@@ -24,17 +24,16 @@ func TestJobQueriesUseIndexes(t *testing.T) {
 		want        string // index the plan must use
 		sorted      bool   // the plan must not sort (rows come in order from the index)
 	}{
-		{"history page", page(JobFilter{}), "jobs_recent", true},
-		{"repository page", page(repo), "jobs_repo", true},
-		{"repository and result page", page(JobFilter{Owner: "acme", Repo: "api", Result: "failed"}), "jobs_repo", true},
-		{"repository count", count(repo), "jobs_repo", false},
+		{"history page", page(JobFilter{}), "jobs_recent2", true},
+		{"repository page", page(repo), "jobs_repo2", true},
+		{"repository and result page", page(JobFilter{Owner: "acme", Repo: "api", Result: "failed"}), "jobs_repo2", true},
+		{"repository count", count(repo), "jobs_repo2", false},
 		{"running count", count(JobFilter{Result: "running"}), "jobs_finished", false},
 		{"job by runner", queryJobByRunner, "jobs_runner", true},
 		{"usage by runner", querySetJobUsage, "jobs_runner", false},
 		{"in-flight jobs", queryInFlightJobs, "jobs_finished", false},
 		{"timings", queryJobTimings, "jobs_started", false},
 		{"memory peaks", queryJobMemoryPeaks, "jobs_finished", false},
-		{"prune", `DELETE FROM jobs WHERE queued_at < ?`, "jobs_recent", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

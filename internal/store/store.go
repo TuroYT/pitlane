@@ -152,6 +152,12 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN slot_anon_peak INTEGER`,
 	// Memory history of a job, for the admission's prediction.
 	`CREATE INDEX jobs_by_name ON jobs(owner, repo, workflow_ref, job_name, id DESC)`,
+	// The history is ordered by the queue time, or by the start when GitHub
+	// sent none (queued_at = 0), so those jobs do not sink to the bottom.
+	`CREATE INDEX jobs_recent2 ON jobs(COALESCE(NULLIF(queued_at, 0), started_at) DESC, id DESC)`,
+	`CREATE INDEX jobs_repo2 ON jobs(owner COLLATE NOCASE, repo COLLATE NOCASE, COALESCE(NULLIF(queued_at, 0), started_at) DESC, id DESC)`,
+	`DROP INDEX jobs_recent`,
+	`DROP INDEX jobs_repo`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -839,7 +845,7 @@ func (f JobFilter) queries() (count, page string, args []any) {
 	where, args := f.where()
 	// where is built from constant fragments only; values are bound parameters.
 	return `SELECT count(*) FROM jobs` + where,
-		jobColumns + where + ` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, //nolint:gosec // G202: constant fragments, bound values
+		jobColumns + where + ` ORDER BY COALESCE(NULLIF(queued_at, 0), started_at) DESC, id DESC LIMIT ? OFFSET ?`, //nolint:gosec // G202: constant fragments, bound values
 		args
 }
 

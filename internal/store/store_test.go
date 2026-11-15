@@ -574,3 +574,20 @@ func TestUpsertJobKeepsEarliestQueueTime(t *testing.T) {
 		t.Fatalf("queued_at %+v, want the earliest known (90)", jobs)
 	}
 }
+
+// A job without a queue time has a run time but no wait, and is listed by
+// its start rather than sinking below older jobs.
+func TestJobWithoutQueueTime(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	_ = s.UpsertJob(Job{JobID: "old", Slot: -1, QueuedAt: 1000, StartedAt: 1010, FinishedAt: 1100, Result: "succeeded"})
+	_ = s.UpsertJob(Job{JobID: "unknown", Slot: -1, StartedAt: 2000, FinishedAt: 2050, Result: "succeeded"})
+	d, w, err := s.JobTimings(ctx, 500)
+	if err != nil || len(d) != 2 || len(w) != 1 || w[0] != 10 {
+		t.Fatalf("durations %v waits %v err %v", d, w, err)
+	}
+	jobs, _, err := s.JobsPage(ctx, JobFilter{}, 10, 0)
+	if err != nil || len(jobs) != 2 || jobs[0].JobID != "unknown" {
+		t.Fatalf("order %+v err %v", jobs, err)
+	}
+}
