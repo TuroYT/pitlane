@@ -26,7 +26,7 @@ const (
 	runnerRepo = "ghcr.io/turoyt/pitlane-runner"
 	// Runner image tag used by builds without a release version (dev,
 	// `git describe` output): the latest release.
-	devRunnerTag = "v1.1.0"
+	devRunnerTag = "v1.1.1"
 
 	// Former defaults: settings saved by older versions hold them verbatim.
 	legacyRunnerImage = runnerRepo + ":latest"
