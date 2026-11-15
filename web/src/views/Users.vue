@@ -65,23 +65,34 @@ function day(unix: number) {
 
 <template>
   <div class="stack-lg">
-    <h1>Users</h1>
-    <p v-if="error" class="alert error">{{ error }}</p>
-    <ul class="muted small roles">
-      <li v-for="r in roles" :key="r"><strong>{{ r }}</strong>: {{ roleHelp[r] }}.</li>
-    </ul>
+    <div class="page-head">
+      <h1>Users</h1>
+      <p class="muted">Who can sign in with GitHub, and with which role.</p>
+    </div>
+    <dl class="roles box">
+      <div v-for="r in roles" :key="r" class="box-row">
+        <dt><span class="badge muted">{{ r }}</span></dt>
+        <dd class="muted">{{ roleHelp[r] }}.</dd>
+      </div>
+    </dl>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
     <section>
-      <h2>GitHub users</h2>
-      <p class="muted small">
-        A user listed here gets this role, whatever the organization rules below say. There is always at least one admin.
-      </p>
+      <div class="section-head">
+        <div>
+          <h2>GitHub users</h2>
+          <p class="muted small">
+            A user listed here gets this role, whatever the organization rules below say. There is always at least one admin.
+          </p>
+        </div>
+      </div>
       <div class="table-wrap">
         <table class="table">
           <thead>
-            <tr><th>Login</th><th>Role</th><th>Added</th><th></th></tr>
+            <tr><th>Login</th><th>Role</th><th>Added</th><th><span class="sr-only">Actions</span></th></tr>
           </thead>
           <tbody>
+            <tr v-if="!access && busy"><td colspan="4" class="empty" role="status">Loading users…</td></tr>
             <tr v-for="u in access?.users ?? []" :key="u.login">
               <td>
                 <a :href="`https://github.com/${u.login}`" target="_blank" rel="noopener">@{{ u.login }}</a>
@@ -94,64 +105,76 @@ function day(unix: number) {
                 </select>
               </td>
               <td class="muted small">{{ day(u.createdAt) }}<template v-if="u.createdBy"> by {{ u.createdBy }}</template></td>
-              <td class="actions"><button class="ghost small danger" :disabled="busy" @click="removeUser(u.login)">Remove</button></td>
+              <td class="actions">
+                <button type="button" class="ghost small danger" :disabled="busy" :aria-label="`Remove @${u.login}`" @click="removeUser(u.login)">Remove</button>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
       <form class="filters add" @submit.prevent="addUser">
-        <input v-model="newUser.login" placeholder="GitHub login" aria-label="GitHub login" required />
+        <input v-model="newUser.login" placeholder="GitHub login" aria-label="GitHub login" autocomplete="off" required />
         <select v-model="newUser.role" aria-label="Role">
           <option v-for="r in roles" :key="r" :value="r">{{ r }}</option>
         </select>
-        <button class="primary" :disabled="busy">Add user</button>
+        <button type="submit" class="primary" :disabled="busy">Add user</button>
       </form>
     </section>
 
     <section>
-      <h2>Organization and team rules</h2>
-      <p class="muted small">
-        Anyone else who signs in gets the highest role of the rules they match, checked on GitHub at sign-in.
-        Public organization membership always works; private membership and teams need the GitHub App's
-        <em>Members</em> (read-only) organization permission, on an App installed in that organization.
-        Membership changes on GitHub apply at the next sign-in.
-      </p>
+      <div class="section-head">
+        <div>
+          <h2>Organization and team rules</h2>
+          <p class="muted small">
+            Anyone else who signs in gets the highest role of the rules they match, checked on GitHub at sign-in.
+            Public organization membership always works; private membership and teams need the GitHub App's
+            <em>Members</em> (read-only) organization permission, on an App installed in that organization.
+            Membership changes on GitHub apply at the next sign-in.
+          </p>
+        </div>
+      </div>
       <div class="table-wrap">
         <table class="table">
           <thead>
-            <tr><th>Members of</th><th>Role</th><th>Added</th><th></th></tr>
+            <tr><th>Members of</th><th>Role</th><th>Added</th><th><span class="sr-only">Actions</span></th></tr>
           </thead>
           <tbody>
-            <tr v-if="!access?.rules.length">
-              <td colspan="4" class="muted center">No rule: only the users above can sign in.</td>
+            <tr v-if="access && !access.rules.length">
+              <td colspan="4" class="empty">No rule yet: only the users above can sign in.</td>
             </tr>
             <tr v-for="r in access?.rules ?? []" :key="r.id">
               <td>
                 <strong>{{ r.org }}</strong><template v-if="r.team"> / team <strong>{{ r.team }}</strong></template>
                 <span v-else class="muted small"> (whole organization)</span>
               </td>
-              <td>{{ r.role }}</td>
+              <td><span class="badge muted">{{ r.role }}</span></td>
               <td class="muted small">{{ day(r.createdAt) }}<template v-if="r.createdBy"> by {{ r.createdBy }}</template></td>
               <td class="actions">
-                <button class="ghost small danger" :disabled="busy" @click="removeRule(r.id, r.team ? `${r.org}/${r.team}` : r.org)">Remove</button>
+                <button type="button" class="ghost small danger" :disabled="busy" :aria-label="`Remove the rule for ${r.team ? `${r.org}/${r.team}` : r.org}`" @click="removeRule(r.id, r.team ? `${r.org}/${r.team}` : r.org)">Remove</button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
       <form class="filters add" @submit.prevent="addRule">
-        <input v-model="newRule.org" placeholder="organization" aria-label="Organization" required />
-        <input v-model="newRule.team" placeholder="team slug (optional)" aria-label="Team slug" />
+        <input v-model="newRule.org" placeholder="Organization" aria-label="Organization" autocomplete="off" required />
+        <input v-model="newRule.team" placeholder="Team slug (optional)" aria-label="Team slug (optional)" autocomplete="off" />
         <select v-model="newRule.role" aria-label="Role">
           <option v-for="r in roles" :key="r" :value="r">{{ r }}</option>
         </select>
-        <button class="primary" :disabled="busy">Add rule</button>
+        <button type="submit" class="primary" :disabled="busy">Add rule</button>
       </form>
     </section>
   </div>
 </template>
 
 <style scoped>
-.roles { margin: 0; padding-left: 18px; }
+.roles { margin: 0; }
+.roles .box-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+.roles dt, .roles dd { margin: 0; }
 .add { margin-top: 12px; }
+.add input:not([type='checkbox']), .add select { width: auto; min-width: 160px; }
+@media (max-width: 700px) {
+  .add input:not([type='checkbox']), .add select { width: 100%; }
+}
 </style>

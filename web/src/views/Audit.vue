@@ -41,26 +41,32 @@ function when(unix: number) {
 
 <template>
   <div class="stack-lg">
-    <div class="row-between">
-      <h1>Audit log</h1>
-      <button type="button" class="small" :disabled="loading" @click="load">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+    <div class="page-head">
+      <div class="row-between">
+        <h1>Audit log</h1>
+        <button type="button" class="small" :disabled="loading" @click="load">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+      </div>
+      <p class="muted">Changes to targets, settings, users, rules and updates, latest first. Kept as long as the job history.</p>
     </div>
-    <p class="muted small">Changes to targets, settings, users, rules and updates, latest first. Kept as long as the job history.</p>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
+    <div class="stack">
     <div class="table-wrap">
       <table class="table">
         <thead>
           <tr><th>When</th><th>Who</th><th>Action</th><th>On</th><th>Details</th></tr>
         </thead>
         <tbody>
-          <tr v-if="!entries.length && !loading">
-            <td colspan="5" class="muted center">Nothing recorded yet.</td>
+          <tr v-if="!entries.length && loading">
+            <td colspan="5" class="empty" role="status">Loading…</td>
+          </tr>
+          <tr v-else-if="!entries.length && !error">
+            <td colspan="5" class="empty">No change recorded yet.</td>
           </tr>
           <tr v-for="e in entries" :key="e.id">
             <td class="small nowrap">{{ when(e.at) }}</td>
-            <td>@{{ e.actor }}</td>
+            <td class="nowrap">@{{ e.actor }}</td>
             <td><code>{{ e.action }}</code></td>
-            <td>{{ e.subject }}</td>
+            <td class="nowrap">{{ e.subject }}</td>
             <td class="small detail">{{ e.detail }}</td>
           </tr>
         </tbody>
@@ -70,14 +76,14 @@ function when(unix: number) {
       <span class="muted small" aria-live="polite">{{ from }}–{{ to }} of {{ total.toLocaleString() }}</span>
       <div class="filters">
         <button type="button" class="small" :disabled="page <= 1 || loading" @click="go(page - 1)">Newer</button>
-        <span class="small">Page {{ page }} / {{ pages }}</span>
+        <span class="small num">Page {{ page }} of {{ pages }}</span>
         <button type="button" class="small" :disabled="page >= pages || loading" @click="go(page + 1)">Older</button>
       </div>
     </nav>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.nowrap { white-space: nowrap; }
-.detail { word-break: break-word; }
+.detail { min-width: 220px; overflow-wrap: anywhere; }
 </style>

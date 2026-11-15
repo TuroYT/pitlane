@@ -342,6 +342,7 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .table td.right, .table th.right { text-align: right; }
 .table td.empty { padding: 24px 16px; text-align: center; color: var(--muted); }
 .table select { width: auto; min-width: 120px; }
+.table code { white-space: nowrap; overflow-wrap: normal; }
 
 /* ------------------------------------------------------------ jobs */
 .job-title { font-weight: 600; color: var(--text); }
