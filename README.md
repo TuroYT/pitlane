@@ -139,8 +139,9 @@ Read it on **[turoyt.github.io/pitlane](https://turoyt.github.io/pitlane/)**, or
 
 ## Status
 
-Pitlane is young (v0.1). It is used in production by its author, but expect rough
-edges. It provides Linux runners only. Issues and pull requests are welcome.
+Pitlane 1.0 is the first stable release. Its author runs it in production for six
+repositories and one organization, on an unprivileged Proxmox LXC container.
+It provides Linux runners only (amd64 and arm64). Issues and pull requests are welcome.
 
 ## License
 
