@@ -7,6 +7,16 @@
 - `waiting for memory`: a slot is free but the job's predicted memory does not fit next to the running jobs (see [Scheduling](how-it-works.md#scheduling)). It starts when one of them finishes. Add RAM, lower the **Memory reserve**, or turn memory admission off if the predictions are too high (the dashboard shows each slot's prediction next to its real use).
 - `waiting for a strict slot`: a strict job (public repository) waits for a slot reserved for strict jobs, an empty one, or a warm slot whose owner keeps another one, instead of wiping an owner's last warm cache. Raise **Reserved slots for strict jobs**, or set it to 0 to let strict jobs take any slot.
 
+**Jobs show no CPU or memory usage.**
+Pitlane reads usage from cgroup v2, so some hosts have no data. Check with
+`stat -fc %T /sys/fs/cgroup`: `cgroup2fs` is v2, `tmpfs` is v1. Nothing is recorded on:
+- a host on cgroup v1;
+- Docker Desktop or rootless Docker;
+- Pitlane running in a container that does not see the host's `/sys/fs/cgroup`;
+- runners adopted after a Pitlane restart.
+
+Jobs still run normally. See [Resource usage per job](how-it-works.md#resource-usage-per-job).
+
 **A slot is in `error`.**
 Usually privileged containers are not allowed. On Proxmox, the LXC needs
 `nesting=1,keyctl=1`. Check `journalctl -u pitlane` and `docker logs pitlane-slot-0`.
