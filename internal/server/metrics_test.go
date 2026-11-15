@@ -85,6 +85,7 @@ func TestWriteMetrics(t *testing.T) {
 		MemPeaks:  []float64{1 << 30, 2 << 30, 3 << 30},
 		DiskFree:  5 << 30, DiskTotal: 100 << 30, DiskOK: true,
 		ActionsCache: &cache.Stats{Entries: 3, Bytes: 1024, Hits: 5, Misses: 2, Saves: 3},
+		SlotWipes:    map[string]int64{pool.WipeOwnerChange: 4, pool.WipeStrict: 2},
 	})
 	out := b.String()
 	for _, want := range []string{
@@ -92,6 +93,10 @@ func TestWriteMetrics(t *testing.T) {
 		"pitlane_docker_up 1",
 		`pitlane_slots{status="busy"} 2`,
 		`pitlane_slots{status="error"} 0`,
+		"# TYPE pitlane_slot_wipes_total counter",
+		`pitlane_slot_wipes_total{reason="owner_change"} 4`,
+		`pitlane_slot_wipes_total{reason="strict"} 2`,
+		`pitlane_slot_wipes_total{reason="unknown_owner"} 0`,
 		`pitlane_runners{target="acme/we\"ird",label="pitlane",state="busy"} 2`,
 		`pitlane_runners{target="acme/we\"ird",label="pitlane",state="idle"} 1`,
 		`pitlane_jobs_waiting{target="acme/we\"ird",label="pitlane"} 2`,

@@ -153,6 +153,7 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | `pitlane_info` | gauge | `version` |
 | `pitlane_docker_up` | gauge | |
 | `pitlane_slots` | gauge | `status` (starting, ready, busy, cleaning, error, retiring) |
+| `pitlane_slot_wipes_total` | counter | `reason` (`owner_change`, `strict`, `unknown_owner`): slots rebuilt empty before a job since start |
 | `pitlane_runners` | gauge | `target`, `label`, `state` (busy, idle) |
 | `pitlane_jobs_waiting` | gauge | `target`, `label`: jobs assigned by GitHub waiting for a free slot |
 | `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |

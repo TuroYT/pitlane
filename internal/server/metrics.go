@@ -103,6 +103,8 @@ type metricsData struct {
 	DiskOK    bool
 	// ActionsCache is nil when the actions cache server is not running.
 	ActionsCache *cache.Stats
+	// SlotWipes counts slot rebuilds before a job since start, by reason.
+	SlotWipes map[string]int64
 }
 
 const metricsWindow = 24 * time.Hour
@@ -115,7 +117,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots()}
+	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes()}
 	err := s.pool.Ping(ctx)
 	d.DockerUp = err == nil
 	if s.mgr != nil {
@@ -233,6 +235,11 @@ func writeMetrics(w io.Writer, d metricsData) {
 	sort.Strings(statuses)
 	for _, st := range statuses {
 		p.sample("pitlane_slots", []string{"status", st}, float64(counts[st]))
+	}
+
+	p.head("pitlane_slot_wipes_total", "counter", "Slots rebuilt empty before a job since start (lost warm cache), by reason.")
+	for _, r := range pool.WipeReasons {
+		p.sample("pitlane_slot_wipes_total", []string{"reason", r}, float64(d.SlotWipes[r]))
 	}
 
 	p.head("pitlane_runners", "gauge", "Runners per target and state.")
