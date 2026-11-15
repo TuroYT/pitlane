@@ -1,0 +1,98 @@
+name: Bug report
+description: Pitlane does something wrong, crashes, or a job fails only on Pitlane.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A security problem goes in a [private advisory](https://github.com/TuroYT/pitlane/security/advisories/new), not here.
+        Before you file, check [Troubleshooting](https://turoyt.github.io/pitlane/troubleshooting) and the open issues.
+  - type: input
+    id: version
+    attributes:
+      label: Pitlane version
+      description: Shown at the bottom of the UI, or `pitlane version`.
+      placeholder: v1.0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - install.sh (systemd)
+        - Docker Compose
+        - Proxmox LXC script
+        - Built from source
+        - Other (say below)
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Where Pitlane runs
+      options:
+        - LXC container (Proxmox or other)
+        - Virtual machine
+        - Bare metal
+        - Other (say below)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Host OS and kernel
+      description: For example the output of `. /etc/os-release; echo $PRETTY_NAME; uname -r`.
+      placeholder: Debian GNU/Linux 13 (trixie), 6.12.48
+    validations:
+      required: true
+  - type: input
+    id: docker
+    attributes:
+      label: Docker version
+      description: Output of `docker version --format '{{.Server.Version}}'`.
+      placeholder: "28.5.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: cgroup
+    attributes:
+      label: cgroup version
+      description: "`stat -fc %T /sys/fs/cgroup` prints `cgroup2fs` for v2 and `tmpfs` for v1."
+      options:
+        - v2
+        - v1
+        - Don't know
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you saw instead. Link the failing workflow run if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest workflow or set of actions that shows the problem.
+      placeholder: |
+        1. Enable repository acme/app with strict mode off
+        2. Run a job with `services: postgres`
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `journalctl -u pitlane --since "1 hour ago"` (systemd) or `docker compose logs pitlane` (Compose), around the time of the problem. `PITLANE_LOG_LEVEL=debug` gives more detail.
+        **Redact before pasting**: tokens, the setup token, webhook and client secrets, private keys, and any hostname or repository name you want to keep private.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Settings you changed (number of slots, cache scope, runner image), firewall rules, screenshots.

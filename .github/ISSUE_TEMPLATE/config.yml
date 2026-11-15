@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or help with a setup
+    url: https://github.com/TuroYT/pitlane/discussions
+    about: Ask in Discussions. Please include your Pitlane version and install method.
+  - name: Documentation
+    url: https://turoyt.github.io/pitlane/
+    about: Getting started, configuration, security and troubleshooting.
+  - name: Report a security vulnerability
+    url: https://github.com/TuroYT/pitlane/security/policy
+    about: Please report vulnerabilities privately, not in a public issue.

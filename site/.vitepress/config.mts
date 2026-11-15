@@ -95,7 +95,7 @@ export default defineConfig({
     logo: '/logo.svg',
     siteTitle: 'pitlane',
     nav: [
-      { text: 'Guide', link: '/getting-started', activeMatch: '^/(getting-started|configuration|how-it-works|security|troubleshooting|faq|e2e|ci)' },
+      { text: 'Guide', link: '/getting-started', activeMatch: '^/(getting-started|configuration|how-it-works|security|troubleshooting|faq|support|e2e|ci)' },
       { text: 'Design notes', link: '/design/actions-cache', activeMatch: '^/design/' },
       { text: 'Brand', link: '/brand' },
       { text: 'Releases', link: `${repo}/releases` },
@@ -114,6 +114,7 @@ export default defineConfig({
           { text: 'Security', link: '/security' },
           { text: 'Troubleshooting', link: '/troubleshooting' },
           { text: 'FAQ', link: '/faq' },
+          { text: 'Getting help', link: '/support' },
           { text: 'E2E tests', link: '/e2e' },
           { text: 'CI and checks', link: '/ci' },
         ],
