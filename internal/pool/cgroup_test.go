@@ -126,11 +126,11 @@ func TestMeterRunnerAndSlot(t *testing.T) {
 	}
 	setCgroup(t, slot, 2500, 2_000_000_000, 9_000_000, 700, 1300, 300)
 	u := m.Stop()
-	want := CgroupUsage{MemPeak: 1_800_000_000, CPUUsec: 40_000_000, CPUSomeUsec: 1_000_000, IOFullUsec: 2_000_000, MemFullUsec: 0}
+	want := CgroupUsage{MemPeak: 1_800_000_000, CPUUsec: 40_000_000, CPUSomeUsec: 1_000_000, IOFullUsec: 2_000_000, MemFullUsec: 0, AnonPeak: -1}
 	if u.Runner != want {
 		t.Errorf("runner: got %+v, want %+v", u.Runner, want)
 	}
-	wantSlot := CgroupUsage{MemPeak: 2_000_000_000, CPUUsec: 4_000_000, CPUSomeUsec: 600, IOFullUsec: 1100, MemFullUsec: 0}
+	wantSlot := CgroupUsage{MemPeak: 2_000_000_000, CPUUsec: 4_000_000, CPUSomeUsec: 600, IOFullUsec: 1100, MemFullUsec: 0, AnonPeak: -1}
 	if u.Slot != wantSlot {
 		t.Errorf("slot: got %+v, want %+v", u.Slot, wantSlot)
 	}
@@ -264,4 +264,45 @@ func TestMeterBegin(t *testing.T) {
 	}
 	var nilMeter *Meter
 	nilMeter.Begin() // no-op
+}
+
+func setAnon(t *testing.T, dir string, anon int64) {
+	t.Helper()
+	content := "anon " + strconv.FormatInt(anon, 10) + "\nfile 9000000000\nshmem 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A slot's memory.peak counts the page cache (image layers, build
+// contexts); its anonymous memory is what the job really needed. Current
+// reports the runner's memory plus the slot's anonymous memory.
+func TestMeterAnonPeakAndCurrent(t *testing.T) {
+	fs := fakeRoot(t)
+	runner := filepath.Join(fs.root, "docker", runnerCID)
+	slot := filepath.Join(fs.root, "docker", slotCID)
+	fakeCgroup(t, runner, 100, 100, 0, 0, 0, 0)
+	fakeCgroup(t, slot, 1000, 1000, 0, 0, 0, 0)
+	setAnon(t, slot, 200)
+	m := newMeter(runner, slot, 0)
+	m.Begin()
+	setCgroup(t, runner, 900, 900, 0, 0, 0, 0)
+	setCgroup(t, slot, 6000, 6000, 0, 0, 0, 0)
+	setAnon(t, slot, 1500)
+	m.sample()
+	if got := m.Current(); got != 900+1500 {
+		t.Errorf("Current = %d, want %d", got, 900+1500)
+	}
+	setAnon(t, slot, 700)
+	u := m.Stop()
+	if u.Slot.AnonPeak != 1500 || u.Slot.MemPeak != 6000 {
+		t.Errorf("slot: %+v", u.Slot)
+	}
+	if u.Runner.AnonPeak != -1 {
+		t.Errorf("runner without memory.stat: %+v", u.Runner)
+	}
+	var nilMeter *Meter
+	if nilMeter.Current() != 0 {
+		t.Error("nil meter must use nothing")
+	}
 }

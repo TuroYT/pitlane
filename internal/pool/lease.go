@@ -24,48 +24,20 @@ type Lease struct {
 	TargetID int64
 	Strict   bool   // strict isolation: fresh caches, slot wiped before and after
 	Runner   string // set by the scaler once the runner name is known
-	wipe     bool   // the slot last served another owner: Prepare wipes it
+	// Predicted is the memory reserved for the job (bytes, see Admit).
+	Predicted int64
+	wipe      bool // the slot last served another owner: Prepare wipes it
 
 	prevOwner string // owner of a slot to wipe, for the log and metrics
 	prevKeeps int    // other warm slots that owner keeps
 	prevUsed  int64  // when the wiped slot was last released
 }
 
-// Acquire reserves a free slot, preferring one that already ran jobs for the
-// same target, then the same owner (warmest cache); when a wipe cannot be
-// avoided it takes the slot whose cache loss costs least (see chooseLocked).
-// It returns false when every slot is busy, or while a strict job waits for
-// a slot being cleaned after another strict job.
+// Acquire reserves a free slot for a job with no memory prediction (see
+// Admit). It returns false when the job must wait.
 func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64, strict bool) (Lease, bool) {
-	if strict {
-		owner = StrictOwner
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.qemuBusy {
-		return Lease{}, false
-	}
-	c, deferred := p.chooseLocked(owner, targetID, strict)
-	if c.s == nil {
-		if deferred {
-			p.log.Debug("strict job waits for a slot being cleaned rather than wipe a warm one")
-		}
-		return Lease{}, false
-	}
-	if strict {
-		p.strictWaitSince = time.Time{}
-	}
-	best := c.s
-	l := Lease{Slot: best.Index, Owner: owner, TargetID: targetID, Strict: strict, wipe: c.wipe}
-	best.Status, best.Since = "busy", time.Now().Unix()
-	if c.wipe {
-		best.wiping = true
-		l.prevOwner, l.prevKeeps, l.prevUsed = best.Owner, c.keeps, best.LastUsed
-	} else if best.Owner != owner || best.TargetID != targetID {
-		best.Owner, best.TargetID = owner, targetID
-		p.saveLocked()
-	}
-	return l, true
+	l, reason := p.Admit(ctx, Request{Owner: owner, TargetID: targetID, Strict: strict})
+	return l, reason == ""
 }
 
 // ErrSlotRebuilding means Prepare failed to wipe the slot; it is left dirty
@@ -76,6 +48,7 @@ var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
 // previous owner is kept) and in error, so the retry loop rebuilds it.
 func (p *Pool) wipeFailed(i int, err error) {
 	p.mu.Lock()
+	p.unreserveLocked(i)
 	if s, ok := p.slots[i]; ok {
 		s.dirty, s.wiping = true, false
 	}
@@ -146,6 +119,7 @@ func strictVolumes(runner string) (cache, tools string) {
 // is rebuilt from the host side, its throwaway caches removed. On any
 // failure it stays dirty and is rebuilt rather than reused.
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
+	p.unreserve(l.Slot)
 	p.setStatus(l.Slot, "cleaning", "")
 	err := p.ops().wipe(ctx, l.Slot)
 	if l.Runner != "" {
@@ -216,6 +190,7 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 		p.releaseStrict(ctx, l)
 		return
 	}
+	p.unreserve(l.Slot) // the job is over: its memory is free
 	p.setStatus(l.Slot, "cleaning", "")
 	cfg := p.Config()
 	_, code, err := p.ops().exec(ctx, slotName(l.Slot), releaseScript(cfg.KeepBuildGB))
