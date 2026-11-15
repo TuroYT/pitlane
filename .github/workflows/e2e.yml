@@ -1,0 +1,76 @@
+# Runs the end-to-end suite (e2e/run.sh, see docs/e2e.md) against a test
+# repository served by a Pitlane instance. Manual only, and off until the
+# repository secret E2E_GITHUB_TOKEN exists: a fine-grained token with
+# Contents (read and write) and Actions (read and write) on the test
+# repository only. It never needs access to this repository.
+name: e2e
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Test repository (owner/repo) served by the Pitlane instance
+        default: SheepHost/pitlane-org-test
+      scenarios:
+        description: Space-separated scenarios (empty for all)
+        default: ""
+      label:
+        description: runs-on label of the instance
+        default: pitlane
+      twice:
+        description: Run the selection twice to show warm caches
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ inputs.repository }}
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: e2e / ${{ inputs.repository }}
+    # This job only drives the suite through the GitHub API. It stays off the
+    # pool under test: the matrix scenario needs every slot to itself.
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the token
+        env:
+          GH_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error title=e2e::create the repository secret E2E_GITHUB_TOKEN first (see docs/ci.md)"
+            exit 1
+          fi
+      - name: e2e/run.sh
+        env:
+          GH_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+          REPO: ${{ inputs.repository }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          LABEL: ${{ inputs.label }}
+          TWICE: ${{ inputs.twice }}
+        run: |
+          set -o pipefail
+          git config --global user.name "pitlane-e2e"
+          git config --global user.email "pitlane-e2e@users.noreply.github.com"
+          args=(--label "$LABEL")
+          [ "$TWICE" = true ] && args+=(--twice)
+          # shellcheck disable=SC2086 # scenarios are words
+          e2e/run.sh "${args[@]}" "$REPO" $SCENARIOS 2>&1 | tee e2e.log
+      - name: Summary
+        if: ${{ !cancelled() }}
+        env:
+          REPO: ${{ inputs.repository }}
+        run: |
+          {
+            echo "### e2e on \`$REPO\`"
+            echo
+            echo '```'
+            sed -n '/^Pitlane e2e on/,$p' e2e.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
