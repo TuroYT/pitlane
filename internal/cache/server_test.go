@@ -571,3 +571,33 @@ func TestSetLimitsAtOnce(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// A share lowered while an upload is in progress applies to its commit.
+func TestCommitOverLoweredShare(t *testing.T) {
+	s, ts := newServer(t, "")
+	s.SetLimits(100, 50)
+	other := newClient(t, s, ts, "pitlane-o", Identity{Owner: "other"}, "other/web")
+	if code := other.save("o1", "v", make([]byte, 25)); code != http.StatusNoContent {
+		t.Fatalf("save o1: %d", code)
+	}
+	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
+	res := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(`{"key":"k","version":"v","cacheSize":40}`))
+	var out struct{ CacheID int64 }
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil || res.StatusCode != http.StatusCreated {
+		t.Fatalf("reserve: %d %v", res.StatusCode, err)
+	}
+	id := fmt.Sprint(out.CacheID)
+	if r := c.do("PATCH", "_apis/artifactcache/caches/"+id, bytes.NewReader(make([]byte, 40)), "Content-Range", "bytes 0-39/*"); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("upload: %d", r.StatusCode)
+	}
+	s.SetLimits(100, 30)
+	if r := c.do("POST", "_apis/artifactcache/caches/"+id, strings.NewReader(`{"size":40}`)); r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("commit over the lowered share: %d", r.StatusCode)
+	}
+	if st := s.Stats(); st.Entries != 1 || st.Bytes != 25 {
+		t.Fatalf("stats: %+v", st)
+	}
+	if left, _ := os.ReadDir(s.tmpDir()); len(left) != 0 {
+		t.Fatalf("refused upload left on disk: %v", left)
+	}
+}

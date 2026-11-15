@@ -407,6 +407,12 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusBadRequest, "uploaded size does not match")
 		return
 	}
+	// The share may have been lowered since the reservation.
+	if lim := s.ownerLimitLocked(); lim > 0 && in.Size > lim {
+		s.dropUploadLocked(id, u)
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("cache size of %d bytes is over the %d bytes one owner may use in the Pitlane cache", in.Size, lim))
+		return
+	}
 	delete(s.pending, id)
 	e := u.entry
 	e.Size, e.Created, e.used = in.Size, time.Now(), time.Now()
