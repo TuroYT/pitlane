@@ -1,8 +1,9 @@
 # Runs the end-to-end suite (e2e/run.sh, see docs/e2e.md) against a test
 # repository served by a Pitlane instance. Manual only, and off until the
 # repository secret E2E_GITHUB_TOKEN exists: a fine-grained token with
-# Contents (read and write) and Actions (read and write) on the test
-# repository only. It never needs access to this repository.
+# Contents, Actions and Workflows (read and write) on the test repository
+# only; Workflows because the suite pushes its e2e-*.yml files there. It never
+# needs access to this repository.
 name: e2e
 on:
   workflow_dispatch:

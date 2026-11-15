@@ -66,5 +66,6 @@ security fixes and Pitlane's own images.
 The [`e2e` workflow](../.github/workflows/e2e.yml) runs the [end-to-end
 suite](e2e.md) from the Actions tab (manual only). It needs a repository secret
 `E2E_GITHUB_TOKEN`: a fine-grained token restricted to the test repository,
-with **Contents** and **Actions** read and write. Without it the workflow stops
-with an error that says so.
+with **Contents**, **Actions** and **Workflows** read and write (the suite
+pushes its `e2e-*.yml` files to the test repository's `.github/workflows`).
+Without it the workflow stops with an error that says so.
