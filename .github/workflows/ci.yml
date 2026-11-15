@@ -1,10 +1,19 @@
-name: ci
+# Pull request and main branch checks. The jobs run in parallel and skip what
+# a change cannot break (a docs-only pull request runs "Docs / build" only);
+# "all green" always reports and is the one check to require. See docs/ci.md.
+name: CI
 on:
   push:
     branches: [main]
   pull_request:
 
-# The job runs on the self-hosted pool: its token can only read the code.
+# A new push to a pull request cancels the run it replaces; runs on main
+# always finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The jobs run on the self-hosted pool: their token can only read the code.
 permissions:
   contents: read
 
@@ -14,37 +23,290 @@ permissions:
 # Docker daemon (see docs/security.md). A fork can still edit this file in its
 # pull request, so keep "Require approval for all external contributors" on.
 jobs:
-  test:
+  changes:
+    name: Changes
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.PITLANE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # list the files of the pull request
+    outputs:
+      # Every other job runs where this one did.
+      runner: ${{ steps.runner.outputs.runner }}
+      hosted: ${{ steps.runner.outputs.hosted }}
+      # Pushes to main run every job but the docs build (docs.yml builds and
+      # publishes the site).
+      go: ${{ github.event_name != 'pull_request' || steps.filter.outputs.go == 'true' }}
+      web: ${{ github.event_name != 'pull_request' || steps.filter.outputs.web == 'true' }}
+      docs: ${{ github.event_name == 'pull_request' && steps.filter.outputs.docs == 'true' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - id: runner
+        env:
+          RUNNER: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.PITLANE_RUNNER || 'ubuntu-latest' }}
+        run: |
+          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
+          [ "$RUNNER" = ubuntu-latest ] && hosted=true || hosted=false
+          echo "hosted=$hosted" >> "$GITHUB_OUTPUT"
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # The CI definition itself is code every job depends on.
+          filters: |
+            ci: &ci
+              - .github/workflows/ci.yml
+              - .github/actions/**
+              - .github/scripts/**
+            go:
+              - *ci
+              - "**/*.go"
+              - go.mod
+              - go.sum
+              - .golangci.yml
+              - Makefile
+              # The binary embeds the UI.
+              - web/**
+            web:
+              - *ci
+              - web/**
+            docs:
+              - *ci
+              - docs/**
+              - site/**
+      - name: Summary
+        env:
+          GO: ${{ github.event_name != 'pull_request' || steps.filter.outputs.go == 'true' }}
+          WEB: ${{ github.event_name != 'pull_request' || steps.filter.outputs.web == 'true' }}
+          DOCS: ${{ github.event_name == 'pull_request' && steps.filter.outputs.docs == 'true' }}
+          RUNNER: ${{ steps.runner.outputs.runner }}
+        run: |
+          mark() { [ "$1" = true ] && echo "runs" || echo "skipped (no change)"; }
+          {
+            echo "### Jobs for this change"
+            echo
+            echo "| Area | Jobs | |"
+            echo "| --- | --- | --- |"
+            echo "| Go | lint, test (race), build | $(mark "$GO") |"
+            echo "| Web | build, lint, test | $(mark "$WEB") |"
+            echo "| Docs | build | $(mark "$DOCS") |"
+            echo
+            echo "Runner: \`$RUNNER\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  go-lint:
+    name: Go / lint
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: ./.github/actions/setup
         with:
-          go-version-file: go.mod
-          # Pitlane keeps Go caches on local disk; uploading them is wasted time.
-          cache: ${{ !vars.PITLANE_RUNNER }}
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+          go: true
+          hosted-cache: ${{ needs.changes.outputs.hosted }}
+      - id: gofmt
+        name: gofmt
+        run: |
+          files=$(gofmt -l ./cmd ./internal ./web)
+          for f in $files; do echo "::error file=$f,title=gofmt::$f is not formatted: run gofmt -w $f"; done
+          [ -z "$files" ]
+      - id: vet
+        name: go vet
+        if: ${{ !cancelled() }}
+        run: go vet ./...
+      - id: tidy
+        name: go.mod and go.sum are tidy
+        if: ${{ !cancelled() }}
+        run: |
+          go mod tidy -diff > tidy.diff && exit 0
+          cat tidy.diff
+          echo "::error file=go.mod,title=go mod tidy::go.mod or go.sum is not tidy: run go mod tidy"
+          exit 1
+      - id: golangci
+        name: golangci-lint
+        if: ${{ !cancelled() }}
+        # Text output is annotated by setup-go's problem matcher; the JSON
+        # report feeds the job summary.
+        run: make golangci-lint GOLANGCI_LINT_ARGS="--output.text.path=stdout --output.json.path=golangci.json"
+      - name: Summary
+        if: always()
+        env:
+          GOFMT: ${{ steps.gofmt.outcome }}
+          VET: ${{ steps.vet.outcome }}
+          TIDY: ${{ steps.tidy.outcome }}
+          GOLANGCI: ${{ steps.golangci.outcome }}
+        run: |
+          icon() { case "$1" in success) echo "✅";; failure) echo "❌";; skipped) echo "⏭️";; *) echo "❔ $1";; esac; }
+          {
+            echo "### Go lint"
+            echo
+            echo "| | Check |"
+            echo "| --- | --- |"
+            echo "| $(icon "$GOFMT") | gofmt |"
+            echo "| $(icon "$VET") | go vet |"
+            echo "| $(icon "$TIDY") | go mod tidy |"
+            echo "| $(icon "$GOLANGCI") | golangci-lint (\`.golangci.yml\`) |"
+            if [ -s golangci.json ]; then
+              n=$(jq '.Issues | length' golangci.json)
+              echo
+              echo "golangci-lint: **$n issue(s)**"
+              if [ "$n" -gt 0 ]; then
+                echo
+                echo "| Linter | Location | Issue |"
+                echo "| --- | --- | --- |"
+                jq -r '.Issues[:50][] | "| \(.FromLinter) | `\(.Pos.Filename):\(.Pos.Line)` | \(.Text | gsub("\\|"; "\\\\|") | gsub("\n"; " ")) |"' golangci.json
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  go-test:
+    name: Go / test (race)
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: 12
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+          persist-credentials: false
+      - uses: ./.github/actions/setup
         with:
-          node-version: 22
-      - run: make web
-      - name: web tests
-        run: pnpm test
+          go: true
+          hosted-cache: ${{ needs.changes.outputs.hosted }}
+      - name: go test -race
+        # gotestsum folds the output of each package into a log group and
+        # repeats the failures at the end.
+        run: make test-race GOTESTSUM_ARGS="--format github-actions --jsonfile go-test.json"
+      - name: Report
+        if: ${{ !cancelled() }}
+        run: .github/scripts/go-test-report.sh go-test.json coverage.out
+
+  go-build:
+    name: Go / build
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          go: true
+          node-package: web
+          hosted-cache: ${{ needs.changes.outputs.hosted }}
+      - name: Build the UI
+        run: pnpm build
         working-directory: web
-      - name: web lint
+      - name: Build the binary (UI embedded)
+        run: make build
+      - name: Summary
+        run: |
+          {
+            echo "### Go build"
+            echo
+            echo "\`bin/pitlane\` $(./bin/pitlane --version 2>/dev/null || true): $(du -h bin/pitlane | cut -f1), linux/$(go env GOARCH), UI embedded"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  web:
+    name: Web / build, lint, test
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-package: web
+          hosted-cache: ${{ needs.changes.outputs.hosted }}
+      # vue-tsc and ESLint errors are annotated by setup-node's problem
+      # matchers; the github-actions reporter of Vitest annotates failing
+      # tests and writes the test summary.
+      - id: build
+        name: Type-check and build
+        run: pnpm build
+      - id: lint
+        name: ESLint
+        if: ${{ !cancelled() }}
         run: pnpm lint
-        working-directory: web
-      - run: test -z "$(gofmt -l ./cmd ./internal ./web)"
-      - run: go vet ./...
-      - name: go.mod and go.sum are tidy
-        run: go mod tidy && git diff --exit-code go.mod go.sum
-      - name: golangci-lint
-        # Built with the job's Go toolchain (go run), so it always
-        # supports the Go version go.mod targets. Pinned: bump on purpose.
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
-      - run: go test -race ./...
-      - run: make build
+      - id: test
+        name: Vitest
+        if: ${{ !cancelled() }}
+        run: pnpm exec vitest run --reporter=default --reporter=github-actions
+      - name: Summary
+        if: always()
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TEST: ${{ steps.test.outcome }}
+        run: |
+          icon() { case "$1" in success) echo "✅";; failure) echo "❌";; skipped) echo "⏭️";; *) echo "❔ $1";; esac; }
+          {
+            echo "### Web UI"
+            echo
+            echo "| | Check |"
+            echo "| --- | --- |"
+            echo "| $(icon "$BUILD") | vue-tsc and vite build |"
+            echo "| $(icon "$LINT") | ESLint (no warnings allowed) |"
+            echo "| $(icon "$TEST") | Vitest (details below) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  docs:
+    name: Docs / build
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-package: site
+          hosted-cache: ${{ needs.changes.outputs.hosted }}
+      - name: VitePress build (fails on dead links)
+        run: pnpm build
+        working-directory: site
+      - name: Summary
+        run: |
+          pages=$(find site/.vitepress/dist -name '*.html' | wc -l)
+          echo "### Docs site" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Built $pages pages from \`docs/\`, no dead links. Published from main by the docs workflow." >> "$GITHUB_STEP_SUMMARY"
+
+  all-green:
+    # The one check to require in branch protection: it reports on every run,
+    # and fails if a job failed or was cancelled (skipped jobs are fine).
+    name: all green
+    needs: [changes, go-lint, go-test, go-build, web, docs]
+    if: always()
+    runs-on: ${{ needs.changes.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "### CI result"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"$NEEDS"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bad=$(jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key' <<<"$NEEDS")
+          if [ -n "$bad" ]; then
+            for job in $bad; do echo "::error title=CI::job $job did not succeed"; done
+            exit 1
+          fi
+          echo "All jobs passed or were skipped."
