@@ -327,7 +327,7 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .bar div.error { background: var(--error); }
 
 /* ------------------------------------------------------------ tables */
-.table-wrap { overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+.table-wrap { position: relative; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
 .table { width: 100%; border-collapse: collapse; }
 .table caption { text-align: left; }
 .table th {
@@ -362,6 +362,8 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 
 .job-header { display: flex; flex-direction: column; gap: 6px; padding-bottom: 16px; border-bottom: 1px solid var(--border-muted); }
 .job-header h1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.job-header .back { align-self: flex-start; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
 
 /* ------------------------------------------------------------ targets */
 .account + .account { margin-top: 12px; }
@@ -371,7 +373,7 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 /* ------------------------------------------------------------ logs */
 pre.logs {
   background: #0d1117; color: #e6edf3; padding: 12px 16px; border-radius: var(--radius); margin: 0; border: 1px solid var(--border);
-  height: calc(100vh - 320px); min-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.6;
+  height: calc(100vh - 340px); min-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.6;
 }
 .settings { width: 100%; max-width: 820px; margin-inline: auto; }
 .settings + .settings { margin-top: 24px; }
@@ -387,7 +389,7 @@ pre.logs {
 .tabs button:hover:not(:disabled) { background: var(--bg-hover); }
 .tabs button.active { font-weight: 600; }
 .tabs button.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -7px; height: 2px; border-radius: 2px; background: var(--brand); }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .tabs button:focus-visible { outline-offset: -2px; border-radius: var(--radius); }
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pager .filters { align-items: center; }

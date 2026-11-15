@@ -87,7 +87,8 @@ function go(p: number) {
 </script>
 
 <template>
-  <div class="stack">
+  <div class="stack-lg">
+    <section class="stack">
     <div class="row-between">
       <h1>Jobs</h1>
       <div class="filters">
@@ -98,25 +99,26 @@ function go(p: number) {
         </select>
         <select v-model="result" aria-label="Result">
           <option value="">All results</option>
-          <option value="running">Running / queued</option>
+          <option value="running">In progress or queued</option>
           <option value="succeeded">Succeeded</option>
           <option value="failed">Failed</option>
           <option value="canceled">Canceled</option>
         </select>
       </div>
     </div>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
     <JobTable :jobs="jobs" :empty="filtering ? 'No job matches these filters.' : undefined" />
     <nav v-if="total > PAGE" class="pager" aria-label="Pages">
       <span class="muted small" aria-live="polite">{{ from }}–{{ to }} of {{ total.toLocaleString() }}</span>
       <div class="filters">
-        <button type="button" class="small" :disabled="page <= 1 || loading" aria-label="First page" @click="go(1)">«</button>
+        <button type="button" class="small" :disabled="page <= 1 || loading" @click="go(1)">First</button>
         <button type="button" class="small" :disabled="page <= 1 || loading" @click="go(page - 1)">Previous</button>
-        <span class="small">Page {{ page }} / {{ pages }}</span>
+        <span class="small num">Page {{ page }} of {{ pages }}</span>
         <button type="button" class="small" :disabled="page >= pages || loading" @click="go(page + 1)">Next</button>
-        <button type="button" class="small" :disabled="page >= pages || loading" aria-label="Last page" @click="go(pages)">»</button>
+        <button type="button" class="small" :disabled="page >= pages || loading" @click="go(pages)">Last</button>
       </div>
     </nav>
+    </section>
     <CompareTable />
   </div>
 </template>
