@@ -187,8 +187,7 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.Set("base_url", base); err != nil {
-		s.log.Error("save base URL", "error", err)
-		writeErr(w, http.StatusInternalServerError, "cannot save the base URL: "+err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "base_url_save", "cannot save the base URL", err)
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -302,8 +301,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// The first person to sign in with the setup token becomes the admin.
 	if !s.store.HasUsers() && s.hasSetupCookie(r) {
 		if _, err := s.store.PutUser(store.User{Login: login, Role: store.RoleAdmin, CreatedBy: "setup"}); err != nil {
-			s.log.Error("register first admin", "login", login, "error", err)
-			writeErr(w, http.StatusInternalServerError, "cannot register the first admin: "+err.Error())
+			s.internalErr(w, r, http.StatusInternalServerError, "first_admin", "cannot register the first admin "+login, err)
 			return
 		}
 		s.EnsureSetupToken() // deletes the token file
@@ -326,7 +324,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("signed in", "login", login, "role", role, "rules", strings.Join(memberships, ","))
 	if err := s.store.CreateSession(token, login, ttl, memberships...); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "session_create", "cannot open the session", err)
 		return
 	}
 	s.setCookie(w, r, sessionCookie, token, int(ttl/time.Second))
