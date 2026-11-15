@@ -17,8 +17,8 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 # --- annotations ---------------------------------------------------------------
 # Failing tests: "    foo_test.go:42: message" lines of the test's output point
 # at the assertion. Without one (a panic, a timeout), annotate the package.
-jq -rs --arg module "$module" '
-  def dir: ltrimstr($module) | ltrimstr("/");
+jq -rs --arg mod "$module" '
+  def dir: ltrimstr($mod) | ltrimstr("/");
   def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
   def prop: esc | gsub(":"; "%3A") | gsub(","; "%2C");
   (map(select(.Action == "fail" and .Test != null)) | map({Package, Test})) as $failed
@@ -43,8 +43,8 @@ jq -rs --arg module "$module" '
 {
   echo "### Go tests (race detector)"
   echo
-  jq -rs --arg module "$module" '
-    def dir: ltrimstr($module) | ltrimstr("/") | if . == "" then "." else . end;
+  jq -rs --arg mod "$module" '
+    def dir: ltrimstr($mod) | ltrimstr("/") | if . == "" then "." else . end;
     def icon: if . == "pass" then "✅" elif . == "fail" then "❌" elif . == "skip" then "⏭️" else "❔" end;
     (map(select(.Action == "fail" and .Test != null)) | length) as $failed
     | (map(select(.Action == "pass" and .Test != null)) | length) as $passed
@@ -54,11 +54,11 @@ jq -rs --arg module "$module" '
       "| --- | --- | ---: | ---: | ---: | ---: |",
       ( group_by(.Package)[]
         | select(.[0].Package != null)
-        | (map(select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip"))) | last) as $end
-        | select($end != null)
+        | (map(select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip"))) | last) as $done
+        | select($done != null)
         | ([.[] | select(.Action == "output" and .Test == null) | .Output
-            | capture("coverage: (?<c>[0-9.]+)% of statements")?.c] | last) as $cov
-        | "| \($end.Action | icon) | `\(.[0].Package | dir)` | \([.[] | select(.Test != null and (.Action == "pass" or .Action == "fail"))] | length) | \([.[] | select(.Test != null and .Action == "fail")] | length) | \($end.Elapsed // 0 | . * 10 | round / 10)s | \(if $cov then $cov + "%" else "–" end) |"
+            | capture("coverage: (?<c>[0-9.]+)% of statements") | .c] | last) as $cov
+        | "| \($done.Action | icon) | `\(.[0].Package | dir)` | \([.[] | select(.Test != null and (.Action == "pass" or .Action == "fail"))] | length) | \([.[] | select(.Test != null and .Action == "fail")] | length) | \($done.Elapsed // 0 | . * 10 | round / 10)s | \(if $cov then $cov + "%" else "–" end) |"
       )
   ' "$events"
   if [ -n "$profile" ] && [ -s "$profile" ]; then
