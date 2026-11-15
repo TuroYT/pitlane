@@ -235,10 +235,12 @@ func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI
 func OrgMember(ctx context.Context, userToken, org, login string) (bool, error) {
 	var m struct {
 		State string `json:"state"`
+		Role  string `json:"role"`
 	}
 	err := do(ctx, http.MethodGet, apiBase+"/user/memberships/orgs/"+url.PathEscape(org), "Bearer "+userToken, nil, &m)
 	if err == nil {
-		return m.State == "active", nil
+		// billing_manager (and any role GitHub may add) is not membership.
+		return m.State == "active" && (m.Role == "member" || m.Role == "admin"), nil
 	}
 	if c := statusCode(err); c != http.StatusForbidden && c != http.StatusNotFound && c != http.StatusUnauthorized {
 		return false, err

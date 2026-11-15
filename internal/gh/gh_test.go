@@ -88,7 +88,9 @@ func (f fakeMembers) serve(t *testing.T) {
 			} else if f.noPermission {
 				w.WriteHeader(http.StatusForbidden)
 			} else if f.private[p[3]] {
-				_, _ = w.Write([]byte(`{"state":"active"}`))
+				_, _ = w.Write([]byte(`{"state":"active","role":"member"}`))
+			} else if p[3] == "billing" {
+				_, _ = w.Write([]byte(`{"state":"active","role":"billing_manager"}`))
 			} else if p[3] == "invited" {
 				_, _ = w.Write([]byte(`{"state":"pending"}`))
 			} else { // not a member, or the App is not installed there
@@ -128,7 +130,7 @@ func TestOrgAndTeamMembership(t *testing.T) {
 	for _, tc := range []struct {
 		org  string
 		want bool
-	}{{"acme", true}, {"oss", true}, {"invited", false}, {"other", false}} {
+	}{{"acme", true}, {"oss", true}, {"invited", false}, {"other", false}, {"billing", false}} {
 		if got, err := OrgMember(ctx, "user-tok", tc.org, "alice"); err != nil || got != tc.want {
 			t.Errorf("org %s: %v %v", tc.org, got, err)
 		}
