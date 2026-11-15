@@ -309,7 +309,9 @@ func (h *harness) addRunner(name string, runnerID int64, age time.Duration, busy
 // waitFor polls cond until it holds or the test times out.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Generous: CI runs on a shared, sometimes saturated host; the condition
+	// normally holds within milliseconds.
+	deadline := time.Now().Add(30 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
