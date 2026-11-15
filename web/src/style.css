@@ -401,3 +401,4 @@ pre.logs {
 .chart-empty.short { height: 96px; }
 .clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 320px; }
 .repo-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+label .optional { font-weight: 400; color: var(--muted); }

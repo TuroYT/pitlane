@@ -8,7 +8,7 @@ const route = useRoute()
 const error = computed(() => {
   switch (route.query.error) {
     case 'forbidden':
-      return `@${route.query.login ?? 'this account'} is not allowed to use this Pitlane. Ask an administrator to add you in Settings.`
+      return `@${route.query.login ?? 'this account'} is not allowed to use this Pitlane. Ask an administrator to add you on the Users page.`
     case 'state':
       return 'The sign-in link expired. Please try again.'
     case 'oauth':
@@ -24,7 +24,7 @@ const error = computed(() => {
     <div class="card narrow stack">
       <h1 class="brand-big"><BrandMark :size="32" /> Pitlane</h1>
       <p class="muted">Fast, ephemeral self-hosted GitHub Actions runners.</p>
-      <p v-if="error" class="alert error">{{ error }}</p>
+      <p v-if="error" class="alert error" role="alert">{{ error }}</p>
       <p v-if="status?.mode === 'pat'" class="alert warn">
         Pitlane runs with a personal access token: GitHub sign-in is not available. Start it with
         <code>--insecure-no-auth</code> behind your own authentication, or set up a GitHub App.

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import BrandMark from '../components/BrandMark.vue'
+import Icon from '../components/Icon.vue'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { post, ApiError } from '../api'
@@ -78,19 +79,19 @@ async function createApp() {
     <div class="card narrow">
       <h1 class="brand-big"><BrandMark :size="32" /> Pitlane setup</h1>
 
-      <ol class="steps">
-        <li :class="{ done: step !== 'unlock', current: step === 'unlock' }">Unlock</li>
-        <li :class="{ done: step === 'install', current: step === 'create' }">Create the GitHub App</li>
-        <li :class="{ current: step === 'install' }">Install &amp; sign in</li>
+      <ol class="steps" aria-label="Setup steps">
+        <li :class="{ done: step !== 'unlock', current: step === 'unlock' }" :aria-current="step === 'unlock' ? 'step' : undefined">Unlock</li>
+        <li :class="{ done: step === 'install', current: step === 'create' }" :aria-current="step === 'create' ? 'step' : undefined">Create the GitHub App</li>
+        <li :class="{ current: step === 'install' }" :aria-current="step === 'install' ? 'step' : undefined">Install and sign in</li>
       </ol>
 
-      <p v-if="error" class="alert error">{{ error }}</p>
+      <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
       <form v-if="step === 'unlock'" class="stack" @submit.prevent="unlock">
         <p>Enter the one-time setup token. It is printed in Pitlane's logs, or run:</p>
         <pre class="code">pitlane setup-token</pre>
-        <input v-model="token" placeholder="Setup token" autofocus required autocomplete="off" />
-        <button class="primary" :disabled="busy || !token">Continue</button>
+        <input v-model="token" placeholder="Setup token" aria-label="Setup token" autofocus required autocomplete="off" spellcheck="false" />
+        <button type="submit" class="primary" :disabled="busy || !token">{{ busy ? 'Checking…' : 'Continue' }}</button>
       </form>
 
       <form v-else-if="step === 'create'" class="stack" @submit.prevent="createApp">
@@ -100,21 +101,23 @@ async function createApp() {
         </p>
         <label>
           Pitlane URL
-          <input v-model="baseUrl" required />
+          <input v-model="baseUrl" type="url" required />
           <small>The address you use to open this page. GitHub redirects your browser here, so it does not need to be public.</small>
         </label>
         <p v-if="isLocalhost" class="alert warn">
-          You are using a localhost URL. Use the LAN address (e.g. http://pitlane.lan:8080) if you will open Pitlane from another computer.
+          This is a localhost URL. Use the LAN address (for example http://pitlane.lan:8080) if you will open Pitlane from another computer.
         </p>
         <label>
-          Create the App under an organization <span class="muted">(optional)</span>
-          <input v-model="org" placeholder="Leave empty to create it on your personal account" />
+          <span>Organization <span class="optional">(optional)</span></span>
+          <input v-model="org" placeholder="Empty: your personal account" />
+          <small>Creates the App under this organization instead of your account.</small>
         </label>
         <label>
-          App name <span class="muted">(optional, must be unique on GitHub)</span>
+          <span>App name <span class="optional">(optional)</span></span>
           <input v-model="appName" placeholder="Pitlane xxxxxx" />
+          <small>Must be unique on GitHub.</small>
         </label>
-        <button class="primary" :disabled="busy">Create GitHub App on github.com →</button>
+        <button type="submit" class="primary" :disabled="busy">{{ busy ? 'Opening GitHub…' : 'Create the GitHub App on github.com' }}</button>
       </form>
 
       <div v-else-if="step === 'install'" class="stack">
@@ -122,7 +125,7 @@ async function createApp() {
           GitHub App <strong>{{ status?.app.name || status?.app.slug }}</strong> is ready.
         </p>
         <p><strong>1.</strong> Install it on the accounts and repositories that should use Pitlane runners:</p>
-        <a class="button" :href="installUrl" target="_blank" rel="noopener">Install the App on GitHub ↗</a>
+        <a class="button" :href="installUrl" target="_blank" rel="noopener">Install the App on GitHub<Icon name="external" :size="12" /></a>
         <p><strong>2.</strong> Sign in. The first person to sign in becomes the administrator.</p>
         <a class="button primary" href="/auth/login">Sign in with GitHub</a>
       </div>
