@@ -1043,8 +1043,14 @@ func shortRef(ref string) string {
 
 func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
 	cfg := s.t.cfg()
+	queued := unix(b.QueueTime)
+	if queued == 0 {
+		// Not every message carries queueTime; the scale set assignment is
+		// the closest real date.
+		queued = unix(b.ScaleSetAssignTime)
+	}
 	return store.Job{TargetID: cfg.ID, JobID: b.JobID, RunID: b.WorkflowRunID, Owner: b.OwnerName, Repo: b.RepositoryName,
-		WorkflowRef: shortRef(b.JobWorkflowRef), WorkflowFullRef: b.JobWorkflowRef, JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: unix(b.QueueTime)}
+		WorkflowRef: shortRef(b.JobWorkflowRef), WorkflowFullRef: b.JobWorkflowRef, JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: queued}
 }
 
 // upsertJob records a job in the history; a failure only affects the UI and
@@ -1090,10 +1096,44 @@ func pendingPredictions(pending map[string]pendingJob, now time.Time) []int64 {
 	return out
 }
 
+// logTimestamps shows what GitHub sent for each job message, to see which
+// timestamps are missing.
+func (s *scaler) logTimestamps(msg *scaleset.RunnerScaleSetMessage) {
+	log := func(kind string, b scaleset.JobMessageBase) {
+		s.t.log.Debug("job message", "type", kind, "job", b.JobID, "queue", unix(b.QueueTime), "scaleSetAssign", unix(b.ScaleSetAssignTime),
+			"runnerAssign", unix(b.RunnerAssignTime), "finish", unix(b.FinishTime))
+	}
+	for _, j := range msg.JobAvailableMessages {
+		log("available", j.JobMessageBase)
+	}
+	for _, j := range msg.JobAssignedMessages {
+		if j != nil {
+			log("assigned", j.JobMessageBase)
+		}
+	}
+	for _, j := range msg.JobStartedMessages {
+		log("started", j.JobMessageBase)
+	}
+	for _, j := range msg.JobCompletedMessages {
+		log("completed", j.JobMessageBase)
+	}
+}
+
 func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
 	if msg == nil {
 		s.t.reconcile()
 		return nil
+	}
+	s.logTimestamps(msg)
+	for _, j := range msg.JobAssignedMessages {
+		// Only a dated assignment is worth a row: an undated one would never
+		// be pruned, and the job is recorded when it starts anyway.
+		if j == nil {
+			continue
+		}
+		if job := s.job(j.JobMessageBase); job.QueuedAt != 0 {
+			s.upsertJob(job)
+		}
 	}
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
@@ -1124,11 +1164,8 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		if job.StartedAt == 0 {
 			job.StartedAt = time.Now().Unix()
 		}
-		if job.QueuedAt == 0 {
-			// Only used when the job was never seen queued (the store keeps
-			// the earliest known queue time).
-			job.QueuedAt = job.StartedAt
-		}
+		// QueuedAt stays 0 when unknown: the store keeps the queue time
+		// recorded earlier, and a made-up one would fake a wait of 0.
 		pj := s.pendingJob(ctx, job)
 		s.t.mu.Lock()
 		delete(s.t.pending, j.JobID)
