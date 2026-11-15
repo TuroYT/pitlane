@@ -25,6 +25,8 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+
+	"github.com/TuroYT/pitlane/internal/cache"
 )
 
 // Labels put on every Docker object Pitlane owns.
@@ -75,9 +77,11 @@ type Config struct {
 	// caches are pruned after each job (0 = never prune).
 	MinFreeDiskGB int
 	// ActionsCache serves actions/cache from the Pitlane host (internal/cache)
-	// for non-strict jobs; ActionsCacheGB bounds what it stores.
-	ActionsCache   bool
-	ActionsCacheGB int
+	// for non-strict jobs; ActionsCacheGB bounds what it stores, and
+	// ActionsCacheOwnerPct (percent of it) what one owner may store.
+	ActionsCache         bool
+	ActionsCacheGB       int
+	ActionsCacheOwnerPct int
 	// MemoryAdmission admits a job only when the predicted memory of the
 	// running jobs plus its own fits the host's memory minus
 	// MemoryReserveMB (see admit.go).
@@ -117,6 +121,9 @@ func (c *Config) defaults() {
 	}
 	if c.ActionsCacheGB <= 0 {
 		c.ActionsCacheGB = 20
+	}
+	if c.ActionsCacheOwnerPct <= 0 || c.ActionsCacheOwnerPct > 100 {
+		c.ActionsCacheOwnerPct = cache.DefaultOwnerPercent
 	}
 	if c.MemoryReserveMB < 0 {
 		c.MemoryReserveMB = DefaultMemoryReserveMB
@@ -201,10 +208,12 @@ type Pool struct {
 
 	cache     CacheBroker // actions cache server, nil when not serving
 	cachePort int
-	selfOnce  sync.Once
-	self      *selfInfo  // container Pitlane runs in (nil on the host)
-	fwdMu     sync.Mutex // cache forwarder creation
-	shimExe   string     // binary installed as the Node shim; "" = the running Pitlane
+	// cacheLimitsMu serializes applyCacheLimits.
+	cacheLimitsMu sync.Mutex
+	selfOnce      sync.Once
+	self          *selfInfo  // container Pitlane runs in (nil on the host)
+	fwdMu         sync.Mutex // cache forwarder creation
+	shimExe       string     // binary installed as the Node shim; "" = the running Pitlane
 
 	sops slotOps // nil: Docker (tests set a fake)
 

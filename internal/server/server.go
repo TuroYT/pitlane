@@ -464,9 +464,11 @@ type Settings struct {
 	MetricsTokenSet bool    `json:"metricsTokenSet"`
 	// Actions cache served from the host (internal/cache). Its stats are
 	// read-only, nil when the cache listener is not running.
-	ActionsCache      bool         `json:"actionsCache"`
-	ActionsCacheGB    int          `json:"actionsCacheGb"`
-	ActionsCacheStats *cache.Stats `json:"actionsCacheStats,omitempty"`
+	ActionsCache   bool `json:"actionsCache"`
+	ActionsCacheGB int  `json:"actionsCacheGb"`
+	// Share of the actions cache size one owner may use, in percent.
+	ActionsCacheOwnerPct int          `json:"actionsCacheOwnerPct"`
+	ActionsCacheStats    *cache.Stats `json:"actionsCacheStats,omitempty"`
 	// Memory admission (pool.Admit) and its reserve; slots reserved for
 	// strict jobs (pool.AutoStrictSlots = -1: one while a strict target
 	// is enabled). StrictSlotsActive is what applies now (read-only).
@@ -519,22 +521,23 @@ func (w *statusWriter) WriteHeader(code int) {
 // LoadPoolConfig reads the pool configuration from the store.
 func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
-		StateFile:       filepath.Join(dataDir, "slots.json"),
-		Slots:           st.GetInt("slots", DefaultSlots()),
-		RunnerImage:     st.Get("runner_image", ""),
-		DindImage:       st.Get("dind_image", ""),
-		CPUShares:       int64(st.GetInt("cpu_shares", 0)),
-		MemoryMB:        int64(st.GetInt("memory_mb", 0)),
-		CacheScope:      st.Get("cache_scope", "owner"),
-		Mirror:          st.Get("mirror", "true") == "true",
-		NoQEMU:          st.Get("qemu", "true") != "true",
-		KeepBuildGB:     st.GetInt("keep_build_gb", 20),
-		MinFreeDiskGB:   st.GetInt("min_free_disk_gb", 20),
-		ActionsCache:    st.Get("actions_cache", "true") == "true",
-		ActionsCacheGB:  st.GetInt("actions_cache_gb", 20),
-		MemoryAdmission: st.Get("memory_admission", "true") == "true",
-		MemoryReserveMB: int64(st.GetInt("memory_reserve_mb", pool.DefaultMemoryReserveMB)),
-		StrictSlots:     st.GetInt("strict_slots", pool.AutoStrictSlots),
+		StateFile:            filepath.Join(dataDir, "slots.json"),
+		Slots:                st.GetInt("slots", DefaultSlots()),
+		RunnerImage:          st.Get("runner_image", ""),
+		DindImage:            st.Get("dind_image", ""),
+		CPUShares:            int64(st.GetInt("cpu_shares", 0)),
+		MemoryMB:             int64(st.GetInt("memory_mb", 0)),
+		CacheScope:           st.Get("cache_scope", "owner"),
+		Mirror:               st.Get("mirror", "true") == "true",
+		NoQEMU:               st.Get("qemu", "true") != "true",
+		KeepBuildGB:          st.GetInt("keep_build_gb", 20),
+		MinFreeDiskGB:        st.GetInt("min_free_disk_gb", 20),
+		ActionsCache:         st.Get("actions_cache", "true") == "true",
+		ActionsCacheGB:       st.GetInt("actions_cache_gb", 20),
+		ActionsCacheOwnerPct: st.GetInt("actions_cache_owner_pct", cache.DefaultOwnerPercent),
+		MemoryAdmission:      st.Get("memory_admission", "true") == "true",
+		MemoryReserveMB:      int64(st.GetInt("memory_reserve_mb", pool.DefaultMemoryReserveMB)),
+		StrictSlots:          st.GetInt("strict_slots", pool.AutoStrictSlots),
 	}
 }
 
@@ -548,8 +551,9 @@ func (s *Server) settings(r *http.Request) Settings {
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
 		HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
-		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheStats: s.actionsCacheStats(),
-		MemoryAdmission: c.MemoryAdmission, MemoryReserveMB: c.MemoryReserveMB, StrictSlots: c.StrictSlots, StrictSlotsActive: s.pool.StrictSlots(),
+		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheOwnerPct: c.ActionsCacheOwnerPct,
+		ActionsCacheStats: s.actionsCacheStats(),
+		MemoryAdmission:   c.MemoryAdmission, MemoryReserveMB: c.MemoryReserveMB, StrictSlots: c.StrictSlots, StrictSlotsActive: s.pool.StrictSlots(),
 	}
 }
 
@@ -560,8 +564,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // settingKeys are the settings PUT /api/settings saves, in the order the
 // audit log lists their changes.
 var settingKeys = []string{"slots", "runner_image", "dind_image", "cpu_shares", "memory_mb", "cache_scope", "mirror", "qemu",
-	"keep_build_gb", "min_free_disk_gb", "actions_cache", "actions_cache_gb", "memory_admission", "memory_reserve_mb", "strict_slots",
-	"history_days", "base_url"}
+	"keep_build_gb", "min_free_disk_gb", "actions_cache", "actions_cache_gb", "actions_cache_owner_pct", "memory_admission", "memory_reserve_mb",
+	"strict_slots", "history_days", "base_url"}
 
 // settingValues are the stored values of the settings in.
 func settingValues(in Settings) map[string]string {
@@ -575,7 +579,8 @@ func settingValues(in Settings) map[string]string {
 		"history_days":     strconv.Itoa(max(1, in.HistoryDays)),
 		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
 		"actions_cache":    strconv.FormatBool(in.ActionsCache), "actions_cache_gb": strconv.Itoa(max(1, in.ActionsCacheGB)),
-		"memory_admission": strconv.FormatBool(in.MemoryAdmission), "memory_reserve_mb": strconv.FormatInt(max(0, in.MemoryReserveMB), 10),
+		"actions_cache_owner_pct": strconv.Itoa(min(100, max(1, in.ActionsCacheOwnerPct))),
+		"memory_admission":        strconv.FormatBool(in.MemoryAdmission), "memory_reserve_mb": strconv.FormatInt(max(0, in.MemoryReserveMB), 10),
 		"strict_slots": strconv.Itoa(max(pool.AutoStrictSlots, in.StrictSlots)),
 	}
 	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
@@ -596,7 +601,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// Fields missing from the request keep their current value.
 	cur := s.pool.Config()
 	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB,
-		MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB, StrictSlots: cur.StrictSlots}
+		ActionsCacheOwnerPct: cur.ActionsCacheOwnerPct, MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB,
+		StrictSlots: cur.StrictSlots}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		badJSON(w)
 		return

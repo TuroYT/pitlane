@@ -175,7 +175,9 @@ points the toolkit's `ACTIONS_CACHE_URL` at Pitlane and makes it use its v1
 protocol; artifacts, OIDC and logs still go to GitHub. Lookups follow GitHub's
 rules (exact key, then prefixes and `restore-keys` in order, newest first; the
 job's branch, then the base and default branches), entries are immutable, and
-the least recently restored are evicted beyond the size limit.
+the least recently restored are evicted beyond the size limit. One owner may
+use at most a share of that size (half by default): beyond it, its own entries
+are evicted first.
 
 - Each runner gets its own token, valid until its job ends; it only opens the
   caches of the target's owner (one repository for a repository target).

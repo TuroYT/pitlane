@@ -27,8 +27,9 @@ type CacheBroker interface {
 	Register(runner string, id cache.Identity) string
 	// Revoke invalidates a runner's token.
 	Revoke(runner string)
-	// SetLimit bounds the stored bytes (LRU eviction).
-	SetLimit(bytes int64)
+	// SetLimits bounds the stored bytes (LRU eviction) and what one owner
+	// may store, in percent of that.
+	SetLimits(bytes int64, ownerPercent int)
 	// Evict frees at least n bytes, least recently used entries first, and
 	// returns the bytes freed.
 	Evict(n int64) int64
@@ -43,10 +44,22 @@ type CacheBroker interface {
 func (p *Pool) SetCache(b CacheBroker, port int) {
 	p.mu.Lock()
 	p.cache, p.cachePort = b, port
-	limit := int64(p.cfg.ActionsCacheGB) << 30
+	p.mu.Unlock()
+	p.applyCacheLimits()
+}
+
+// applyCacheLimits gives the cache server the limits of the current
+// configuration. Calls are serialized and each reads the configuration
+// under the lock, so a slower, older Configure cannot apply stale limits
+// after a newer one.
+func (p *Pool) applyCacheLimits() {
+	p.cacheLimitsMu.Lock()
+	defer p.cacheLimitsMu.Unlock()
+	p.mu.Lock()
+	b, limit, share := p.cache, int64(p.cfg.ActionsCacheGB)<<30, p.cfg.ActionsCacheOwnerPct
 	p.mu.Unlock()
 	if b != nil {
-		b.SetLimit(limit)
+		b.SetLimits(limit, share)
 	}
 }
 
