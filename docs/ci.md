@@ -36,6 +36,7 @@ runs. Requiring the individual jobs instead would block those pull requests.
 ## Run the checks locally
 
 ```sh
+make check       # all of the below except the docs build, in order, stopping at the first failure
 make lint        # Go / lint
 make test-race   # Go / test (race)
 make web build   # Go / build
