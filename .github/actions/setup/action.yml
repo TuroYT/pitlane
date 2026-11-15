@@ -1,0 +1,45 @@
+name: Set up the toolchains
+description: >-
+  Go (from go.mod) and/or Node.js 22 with pnpm and the dependencies of one
+  package, the way every CI job needs them. On Pitlane the caches stay on the
+  slot's disk, so the hosted cache (upload and download) is only used on
+  GitHub-hosted runners.
+inputs:
+  go:
+    description: Set up Go from go.mod.
+    default: "false"
+  node-package:
+    description: Directory of a pnpm package (web or site) to install; empty for none.
+    default: ""
+  hosted-cache:
+    description: Use the GitHub Actions cache for Go modules and the pnpm store.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - if: inputs.go == 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache: ${{ inputs.hosted-cache == 'true' }}
+
+    - if: inputs.node-package != ''
+      uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      with:
+        # web/package.json has no packageManager field; site/ pins its own.
+        version: ${{ inputs.node-package == 'web' && '10' || '' }}
+        package_json_file: ${{ inputs.node-package }}/package.json
+
+    - if: inputs.node-package != ''
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+        package-manager-cache: false
+        cache: ${{ inputs.hosted-cache == 'true' && 'pnpm' || '' }}
+        cache-dependency-path: ${{ inputs.node-package }}/pnpm-lock.yaml
+
+    - if: inputs.node-package != ''
+      name: pnpm install
+      shell: bash
+      working-directory: ${{ inputs.node-package }}
+      run: pnpm install --frozen-lockfile
