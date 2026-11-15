@@ -1,3 +1,6 @@
 # Settings only: this package is not part of a workspace.
 # Refuse dependency versions published less than 14 days ago.
 minimumReleaseAge: 20160
+# Dependency build scripts allowed to run (pnpm refuses unlisted ones).
+allowBuilds:
+  esbuild: true

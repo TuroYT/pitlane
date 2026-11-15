@@ -605,13 +605,19 @@ func (t *target) listen() error {
 // GitHub once its busy runners are done.
 func (t *target) stop(remove bool) {
 	t.cancel()
+	// Removed outside the lock: each removal is a Docker call, and the
+	// runners' watch goroutines need the lock to finish.
 	t.mu.Lock()
+	var idle []string
 	for _, r := range t.runners {
 		if !r.busy {
-			t.m.pool.Remove(context.Background(), r.containerID)
+			idle = append(idle, r.containerID)
 		}
 	}
 	t.mu.Unlock()
+	for _, id := range idle {
+		t.m.pool.Remove(context.Background(), id)
+	}
 	if !remove {
 		return
 	}

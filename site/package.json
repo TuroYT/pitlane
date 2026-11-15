@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Pitlane documentation site, built from ../docs with VitePress.",
-  "packageManager": "pnpm@10.34.9",
+  "packageManager": "pnpm@12.17.0",
   "engines": {
     "node": ">=22"
   },

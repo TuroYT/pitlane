@@ -43,6 +43,7 @@ type fakePool struct {
 	reserved     map[int]int64
 	requests     []pool.Request
 	strictDemand bool
+	onRemove     func(id string) // called by Remove, outside mu
 }
 
 func newFakePool(free int) *fakePool {
@@ -175,8 +176,12 @@ func (f *fakePool) Logs(_ context.Context, _ string, _ bool, w io.Writer) error 
 
 func (f *fakePool) Remove(_ context.Context, id string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
+	hook := f.onRemove
+	f.mu.Unlock()
+	if hook != nil {
+		hook(id)
+	}
 }
 
 func (f *fakePool) StopRunner(_ context.Context, id string, _ time.Duration) error {
@@ -345,7 +350,9 @@ func (h *harness) addRunner(name string, runnerID int64, age time.Duration, busy
 // waitFor polls cond until it holds or the test times out.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Generous: CI runs on a shared, sometimes saturated host; the condition
+	// normally holds within milliseconds.
+	deadline := time.Now().Add(30 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)

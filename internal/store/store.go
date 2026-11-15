@@ -138,6 +138,15 @@ var migrations = []string{
 		detail  TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX audit_at ON audit(at DESC, id DESC)`,
+	// Indexes for the job history (paginated, newest first, filtered by
+	// repository), the runner lookups made for every job and the metrics
+	// windows. jobs_recent replaces jobs_queued, which lacked the id tie-break.
+	`CREATE INDEX jobs_recent ON jobs(queued_at DESC, id DESC)`,
+	`DROP INDEX jobs_queued`,
+	`CREATE INDEX jobs_repo ON jobs(owner COLLATE NOCASE, repo COLLATE NOCASE, queued_at DESC, id DESC)`,
+	`CREATE INDEX jobs_runner ON jobs(runner_name)`,
+	`CREATE INDEX jobs_started ON jobs(started_at)`,
+	`CREATE INDEX jobs_finished ON jobs(finished_at)`,
 	// Highest anonymous memory (memory.stat anon) of a job's slot: its
 	// memory.peak also counts the page cache (image layers, build contexts).
 	`ALTER TABLE jobs ADD COLUMN slot_anon_peak INTEGER`,
@@ -628,6 +637,11 @@ func (u *usageScan) usage() *JobUsage {
 	return j
 }
 
+const querySetJobUsage = `UPDATE jobs SET usage_wall_ms = ?,
+	runner_mem_peak = ?, runner_cpu_usec = ?, runner_cpu_some_usec = ?, runner_io_full_usec = ?, runner_mem_full_usec = ?,
+	slot_mem_peak = ?, slot_cpu_usec = ?, slot_cpu_some_usec = ?, slot_io_full_usec = ?, slot_mem_full_usec = ?, slot_anon_peak = ?
+	WHERE id = (SELECT id FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1)`
+
 // SetJobUsage records what the job a runner picked up used. It returns
 // false when no job with that runner is recorded (yet).
 func (s *Store) SetJobUsage(ctx context.Context, runner string, u JobUsage) (bool, error) {
@@ -637,10 +651,7 @@ func (s *Store) SetJobUsage(ctx context.Context, runner string, u JobUsage) (boo
 		}
 		return *v
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET usage_wall_ms = ?,
-		runner_mem_peak = ?, runner_cpu_usec = ?, runner_cpu_some_usec = ?, runner_io_full_usec = ?, runner_mem_full_usec = ?,
-		slot_mem_peak = ?, slot_cpu_usec = ?, slot_cpu_some_usec = ?, slot_io_full_usec = ?, slot_mem_full_usec = ?, slot_anon_peak = ?
-		WHERE id = (SELECT id FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1)`,
+	res, err := s.db.ExecContext(ctx, querySetJobUsage,
 		u.WallMs, n(u.Runner.MemPeak), n(u.Runner.CPUUsec), n(u.Runner.CPUSomeUsec), n(u.Runner.IOFullUsec), n(u.Runner.MemFullUsec),
 		n(u.Slot.MemPeak), n(u.Slot.CPUUsec), n(u.Slot.CPUSomeUsec), n(u.Slot.IOFullUsec), n(u.Slot.MemFullUsec), n(u.Slot.AnonPeak), runner)
 	if err != nil {
@@ -650,11 +661,13 @@ func (s *Store) SetJobUsage(ctx context.Context, runner string, u JobUsage) (boo
 	return rows > 0, err
 }
 
+const queryJobMemoryPeaks = `SELECT COALESCE(runner_mem_peak, 0) + COALESCE(slot_mem_peak, 0) FROM jobs
+	WHERE finished_at >= ? AND (runner_mem_peak IS NOT NULL OR slot_mem_peak IS NOT NULL)`
+
 // JobMemoryPeaks returns the memory peak (runner plus slot, bytes) of the
 // measured jobs finished since the given Unix time.
 func (s *Store) JobMemoryPeaks(ctx context.Context, since int64) ([]float64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(runner_mem_peak, 0) + COALESCE(slot_mem_peak, 0) FROM jobs
-		WHERE finished_at >= ? AND (runner_mem_peak IS NOT NULL OR slot_mem_peak IS NOT NULL)`, since)
+	rows, err := s.db.QueryContext(ctx, queryJobMemoryPeaks, since)
 	if err != nil {
 		return nil, err
 	}
@@ -737,30 +750,28 @@ func (s *Store) UpsertJob(j Job) error {
 	return err
 }
 
-// SetJobSlot records which slot ran the runner that picked a job.
-func (s *Store) SetJobSlot(runnerName string, slot int) error {
-	_, err := s.db.Exec(`UPDATE jobs SET slot = ? WHERE runner_name = ?`, slot, runnerName)
-	return err
-}
+const queryJobByRunner = jobColumns + ` WHERE runner_name = ? ORDER BY id DESC LIMIT 1`
 
 // JobByRunner returns the job a runner picked up.
 func (s *Store) JobByRunner(ctx context.Context, runner string) (Job, error) {
 	var j Job
 	var u usageScan
-	err := s.db.QueryRowContext(ctx, jobColumns+` WHERE runner_name = ? ORDER BY id DESC LIMIT 1`, runner).
+	err := s.db.QueryRowContext(ctx, queryJobByRunner, runner).
 		Scan(append(j.dest(), u.dest()...)...)
 	_, j.Ref = WorkflowRefParts(j.WorkflowFullRef)
 	j.Usage = u.usage()
 	return j, err
 }
 
+const queryInFlightJobs = `SELECT target_id, job_id, runner_name, started_at FROM jobs j
+	WHERE finished_at = 0 AND started_at > 0 AND runner_name != ''
+	AND EXISTS (SELECT 1 FROM runners r WHERE r.name = j.runner_name AND r.target_id = j.target_id)`
+
 // InFlightJobs returns the jobs that started and have not finished on a
 // runner that is still recorded as registered on GitHub. Used at startup to
 // find the jobs of runners that died while Pitlane was stopped.
 func (s *Store) InFlightJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT target_id, job_id, runner_name, started_at FROM jobs j
-		WHERE finished_at = 0 AND started_at > 0 AND runner_name != ''
-		AND EXISTS (SELECT 1 FROM runners r WHERE r.name = j.runner_name AND r.target_id = j.target_id)`)
+	rows, err := s.db.QueryContext(ctx, queryInFlightJobs)
 	if err != nil {
 		return nil, err
 	}
@@ -822,17 +833,25 @@ func (f JobFilter) where() (string, []any) {
 	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
+// queries returns the count and page queries of a job listing, and their
+// arguments (the page query takes LIMIT and OFFSET after them).
+func (f JobFilter) queries() (count, page string, args []any) {
+	where, args := f.where()
+	// where is built from constant fragments only; values are bound parameters.
+	return `SELECT count(*) FROM jobs` + where,
+		jobColumns + where + ` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`, //nolint:gosec // G202: constant fragments, bound values
+		args
+}
+
 // JobsPage returns one page of the most recent jobs matching f, and how many
 // jobs match in total.
 func (s *Store) JobsPage(ctx context.Context, f JobFilter, limit, offset int) ([]Job, int, error) {
-	where, args := f.where()
+	count, page, args := f.queries()
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM jobs`+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, count, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	// where is built from constant fragments only; values are bound parameters.
-	query := jobColumns + where + ` ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?` //nolint:gosec // G202: constant fragments, bound values
-	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
+	rows, err := s.db.QueryContext(ctx, page, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1016,10 +1035,12 @@ func (s *Store) JobResultCounts(ctx context.Context) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
+const queryJobTimings = `SELECT queued_at, started_at, finished_at FROM jobs WHERE started_at >= ? OR finished_at >= ?`
+
 // JobTimings returns, in seconds, the run time of jobs finished since the
 // given Unix time and the queue time of jobs started since then.
 func (s *Store) JobTimings(ctx context.Context, since int64) (durations, waits []float64, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT queued_at, started_at, finished_at FROM jobs WHERE started_at >= ? OR finished_at >= ?`, since, since)
+	rows, err := s.db.QueryContext(ctx, queryJobTimings, since, since)
 	if err != nil {
 		return nil, nil, err
 	}

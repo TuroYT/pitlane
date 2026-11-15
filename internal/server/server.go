@@ -322,14 +322,27 @@ func median(v []float64) float64 {
 	return v[len(v)/2]
 }
 
+// appClient returns a client authenticated as the GitHub App saved by the
+// setup. A key that cannot be decrypted (master.key replaced or lost) is
+// reported as such, not as an unparsable key.
+func (s *Server) appClient() (*gh.AppClient, error) {
+	pem, err := s.store.GetSecret("app_pem")
+	if err != nil {
+		return nil, fmt.Errorf("read the GitHub App private key: %w", err)
+	}
+	appID, err := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("stored GitHub App ID: %w", err)
+	}
+	return gh.NewAppClient(appID, pem)
+}
+
 // token returns a GitHub token able to read Actions data of a target.
 func (s *Server) token(ctx context.Context, t store.Target) (string, error) {
 	if s.cfg.PAT != "" {
 		return s.cfg.PAT, nil
 	}
-	pem, _ := s.store.GetSecret("app_pem")
-	appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-	client, err := gh.NewAppClient(appID, pem)
+	client, err := s.appClient()
 	if err != nil {
 		return "", err
 	}

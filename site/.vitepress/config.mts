@@ -95,12 +95,16 @@ export default defineConfig({
     logo: '/logo.svg',
     siteTitle: 'pitlane',
     nav: [
-      { text: 'Guide', link: '/getting-started', activeMatch: '^/(getting-started|configuration|how-it-works|security|troubleshooting|e2e)' },
+      { text: 'Guide', link: '/getting-started', activeMatch: '^/(getting-started|configuration|how-it-works|security|troubleshooting|faq|e2e)' },
       { text: 'Design notes', link: '/design/actions-cache', activeMatch: '^/design/' },
       { text: 'Brand', link: '/brand' },
       { text: 'Releases', link: `${repo}/releases` },
     ],
     sidebar: [
+      {
+        text: 'Introduction',
+        items: [{ text: 'Why Pitlane', link: '/why' }],
+      },
       {
         text: 'Guide',
         items: [
@@ -109,6 +113,7 @@ export default defineConfig({
           { text: 'How it works', link: '/how-it-works' },
           { text: 'Security', link: '/security' },
           { text: 'Troubleshooting', link: '/troubleshooting' },
+          { text: 'FAQ', link: '/faq' },
           { text: 'E2E tests', link: '/e2e' },
         ],
       },

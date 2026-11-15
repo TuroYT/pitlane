@@ -205,3 +205,28 @@ func TestReconcileConcurrentWithScaleAndSnapshot(t *testing.T) {
 		t.Fatalf("%d runners for max 3", n)
 	}
 }
+
+// stop removes the idle runners' containers without holding the target's
+// lock: a removal is a Docker call that can take seconds, during which the
+// target's other goroutines (runner exits, reconcile) need that lock.
+func TestStopRemovesIdleRunnersOutsideTheLock(t *testing.T) {
+	h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4}, 0)
+	h.addRunner("idle", 1, time.Hour, false, false)
+	h.addRunner("busy", 2, time.Hour, true, false)
+	h.p.onRemove = func(string) { _ = h.t.cfg() } // takes the target's lock
+	done := make(chan struct{})
+	go func() {
+		h.t.stop(false)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop held the target's lock while removing containers")
+	}
+	h.p.mu.Lock()
+	defer h.p.mu.Unlock()
+	if len(h.p.removed) != 1 || h.p.removed[0] != "ctr-idle" {
+		t.Fatalf("removed %v, want only the idle runner", h.p.removed)
+	}
+}
