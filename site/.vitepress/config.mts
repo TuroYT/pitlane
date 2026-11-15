@@ -102,6 +102,10 @@ export default defineConfig({
     ],
     sidebar: [
       {
+        text: 'Introduction',
+        items: [{ text: 'Why Pitlane', link: '/why' }],
+      },
+      {
         text: 'Guide',
         items: [
           { text: 'Getting started', link: '/getting-started' },
