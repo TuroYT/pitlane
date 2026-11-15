@@ -38,6 +38,7 @@ jobs:
           echo "${{ github.run_id }}" > e2e-cache-data/sub/run-id
           sum=$(cat e2e-cache-data/blob.bin e2e-cache-data/sub/run-id | sha256sum | cut -d' ' -f1)
           echo "sum=$sum" >> "$GITHUB_OUTPUT"
+          echo "E2E_T0=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: save
         id: save
@@ -47,13 +48,16 @@ jobs:
           key: ${{ env.E2E_KEY }}-exact
 
       - name: save timing
-        run: echo "::notice title=e2e-timing::cache save (64 MiB) done, cache-id=${{ steps.save.outputs.cache-id }}"
+        run: echo "::notice title=e2e-timing::cache save 64 MiB: $(( $(date +%s) - E2E_T0 ))s"
 
   restore:
     needs: save
     runs-on: ${{ inputs.label || 'pitlane' }}
     timeout-minutes: 15
     steps:
+      - name: start clock
+        run: echo "E2E_T0=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: restore by exact key
         id: exact
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -65,6 +69,7 @@ jobs:
       - name: exact hit with the same content
         run: |
           set -eu
+          echo "::notice title=e2e-timing::cache restore 64 MiB: $(( $(date +%s) - E2E_T0 ))s"
           echo "cache-hit=${{ steps.exact.outputs.cache-hit }} matched=${{ steps.exact.outputs.cache-matched-key }}"
           test "${{ steps.exact.outputs.cache-hit }}" = true
           sum=$(cat e2e-cache-data/blob.bin e2e-cache-data/sub/run-id | sha256sum | cut -d' ' -f1)

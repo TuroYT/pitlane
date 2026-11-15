@@ -160,14 +160,15 @@ for p in $(seq 1 "$passes"); do
     jobs=$(gh api --paginate "repos/$repo/actions/runs/$id/jobs?per_page=100" --jq '.jobs[]' | jq -s .)
     conclusion=$(jq -r '.conclusion // .status' <<<"$run")
     url=$(jq -r .html_url <<<"$run")
-    # Wall time of the run, and the slowest job pickup (queued -> started).
+    # Wall time of the run, and the longest a job waited for a runner
+    # (queued -> started), which includes waiting for a free slot.
     duration=$(jq -r '((.updated_at | fromdateiso8601) - (.run_started_at | fromdateiso8601))' <<<"$run")
     pickup=$(jq -r '[.[] | select(.started_at and .created_at)
                      | ((.started_at | fromdateiso8601) - (.created_at | fromdateiso8601))] | max // 0' <<<"$jobs")
     timings=""
     for jid in $(jq -r '.[].id' <<<"$jobs"); do
       t=$(gh api "repos/$repo/check-runs/$jid/annotations" \
-            --jq '[.[] | select(.title == "e2e-timing") | .message] | join("; ")' 2>/dev/null || true)
+            --jq '[.[] | select(.title == "e2e-timing") | .message] | sort | join("; ")' 2>/dev/null || true)
       [ -z "$t" ] || timings="${timings:+$timings; }$t"
     done
     [ "$conclusion" = success ] || failed=$((failed + 1))
@@ -178,7 +179,7 @@ done
 echo
 echo "Pitlane e2e on $repo (label: $label)"
 {
-  echo "pass|scenario|conclusion|duration|max pickup|timings|run"
+  echo "pass|scenario|conclusion|duration|max queue|timings|run"
   printf '%s\n' "${rows[@]}"
 } | if command -v column >/dev/null; then column -t -s '|'; else tr '|' '\t'; fi
 echo
