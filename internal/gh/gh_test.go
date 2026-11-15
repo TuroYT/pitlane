@@ -156,3 +156,31 @@ func TestOrgAndTeamMembership(t *testing.T) {
 		t.Errorf("team without permission: %v %v", got, err)
 	}
 }
+
+// A failed download of the signed log URL does not put its query (the
+// signature) in the error.
+func TestJobLogErrorHasNoSignature(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close() // nothing listens there any more
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/api/actions/runs/1/jobs":
+			_, _ = w.Write([]byte(`{"jobs":[{"id":7,"runner_name":"pitlane-a"}]}`))
+		case "/repos/acme/api/actions/jobs/7/logs":
+			http.Redirect(w, r, gone.URL+"/blob/log.txt?sig=SECRET&se=2030", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	old := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = old })
+	_, err := JobLog(context.Background(), "tok", "acme", "api", 1, "pitlane-a")
+	if err == nil {
+		t.Fatal("download from a closed server succeeded")
+	}
+	if strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "/blob/log.txt") {
+		t.Fatalf("error: %v", err)
+	}
+}
