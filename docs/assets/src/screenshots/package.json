@@ -1,0 +1,9 @@
+{
+  "name": "pitlane-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible UI screenshots from a mocked Pitlane API",
+  "dependencies": {
+    "playwright-core": "1.59"
+  }
+}

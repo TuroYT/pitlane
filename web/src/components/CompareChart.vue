@@ -67,7 +67,7 @@ const config = computed<ChartConfiguration>(() => {
         },
       },
       scales: {
-        x: { beginAtZero: true, grid: { color: t.grid }, border: { display: false }, ticks: { maxTicksLimit: 6, callback: (v) => fmtSeconds(Number(v)) } },
+        x: { beginAtZero: true, grid: { color: t.grid }, border: { display: false }, ticks: { maxTicksLimit: 5, maxRotation: 0, callback: (v) => fmtSeconds(Number(v)) } },
         y: { grid: { display: false }, border: { color: t.grid }, ticks: { autoSkip: false } },
       },
     },
@@ -87,15 +87,15 @@ const config = computed<ChartConfiguration>(() => {
           <span><i :style="{ background: theme.hosted }" />GitHub-hosted</span>
           <span><i :style="{ background: theme.pitlane }" />Pitlane</span>
         </div>
-        <button class="small" :disabled="loading" @click="load(!!rows)">{{ loading ? 'Comparing…' : rows ? 'Refresh' : 'Compare' }}</button>
+        <button type="button" class="small" :disabled="loading" @click="load(!!rows)">{{ loading ? 'Comparing…' : rows ? 'Refresh' : 'Compare' }}</button>
       </div>
     </div>
     <div class="box-body stack">
       <p v-if="error" class="alert error">Could not read the Actions history from GitHub: {{ error }}</p>
-      <p v-if="!rows && !loading && !error" class="chart-empty" style="height: 96px">
+      <p v-if="!rows && !loading && !error" class="chart-empty short">
         Reads your repositories' recent Actions history from GitHub to compare each job on both kinds of runners.
       </p>
-      <p v-else-if="loading && !rows" class="chart-empty" style="height: 96px">Reading the Actions history…</p>
+      <p v-else-if="loading && !rows" class="chart-empty short" role="status">Reading the Actions history…</p>
       <template v-else-if="rows">
         <p v-if="overall" class="small">
           <strong>{{ ratioText(overall.ratio) }}</strong> on {{ both.length }} job{{ both.length === 1 ? '' : 's' }} that ran on both:
@@ -104,7 +104,7 @@ const config = computed<ChartConfiguration>(() => {
         </p>
         <ChartCanvas v-if="top.length" :config="config" :height="48 + top.length * 34"
           label="Median job duration on GitHub-hosted runners and on Pitlane" />
-        <p v-else class="chart-empty" style="height: 96px">
+        <p v-else class="chart-empty short">
           No job has run on both kinds of runners yet. Run a workflow once with <code>runs-on: ubuntu-latest</code> and once with
           <code>runs-on: pitlane</code> to compare.
         </p>

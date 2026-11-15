@@ -338,7 +338,10 @@ export function duration(seconds: number): string {
 
 export function ago(unix: number): string {
   if (!unix) return '—'
-  return duration(Date.now() / 1000 - unix) + ' ago'
+  const s = Date.now() / 1000 - unix
+  // Past two days, hours and minutes are noise ("48h 0m ago").
+  if (s >= 2 * 86400) return `${Math.floor(s / 86400)} days ago`
+  return duration(s) + ' ago'
 }
 
 export function bytes(n: number): string {

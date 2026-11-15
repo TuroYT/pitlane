@@ -37,7 +37,7 @@ const verdict = computed(() => {
     <div class="section-head">
       <div>
         <h2>Memory per job</h2>
-        <p class="muted small">Peak memory of each job (runner plus its slot), p50/p90/max over the last {{ m?.windowDays ?? 7 }} days.</p>
+        <p class="muted small">Peak memory of each job (runner plus its slot) over the last {{ m?.windowDays ?? 7 }} days.</p>
       </div>
       <span v-if="m" class="muted small">{{ m.count }} measured {{ m.count === 1 ? 'job' : 'jobs' }}</span>
     </div>
@@ -52,7 +52,7 @@ const verdict = computed(() => {
         <div class="counter-value">{{ fmt(m.p90) }}</div>
       </div>
       <div>
-        <div class="counter-label">max</div>
+        <div class="counter-label">Max</div>
         <div class="counter-value">{{ fmt(m.max) }}</div>
       </div>
       <div class="sizing small">
@@ -67,7 +67,7 @@ const verdict = computed(() => {
           <div class="muted">
             Memory limit: {{ m.memoryLimitMb > 0 ? `${m.memoryLimitMb} MB per runner and per slot` : 'none' }}
           </div>
-          <div v-if="verdict === 'over'" class="warn-text">More slots than fit in memory at p90: parallel jobs may swap or be OOM-killed.</div>
+          <div v-if="verdict === 'over'" class="warn-text" role="note">More slots than fit in memory at p90: parallel jobs may swap or be OOM-killed.</div>
         </template>
         <div v-else class="muted">
           No measured job yet. Pitlane reads each job's usage from cgroup v2; it needs the host's /sys/fs/cgroup (not available on Docker Desktop or rootless Docker).

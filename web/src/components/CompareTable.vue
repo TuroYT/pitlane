@@ -45,17 +45,19 @@ function ratio(r: Row) {
 
 <template>
   <section class="stack">
-    <div class="row-between">
-      <h2>Pitlane vs GitHub-hosted</h2>
+    <div class="section-head">
+      <div>
+        <h2>Pitlane vs GitHub-hosted</h2>
+        <p class="muted small">
+          Median duration of each successful job in the recent Actions history of your enabled repositories (last 60 runs).
+        </p>
+      </div>
       <div class="filters">
-        <label v-if="rows" class="inline"><input v-model="onlyBoth" type="checkbox" /> Only jobs run on both</label>
-        <button class="small" :disabled="loading" @click="load(!!rows)">{{ loading ? 'Comparing…' : rows ? 'Refresh' : 'Compare' }}</button>
+        <label v-if="rows" class="inline"><input v-model="onlyBoth" type="checkbox" /><span>Only jobs run on both</span></label>
+        <button type="button" class="small" :disabled="loading" @click="load(!!rows)">{{ loading ? 'Comparing…' : rows ? 'Refresh' : 'Compare' }}</button>
       </div>
     </div>
-    <p class="muted small">
-      Median duration of each successful job in the recent Actions history of your enabled repositories (last 60 runs).
-    </p>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">Could not read the Actions history from GitHub: {{ error }}</p>
     <p v-if="overall" class="alert" :class="overall.ratio >= 1 ? 'ok' : 'warn'">
       Jobs run on both: {{ duration(overall.hosted) }} on GitHub-hosted runners vs {{ duration(overall.pit) }} on Pitlane
       ({{ overall.ratio >= 1 ? `${overall.ratio.toFixed(1)}× faster` : `${(1 / overall.ratio).toFixed(1)}× slower` }}).
@@ -63,16 +65,16 @@ function ratio(r: Row) {
     <div v-if="rows" class="table-wrap">
       <table class="table">
         <thead>
-          <tr><th>Repository</th><th>Workflow / job</th><th>GitHub-hosted</th><th>Pitlane</th><th></th></tr>
+          <tr><th>Repository</th><th>Job</th><th class="right">GitHub-hosted</th><th class="right">Pitlane</th><th class="right">Speed-up</th></tr>
         </thead>
         <tbody>
-          <tr v-if="!shown.length"><td colspan="5" class="muted center">Nothing to compare yet.</td></tr>
+          <tr v-if="!shown.length"><td colspan="5" class="empty">No job ran on both kinds of runners yet.</td></tr>
           <tr v-for="r in shown" :key="r.repo + r.workflow + r.job">
             <td class="ellipsis">{{ r.repo }}</td>
             <td class="ellipsis">{{ r.job }} <span class="muted small">{{ r.workflow }}</span></td>
-            <td>{{ r.hostedCount ? duration(r.hostedMedian) : '—' }} <span class="muted small">{{ r.hostedCount ? `(${r.hostedCount})` : '' }}</span></td>
-            <td>{{ r.pitlaneCount ? duration(r.pitlaneMedian) : '—' }} <span class="muted small">{{ r.pitlaneCount ? `(${r.pitlaneCount})` : '' }}</span></td>
-            <td :class="ratio(r).includes('faster') ? 'ok-text' : 'error-text'">{{ ratio(r) }}</td>
+            <td class="right nowrap" :title="r.hostedCount ? `Median of ${r.hostedCount} runs` : undefined">{{ r.hostedCount ? duration(r.hostedMedian) : '—' }} <span class="muted small">{{ r.hostedCount ? `(${r.hostedCount})` : '' }}</span></td>
+            <td class="right nowrap" :title="r.pitlaneCount ? `Median of ${r.pitlaneCount} runs` : undefined">{{ r.pitlaneCount ? duration(r.pitlaneMedian) : '—' }} <span class="muted small">{{ r.pitlaneCount ? `(${r.pitlaneCount})` : '' }}</span></td>
+            <td class="right nowrap" :class="ratio(r).includes('faster') ? 'ok-text' : 'error-text'">{{ ratio(r) || '—' }}</td>
           </tr>
         </tbody>
       </table>

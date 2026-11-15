@@ -86,28 +86,28 @@ onBeforeUnmount(() => ctrl?.abort())
 <template>
   <div class="stack">
     <header class="job-header">
-      <RouterLink to="/jobs" class="small">Jobs</RouterLink>
+      <RouterLink to="/jobs" class="small back">← Jobs</RouterLink>
       <h1>
         <JobStatus v-if="job" :job="job" />
         {{ job?.jobName || 'Runner' }}
       </h1>
       <JobSource v-if="job" :job="job" />
-      <div class="filters small muted">
+      <div class="meta small muted">
         <span>Runner <code>{{ name }}</code></span>
-        <span v-if="job && job.slot >= 0">· slot #{{ job.slot }}</span>
-        <span v-if="elapsed">· {{ job?.finishedAt ? 'ran' : 'running for' }} {{ elapsed }}</span>
+        <span v-if="job && job.slot >= 0">Slot #{{ job.slot }}</span>
+        <span v-if="elapsed">{{ job?.finishedAt ? 'Ran' : 'Running for' }} {{ elapsed }}</span>
         <JobLinks v-if="job" :job="job" />
       </div>
     </header>
-    <div class="row-between">
-      <div class="tabs" role="tablist">
-        <button role="tab" :aria-selected="tab === 'job'" :class="{ active: tab === 'job' }" @click="tab = 'job'">Job output</button>
-        <button role="tab" :aria-selected="tab === 'runner'" :class="{ active: tab === 'runner' }" @click="tab = 'runner'">Runner</button>
+    <div class="tabs-row">
+      <div class="tabs" role="tablist" aria-label="Logs">
+        <button type="button" role="tab" :aria-selected="tab === 'job'" :class="{ active: tab === 'job' }" @click="tab = 'job'">Job output</button>
+        <button type="button" role="tab" :aria-selected="tab === 'runner'" :class="{ active: tab === 'runner' }" @click="tab = 'runner'">Runner</button>
       </div>
       <div class="filters">
-        <span class="badge" :class="streaming ? 'busy' : 'muted'">{{ streaming ? 'live' : 'finished' }}</span>
-        <label class="inline"><input v-model="timestamps" type="checkbox" /> Timestamps</label>
-        <label class="inline"><input v-model="follow" type="checkbox" /> Follow</label>
+        <span class="badge" :class="streaming ? 'busy' : 'muted'" role="status">{{ streaming ? 'Streaming' : 'Complete' }}</span>
+        <label class="inline"><input v-model="timestamps" type="checkbox" /><span>Timestamps</span></label>
+        <label class="inline"><input v-model="follow" type="checkbox" /><span>Follow</span></label>
       </div>
     </div>
     <p class="muted small">
@@ -115,10 +115,10 @@ onBeforeUnmount(() => ctrl?.abort())
         ? 'Output of every step: live while the job runs, fetched from GitHub once it is done.'
         : 'Runner process: connection to GitHub, job start and result.' }}
     </p>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
     <p v-if="dropped" class="muted small">
       Showing the last {{ MAX_LOG_LINES.toLocaleString() }} lines: {{ dropped.toLocaleString() }} earlier lines are not shown.
     </p>
-    <pre ref="pre" class="logs">{{ text || (streaming ? 'Waiting for output…' : 'No output.') }}</pre>
+    <pre ref="pre" class="logs" tabindex="0" :aria-label="tab === 'job' ? 'Job output' : 'Runner log'">{{ text || (streaming ? 'Waiting for output…' : 'No output.') }}</pre>
   </div>
 </template>

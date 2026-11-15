@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api, post, live, targetName, type Installation, type TargetState } from '../api'
 import { can, status } from '../session'
+import Icon from '../components/Icon.vue'
 
 // The server enforces the same: operators may only pause or resume.
 const isAdmin = computed(() => can('admin'))
@@ -66,15 +67,26 @@ async function update(t: TargetState, patch: Partial<TargetState>) {
 
 async function remove(t: TargetState) {
   if (!confirm(`Stop providing runners to ${targetName(t)}? Its scale set is deleted from GitHub once running jobs finish.`)) return
-  await api(`/api/targets/${t.id}`, { method: 'DELETE' })
+  error.value = ''
+  try {
+    await api(`/api/targets/${t.id}`, { method: 'DELETE' })
+  } catch (e) {
+    error.value = (e as Error).message
+  }
 }
 
 function forcedDate(t: TargetState) {
   return t.strictForcedAt ? new Date(t.strictForcedAt * 1000).toLocaleString() : ''
 }
+function forcedDay(t: TargetState) {
+  return t.strictForcedAt ? new Date(t.strictForcedAt * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''
+}
 
 function statusClass(s: string) {
   return { listening: 'ok', starting: 'busy', error: 'error', disabled: 'muted', 'no-credentials': 'error' }[s] ?? 'muted'
+}
+const statusLabel: Record<string, string> = {
+  listening: 'Listening', starting: 'Starting', error: 'Error', disabled: 'Disabled', 'no-credentials': 'No credentials',
 }
 
 function filteredRepos(inst: Installation) {
@@ -82,29 +94,43 @@ function filteredRepos(inst: Installation) {
   return inst.repos.filter((r) => !q || r.fullName.toLowerCase().includes(q))
 }
 
-function copy(text: string) {
-  navigator.clipboard?.writeText(text)
+// The label chip copies "runs-on: <label>" and says so for a moment.
+const copied = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+async function copy(text: string) {
+  try {
+    await navigator.clipboard?.writeText(text)
+    copied.value = text
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => (copied.value = ''), 1500)
+  } catch {
+    /* clipboard unavailable (plain http): the label stays selectable */
+  }
 }
 </script>
 
 <template>
   <div class="stack-lg">
-    <h1>Repositories</h1>
-    <p v-if="!isAdmin" class="alert info small">
+    <div class="page-head">
+      <h1>Repositories</h1>
+      <p class="muted">Repositories and organizations Pitlane provides runners to. In a workflow, use <code>runs-on: &lt;label&gt;</code>; repository and organization labels both work.</p>
+    </div>
+    <p v-if="!isAdmin" class="alert info">
       Your role is {{ status?.role }}: {{ canToggle ? 'you can enable or disable targets, nothing else' : 'read only' }}.
     </p>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
     <section>
-      <h2>Using Pitlane</h2>
-      <p class="muted small">
-        In a workflow, put <code>runs-on: &lt;label&gt;</code>. Repository-level and organization-level labels both work.
-      </p>
-      <p class="muted small">
-        <strong>Warm runners</strong>: each one keeps one slot reserved for that repository, so its jobs start instantly
-        (no runner start-up), but that slot cannot run jobs of other repositories. New repositories get one, strict (public)
-        ones none, so no idle runner waits for a pull request from a fork; set 0 to free its slot.
-      </p>
+      <div class="section-head">
+        <div>
+          <h2>Enabled targets</h2>
+          <p class="muted small">
+            <strong>Warm runners</strong> keep a slot reserved for the target, so its jobs start instantly, but that slot cannot
+            run other jobs. New repositories get one, strict (public) ones none, so no idle runner waits for a pull request
+            from a fork. Set 0 to free the slot.
+          </p>
+        </div>
+      </div>
       <div class="table-wrap">
         <table class="table">
           <thead>
@@ -122,7 +148,7 @@ function copy(text: string) {
           </thead>
           <tbody>
             <tr v-if="!targets.length">
-              <td colspan="9" class="muted center">Nothing yet: enable a repository below.</td>
+              <td colspan="9" class="empty">No repository uses Pitlane yet. Enable one below.</td>
             </tr>
             <tr v-for="t in targets" :key="t.id">
               <td>
@@ -133,42 +159,49 @@ function copy(text: string) {
                 </div>
               </td>
               <td>
-                <button class="chip" title="Copy" @click="copy(`runs-on: ${t.scaleSetName}`)">runs-on: {{ t.scaleSetName }}</button>
+                <button type="button" class="chip" :class="{ copied: copied === `runs-on: ${t.scaleSetName}` }"
+                  :title="`Copy runs-on: ${t.scaleSetName}`" @click="copy(`runs-on: ${t.scaleSetName}`)">
+                  {{ copied === `runs-on: ${t.scaleSetName}` ? 'Copied' : `runs-on: ${t.scaleSetName}` }}
+                </button>
               </td>
               <td>
-                <span class="badge" :class="statusClass(t.status)" :title="t.error">{{ t.status }}</span>
-                <div v-if="t.error" class="small error-text ellipsis" :title="t.error">{{ t.error }}</div>
+                <span class="badge" :class="statusClass(t.status)">{{ statusLabel[t.status] ?? t.status }}</span>
+                <div v-if="t.error" class="small error-text clamp" :title="t.error">{{ t.error }}</div>
               </td>
               <td>
                 <input type="number" class="num" min="0" :max="t.maxRunners" :value="t.minRunners" :disabled="!isAdmin"
+                  :aria-label="`Warm runners for ${targetName(t)}`"
                   @change="update(t, { minRunners: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
                 <input type="number" class="num" min="1" max="64" :value="t.maxRunners" :disabled="!isAdmin"
+                  :aria-label="`Max parallel jobs for ${targetName(t)}`"
                   @change="update(t, { maxRunners: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
                 <input type="number" class="num" min="0" step="10" :value="t.maxJobMinutes" :disabled="!isAdmin"
+                  :aria-label="`Job time limit in minutes for ${targetName(t)}`"
                   @change="update(t, { maxJobMinutes: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
                 <label class="switch" :title="t.strictRequired ? `Required: ${t.strictRequired}` : ''">
                   <input type="checkbox" :checked="t.strict" :disabled="!isAdmin || (!!t.strictRequired && t.strict)"
+                    :aria-label="`Strict isolation for ${targetName(t)}`"
                     @change="update(t, { strict: ($event.target as HTMLInputElement).checked })" />
                   <span />
                 </label>
-                <div v-if="t.strictRequired" class="small muted">required: {{ t.strictRequired }}</div>
-                <div v-if="t.strictRequired && t.strictForcedAt" class="small warn-text" :title="`Pitlane switched this target to strict mode on ${forcedDate(t)}`">
-                  switched on automatically {{ forcedDate(t) }}
+                <div v-if="t.strictRequired" class="small muted nowrap">Required: {{ t.strictRequired }}</div>
+                <div v-if="t.strictRequired && t.strictForcedAt" class="small warn-text nowrap" :title="`Pitlane switched this target to strict mode on ${forcedDate(t)}`">
+                  Turned on {{ forcedDay(t) }}
                 </div>
               </td>
               <td>
                 <label class="switch">
-                  <input type="checkbox" :checked="t.enabled" :disabled="!canToggle" @change="update(t, { enabled: ($event.target as HTMLInputElement).checked })" />
+                  <input type="checkbox" :checked="t.enabled" :disabled="!canToggle" :aria-label="`Enable ${targetName(t)}`" @change="update(t, { enabled: ($event.target as HTMLInputElement).checked })" />
                   <span />
                 </label>
               </td>
-              <td class="actions"><button v-if="isAdmin" class="ghost small danger" @click="remove(t)">Remove</button></td>
+              <td class="actions"><button v-if="isAdmin" type="button" class="ghost small danger" @click="remove(t)">Remove</button></td>
             </tr>
           </tbody>
         </table>
@@ -176,22 +209,25 @@ function copy(text: string) {
     </section>
 
     <section v-if="isAdmin && status?.mode === 'app'">
-      <div class="row-between">
+      <div class="section-head">
         <h2>Add repositories</h2>
         <div class="filters">
-          <input v-model="search" placeholder="Filter repositories…" />
-          <button class="ghost small" :disabled="loading" @click="loadInstalls">{{ loading ? 'Loading…' : 'Refresh' }}</button>
-          <a v-if="installUrl" class="button small" :href="installUrl" target="_blank" rel="noopener">Install on another account ↗</a>
+          <input v-model="search" type="search" placeholder="Filter repositories…" aria-label="Filter repositories" />
+          <button type="button" class="small" :disabled="loading" @click="loadInstalls">{{ loading ? 'Loading…' : 'Refresh' }}</button>
+          <a v-if="installUrl" class="button small" :href="installUrl" target="_blank" rel="noopener">
+            Install on another account<Icon name="external" :size="12" />
+          </a>
         </div>
       </div>
+      <p v-if="loading && !installs.length" class="muted" role="status">Loading the App's installations…</p>
       <p v-if="!loading && !installs.length" class="alert info">
         The GitHub App is not installed anywhere yet.
         <a :href="installUrl" target="_blank" rel="noopener">Install it</a>, then click Refresh.
       </p>
       <div v-for="inst in installs" :key="inst.id" class="card account">
         <div class="row-between">
-          <h3>{{ inst.account }} <span class="muted small">{{ inst.type === 'Organization' ? 'organization' : 'personal account' }}</span></h3>
-          <button v-if="inst.type === 'Organization'" class="small"
+          <h3>{{ inst.account }} <span class="muted small">{{ inst.type === 'Organization' ? 'Organization' : 'Personal account' }}</span></h3>
+          <button v-if="inst.type === 'Organization'" type="button" class="small"
             :disabled="has(`org:${inst.account}`)" @click="enable('org', inst.account, '', inst.id)">
             {{ has(`org:${inst.account}`) ? 'Whole organization enabled' : 'Enable for the whole organization' }}
           </button>
@@ -199,9 +235,9 @@ function copy(text: string) {
         <p v-if="inst.error" class="alert error">{{ inst.error }}</p>
         <ul class="repo-list">
           <li v-for="r in filteredRepos(inst)" :key="r.fullName">
-            <span>{{ r.name }} <span v-if="r.private" class="muted small">private</span>
-              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners: always strict, and require approval for fork pull requests">public</span></span>
-            <button class="small" :class="{ primary: !has(`repo:${r.fullName}`) }" :disabled="has(`repo:${r.fullName}`)"
+            <span class="repo-name">{{ r.name }} <span v-if="r.private" class="muted small">Private</span>
+              <span v-else class="badge warn" title="Anyone can open a pull request that runs code on your runners: always strict, and require approval for fork pull requests">Public</span></span>
+            <button type="button" class="small" :disabled="has(`repo:${r.fullName}`)" :aria-label="`Enable ${r.fullName}`"
               @click="enable('repo', inst.account, r.name, inst.id)">
               {{ has(`repo:${r.fullName}`) ? 'Enabled' : 'Enable' }}
             </button>
@@ -211,14 +247,15 @@ function copy(text: string) {
       </div>
     </section>
 
-    <section v-else-if="isAdmin" class="card">
+    <section v-else-if="isAdmin" class="card stack">
       <h2>Add a repository or organization</h2>
       <form class="filters" @submit.prevent="addManual">
-        <select v-model="manual.kind">
+        <select v-model="manual.kind" aria-label="Kind">
           <option value="repo">Repository</option>
           <option value="org">Organization</option>
         </select>
-        <input v-model="manual.name" :placeholder="manual.kind === 'repo' ? 'owner/repo' : 'organization'" required />
+        <input v-model="manual.name" :placeholder="manual.kind === 'repo' ? 'owner/repo' : 'organization'"
+          :aria-label="manual.kind === 'repo' ? 'Repository (owner/repo)' : 'Organization'" required />
         <button class="primary">Add</button>
       </form>
     </section>

@@ -43,12 +43,12 @@ function whenShort(j: Job) {
             <th class="right" title="Share of the job's time stalled waiting for CPU, I/O or memory (worse of runner and slot)">Pressure</th>
           </template>
           <th class="right">Queued</th>
-          <th></th>
+          <th><span class="sr-only">Links</span></th>
         </tr>
       </thead>
       <tbody>
         <tr v-if="!jobs.length">
-          <td :colspan="compact ? 6 : 10" class="muted center">{{ empty ?? 'No jobs yet. They appear here as soon as GitHub assigns one to Pitlane.' }}</td>
+          <td :colspan="compact ? 6 : 10" class="empty">{{ empty ?? 'No jobs yet. They appear here as soon as GitHub assigns one to Pitlane.' }}</td>
         </tr>
         <tr v-for="j in jobs" :key="j.id">
           <td><JobStatus :job="j" /></td>
