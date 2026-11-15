@@ -116,6 +116,13 @@
         "patch"
       ],
       "groupName": "go modules (non-major)"
+    },
+    {
+      "description": "The docs site refuses dependencies published less than 14 days ago (pnpm minimumReleaseAge): wait as long before proposing them.",
+      "matchFileNames": [
+        "site/**"
+      ],
+      "minimumReleaseAge": "14 days"
     }
   ]
 }
