@@ -9,7 +9,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#faster-than-github-hosted-runners">Benchmark</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="docs/getting-started.md">Docs</a>
+  <a href="https://turoyt.github.io/pitlane/">Docs</a>
 </p>
 
 Pitlane turns a Docker host you already have (a VM, a Proxmox LXC, a spare server)
@@ -127,11 +127,14 @@ stay. Read more in [How it works](docs/how-it-works.md).
 
 ## Documentation
 
+Read it on **[turoyt.github.io/pitlane](https://turoyt.github.io/pitlane/)**, or here:
+
 - [Getting started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [How it works & performance](docs/how-it-works.md)
 - [Security](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [End-to-end tests](docs/e2e.md)
 - [Brand](docs/brand.md)
 
 ## Status
