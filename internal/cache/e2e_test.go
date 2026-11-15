@@ -11,12 +11,16 @@ import (
 	"testing"
 )
 
-// installShim writes NodeShim as dir/node in front of real (dir/node.pitlane).
+// installShim builds Pitlane and installs it as dir/node, the Node shim
+// (internal/nodeshim), in front of real (dir/node.pitlane), as the externals
+// copy does.
 func installShim(t *testing.T, real string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "node"), []byte(NodeShim), 0o755); err != nil { //nolint:gosec // G306: an executable
-		t.Fatal(err)
+	cmd := exec.Command("go", "build", "-o", filepath.Join(dir, "node"), "../../cmd/pitlane")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build pitlane: %v\n%s", err, out)
 	}
 	if err := os.Symlink(real, filepath.Join(dir, "node.pitlane")); err != nil {
 		t.Fatal(err)
@@ -33,41 +37,10 @@ func runnerEnv(extra ...string) []string {
 	return append(env, extra...)
 }
 
-func TestNodeShim(t *testing.T) {
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("no sh")
-	}
-	// A fake Node printing what it receives.
-	fake := filepath.Join(t.TempDir(), "fake")
-	if err := os.WriteFile(fake, []byte("#!"+sh+"\necho \"args=$* url=$ACTIONS_CACHE_URL v2=${ACTIONS_CACHE_SERVICE_V2:-unset} results=$ACTIONS_RESULTS_URL\"\n"), 0o755); err != nil { //nolint:gosec // G306: an executable
-		t.Fatal(err)
-	}
-	node := installShim(t, fake)
-	run := func(env ...string) string {
-		cmd := exec.Command(node, "a b", "c") //nolint:gosec // G204: test binary
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%v: %s", err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	got := run(runnerEnv("PITLANE_CACHE_URL=http://10.0.0.1:8091/tok/")...)
-	if want := "args=a b c url=http://10.0.0.1:8091/tok/acme/api/ v2=unset results=http://127.0.0.1:9/"; got != want {
-		t.Fatalf("with Pitlane cache:\n got %s\nwant %s", got, want)
-	}
-	// Without PITLANE_CACHE_URL (cache off, strict job, job container),
-	// nothing changes.
-	got = run(runnerEnv()...)
-	if want := "args=a b c url=http://127.0.0.1:9/ v2=True results=http://127.0.0.1:9/"; got != want {
-		t.Fatalf("without Pitlane cache:\n got %s\nwant %s", got, want)
-	}
-}
-
 // TestToolkitClient drives the real @actions/cache client (as bundled in
 // actions/cache and the setup-* actions) through the Node shim against the
-// server. It needs node, npm and network access: PITLANE_E2E=1 go test ./internal/cache -run Toolkit
+// server. A hyphenated input goes through as well (a shell shim loses it).
+// It needs node, npm and network access: PITLANE_E2E=1 go test ./internal/cache -run Toolkit
 func TestToolkitClient(t *testing.T) {
 	if os.Getenv("PITLANE_E2E") == "" {
 		t.Skip("set PITLANE_E2E=1 (needs node, npm and network)")
@@ -92,6 +65,7 @@ func TestToolkitClient(t *testing.T) {
 const [mode, dir, key, ...restore] = process.argv.slice(2)
 if (mode === 'save') console.log('result=' + await cache.saveCache([dir], key))
 else console.log('result=' + (await cache.restoreCache([dir], key, restore) ?? ''))
+if (process.env['INPUT_INCLUDE-HIDDEN-FILES'] !== 'false') throw new Error('hyphenated input lost')
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +80,7 @@ else console.log('result=' + (await cache.restoreCache([dir], key, restore) ?? '
 		cmd := exec.Command(node, append([]string{script}, args...)...) //nolint:gosec // G204: test
 		cmd.Dir = work
 		cmd.Env = runnerEnv("PITLANE_CACHE_URL="+ts.URL+"/"+tok+"/", "RUNNER_TEMP="+t.TempDir(), "GITHUB_WORKSPACE="+work,
-			"ACTIONS_RUNTIME_TOKEN="+jobToken("refs/heads/main"), "RUNNER_DEBUG=1")
+			"ACTIONS_RUNTIME_TOKEN="+jobToken("refs/heads/main"), "RUNNER_DEBUG=1", "INPUT_INCLUDE-HIDDEN-FILES=false")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)

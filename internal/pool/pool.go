@@ -158,6 +158,7 @@ type Pool struct {
 	selfOnce  sync.Once
 	self      *selfInfo  // container Pitlane runs in (nil on the host)
 	fwdMu     sync.Mutex // cache forwarder creation
+	shimExe   string     // binary installed as the Node shim; "" = the running Pitlane
 
 	sops slotOps // nil: Docker (tests set a fake)
 
@@ -235,7 +236,7 @@ func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) err
 	p := d.p
 	// Always a full copy: the volume is reachable from the privileged slot
 	// daemon, so nothing inside it (such as a marker file) can be trusted.
-	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/ && ` + shimScript("/x")
+	script := `find /x -mindepth 1 -delete && cp -a ` + externalsDir + `/. /x/ && ` + shimScript("/x", shimInContainer)
 	c, err := p.cli.ContainerCreate(ctx, &container.Config{
 		Image: img, User: "root", Entrypoint: []string{"sh", "-c", script},
 		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
@@ -244,6 +245,9 @@ func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) err
 		return err
 	}
 	defer p.Remove(context.Background(), c.ID)
+	if err := p.stageShim(ctx, c.ID); err != nil {
+		p.log.Warn("cannot install the Node shim: this slot's jobs use GitHub's actions cache", "slot", i, "error", err)
+	}
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
 		return err
 	}
