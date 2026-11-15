@@ -99,6 +99,45 @@ var migrations = []string{
 	`ALTER TABLE jobs ADD COLUMN slot_cpu_some_usec INTEGER`,
 	`ALTER TABLE jobs ADD COLUMN slot_io_full_usec INTEGER`,
 	`ALTER TABLE jobs ADD COLUMN slot_mem_full_usec INTEGER`,
+	// Users and roles (users.go). Logins compare case-insensitively, like
+	// on GitHub.
+	`CREATE TABLE users (
+		login      TEXT PRIMARY KEY COLLATE NOCASE,
+		role       TEXT NOT NULL,
+		created_at INTEGER NOT NULL DEFAULT 0,
+		created_by TEXT NOT NULL DEFAULT ''
+	)`,
+	// Every login of the former allow list (the allowed_users setting,
+	// comma-separated) becomes an admin: everyone keeps the rights they had.
+	`WITH RECURSIVE split(login, rest) AS (
+		SELECT '', COALESCE((SELECT value FROM settings WHERE key = 'allowed_users'), '') || ','
+		UNION ALL
+		SELECT trim(substr(rest, 1, instr(rest, ',') - 1)), substr(rest, instr(rest, ',') + 1) FROM split WHERE rest <> ''
+	)
+	INSERT OR IGNORE INTO users (login, role, created_at, created_by)
+	SELECT ltrim(login, '@'), 'admin', CAST(strftime('%s', 'now') AS INTEGER), 'migration' FROM split WHERE ltrim(login, '@') <> ''`,
+	// Organization and team membership rules, checked at sign-in.
+	`CREATE TABLE access_rules (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		org        TEXT NOT NULL COLLATE NOCASE,
+		team       TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+		role       TEXT NOT NULL,
+		created_at INTEGER NOT NULL DEFAULT 0,
+		created_by TEXT NOT NULL DEFAULT '',
+		UNIQUE (org, team)
+	)`,
+	// The rules a session's user matched at sign-in ("org" or "org/team").
+	`ALTER TABLE sessions ADD COLUMN memberships TEXT NOT NULL DEFAULT ''`,
+	// Admin actions.
+	`CREATE TABLE audit (
+		id      INTEGER PRIMARY KEY AUTOINCREMENT,
+		at      INTEGER NOT NULL,
+		actor   TEXT NOT NULL,
+		action  TEXT NOT NULL,
+		subject TEXT NOT NULL DEFAULT '',
+		detail  TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX audit_at ON audit(at DESC, id DESC)`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -808,28 +847,46 @@ func sessionKey(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// CreateSession stores a session token for login.
-func (s *Store) CreateSession(token, login string, ttl time.Duration) error {
-	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at) VALUES (?, ?, ?)`, sessionKey(token), login, time.Now().Add(ttl).Unix())
+// CreateSession stores a session token for login. memberships are the
+// access rules ("org" or "org/team") the user matched at sign-in.
+func (s *Store) CreateSession(token, login string, ttl time.Duration, memberships ...string) error {
+	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at, memberships) VALUES (?, ?, ?, ?)`,
+		sessionKey(token), login, time.Now().Add(ttl).Unix(), strings.Join(memberships, ","))
 	return err
+}
+
+// Session is a valid sign-in.
+type Session struct {
+	Login       string
+	Memberships []string
+}
+
+// Session returns a valid session.
+func (s *Store) Session(token string) (Session, bool) {
+	if token == "" {
+		return Session{}, false
+	}
+	key := sessionKey(token)
+	var login, memberships string
+	var exp int64
+	if err := s.db.QueryRow(`SELECT login, expires_at, memberships FROM sessions WHERE token = ?`, key).Scan(&login, &exp, &memberships); err != nil {
+		return Session{}, false
+	}
+	if time.Now().Unix() > exp {
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, key)
+		return Session{}, false
+	}
+	out := Session{Login: login}
+	if memberships != "" {
+		out.Memberships = strings.Split(memberships, ",")
+	}
+	return out, true
 }
 
 // SessionLogin returns the login of a valid session.
 func (s *Store) SessionLogin(token string) (string, bool) {
-	if token == "" {
-		return "", false
-	}
-	key := sessionKey(token)
-	var login string
-	var exp int64
-	if err := s.db.QueryRow(`SELECT login, expires_at FROM sessions WHERE token = ?`, key).Scan(&login, &exp); err != nil {
-		return "", false
-	}
-	if time.Now().Unix() > exp {
-		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token = ?`, key)
-		return "", false
-	}
-	return login, true
+	sess, ok := s.Session(token)
+	return sess.Login, ok
 }
 
 // DeleteSession removes a session.

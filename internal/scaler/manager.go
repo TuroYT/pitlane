@@ -204,6 +204,9 @@ func (m *Manager) housekeeping() {
 	if err := m.store.PruneJobs(retention); err != nil {
 		m.log.Warn("prune job history", "error", err)
 	}
+	if err := m.store.PruneAudit(retention); err != nil {
+		m.log.Warn("prune audit log", "error", err)
+	}
 	if err := m.store.PruneSessions(); err != nil {
 		m.log.Warn("prune expired sessions", "error", err)
 	}
