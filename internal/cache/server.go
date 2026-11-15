@@ -52,6 +52,7 @@ type Server struct {
 	nextID    int64
 	total     int64 // bytes of committed entries
 	limit     int64 // 0 = unlimited (uploads are still bounded by their reserved size)
+	ownerPct  int   // share of limit one owner may use, in percent (see ownerLimitLocked)
 	hits      int64
 	misses    int64
 	saves     int64
@@ -76,7 +77,7 @@ func Open(dir string, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("actions cache key: %w", err)
 	}
 	s := &Server{dir: dir, log: log, key: key, runners: map[string]Identity{},
-		entries: map[int64]*entry{}, pending: map[int64]*upload{}}
+		entries: map[int64]*entry{}, pending: map[int64]*upload{}, ownerPct: DefaultOwnerPercent}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -93,18 +94,20 @@ type Stats struct {
 	Entries    int   `json:"entries"`
 	Bytes      int64 `json:"bytes"`
 	LimitBytes int64 `json:"limitBytes"`
-	Hits       int64 `json:"hits"`
-	Misses     int64 `json:"misses"`
-	Saves      int64 `json:"saves"`
-	Evictions  int64 `json:"evictions"`
+	// Most one owner may store, 0 when there is no limit.
+	OwnerLimitBytes int64 `json:"ownerLimitBytes"`
+	Hits            int64 `json:"hits"`
+	Misses          int64 `json:"misses"`
+	Saves           int64 `json:"saves"`
+	Evictions       int64 `json:"evictions"`
 }
 
 // Stats returns the current size and the counters since start.
 func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Stats{Entries: len(s.entries), Bytes: s.total, LimitBytes: s.limit, Hits: s.hits, Misses: s.misses,
-		Saves: s.saves, Evictions: s.evictions}
+	return Stats{Entries: len(s.entries), Bytes: s.total, LimitBytes: s.limit, OwnerLimitBytes: s.ownerLimitLocked(),
+		Hits: s.hits, Misses: s.misses, Saves: s.saves, Evictions: s.evictions}
 }
 
 // Handler returns the HTTP handler of the cache API.
@@ -253,8 +256,13 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("cache size of %d bytes is over the %d bytes limit of the Pitlane cache", in.CacheSize, s.limit))
 		return
 	}
+	ownerLimit, owner := s.ownerLimitLocked(), ownerOf(c.ns)
+	if ownerLimit > 0 && in.CacheSize > ownerLimit {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("cache size of %d bytes is over the %d bytes one owner may use in the Pitlane cache", in.CacheSize, ownerLimit))
+		return
+	}
 	now := time.Now()
-	var reserved int64
+	var reserved, ownerReserved int64
 	mine := 0
 	for id, u := range s.pending {
 		if now.Sub(u.started) > uploadTTL {
@@ -262,12 +270,17 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request, c call) {
 			continue
 		}
 		reserved += u.limit
+		if ownerOf(u.NS) == owner {
+			ownerReserved += u.limit
+		}
 		if u.runner == c.runner {
 			mine++
 		}
 	}
-	// Unfinished uploads together stay within the limit too.
-	if mine >= maxPending || (s.limit > 0 && reserved+in.CacheSize > s.limit) {
+	// Unfinished uploads together stay within the limit too, and those of
+	// one owner within its share.
+	if mine >= maxPending || (s.limit > 0 && reserved+in.CacheSize > s.limit) ||
+		(ownerLimit > 0 && ownerReserved+in.CacheSize > ownerLimit) {
 		writeErr(w, http.StatusTooManyRequests, "too many cache uploads in progress")
 		return
 	}
@@ -394,6 +407,12 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, c call) {
 		writeErr(w, http.StatusBadRequest, "uploaded size does not match")
 		return
 	}
+	// The share may have been lowered since the reservation.
+	if lim := s.ownerLimitLocked(); lim > 0 && in.Size > lim {
+		s.dropUploadLocked(id, u)
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("cache size of %d bytes is over the %d bytes one owner may use in the Pitlane cache", in.Size, lim))
+		return
+	}
 	delete(s.pending, id)
 	e := u.entry
 	e.Size, e.Created, e.used = in.Size, time.Now(), time.Now()
@@ -414,9 +433,7 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request, c call) {
 	s.entries[id] = &e
 	s.total += e.Size
 	s.saves++
-	if s.limit > 0 {
-		s.evictLocked(s.limit)
-	}
+	s.enforceLimitsLocked(e.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

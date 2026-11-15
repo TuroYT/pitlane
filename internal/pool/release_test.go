@@ -284,7 +284,7 @@ func TestAdoptedRunnerWithoutTarget(t *testing.T) {
 	}
 	t.Run("valid target", func(t *testing.T) {
 		p := newTestPool("shared", SlotState{Index: 0, Status: "ready"})
-		o := p.adoptContainer("cid", map[string]string{LabelSlot: "0", LabelTarget: "7", LabelStrict: "false"}, "running", 0)
+		o := p.adoptContainer("cid", map[string]string{LabelSlot: "0", LabelTarget: "7", LabelOwner: "acme", LabelStrict: "false"}, "running", 0)
 		if o.Untrusted || o.Strict || o.TargetID != 7 {
 			t.Fatalf("orphan %+v", o)
 		}
@@ -296,4 +296,28 @@ func TestAdoptedRunnerWithoutTarget(t *testing.T) {
 			t.Fatalf("orphan %+v slots %+v", o, p.slots)
 		}
 	})
+}
+
+// A non-strict runner container without an owner label must not leave its
+// slot ownerless: an ownerless slot counts as empty and would go to another
+// owner's job without a wipe. It is adopted as untrusted (strict release).
+func TestAdoptedRunnerWithoutOwner(t *testing.T) {
+	ops := &fakeSlotOps{}
+	p := newTestPool("owner", SlotState{Index: 0, Status: "ready"})
+	p.sops = ops
+	o := p.adoptContainer("cid", map[string]string{LabelSlot: "0", LabelTarget: "7", LabelRunner: "pitlane-abc", LabelStrict: "false"}, "running", 0)
+	l := o.Lease()
+	if !o.Untrusted || !o.Strict || !l.Strict || l.Owner != StrictOwner {
+		t.Fatalf("orphan %+v lease %+v", o, l)
+	}
+	if s := p.slots[0]; s.Status != "busy" || s.Owner != StrictOwner {
+		t.Fatalf("slot of a runner without owner must stay busy for the strict owner: %+v", s.SlotState)
+	}
+	p.Release(context.Background(), l)
+	if ops.wipes != 1 || len(ops.scripts) != 0 {
+		t.Fatalf("the slot must be rebuilt: wipes=%d scripts=%d", ops.wipes, len(ops.scripts))
+	}
+	if _, ok := p.Acquire(context.Background(), "other", 9, false); !ok {
+		t.Fatal("the rebuilt slot must be available")
+	}
 }

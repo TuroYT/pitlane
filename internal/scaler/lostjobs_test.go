@@ -19,7 +19,7 @@ func testTarget(t *testing.T) *target {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	m := &Manager{store: st, log: slog.New(slog.NewTextHandler(io.Discard, nil)), changed: func() {},
+	m := &Manager{store: st, pool: newFakePool(4), log: slog.New(slog.NewTextHandler(io.Discard, nil)), changed: func() {},
 		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 	return newTarget(m, store.Target{ID: 1, MaxRunners: 4})
 }

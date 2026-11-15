@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { duration, type Job } from '../api'
+import { duration, jobWait, waitLabel, waitTitle, type Job } from '../api'
 import JobStatus from './JobStatus.vue'
 import JobSource from './JobSource.vue'
 import JobLinks from './JobLinks.vue'
@@ -11,6 +11,11 @@ function wait(j: Job) {
   if (!j.queuedAt) return '—'
   const end = j.startedAt || (j.finishedAt ? 0 : Date.now() / 1000)
   return end ? duration(end - j.queuedAt) : '—'
+}
+// Why a queued job has not started yet.
+function waitFor(j: Job) {
+  const r = jobWait(j)
+  return r ? { label: waitLabel[r], title: waitTitle[r] } : null
 }
 function runTime(j: Job) {
   if (!j.startedAt) return '—'
@@ -56,6 +61,7 @@ function whenShort(j: Job) {
             <RouterLink v-if="j.runnerName" class="job-title" :to="`/logs/${j.runnerName}`">{{ j.jobName || 'Unnamed job' }}</RouterLink>
             <span v-else class="job-title">{{ j.jobName || 'Unnamed job' }}</span>
             <JobSource :job="j" />
+            <span v-if="waitFor(j)" class="badge queued wait-reason" :title="waitFor(j)!.title">{{ waitFor(j)!.label }}</span>
           </td>
           <td class="right">{{ wait(j) }}</td>
           <td class="right">{{ runTime(j) }}</td>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, live, bytes, duration, ago, type Job } from '../api'
+import { api, live, bytes, duration, ago, jobWait, waitLabel, waitTitle, type Job, type Slot, type WaitReason } from '../api'
 import { quantile } from '../charts'
 import JobTable from '../components/JobTable.vue'
 import JobStatus from '../components/JobStatus.vue'
@@ -40,6 +40,25 @@ const enabled = computed(() => (snap.value?.targets ?? []).filter((t) => t.enabl
 const slots = computed(() => (snap.value?.slots ?? []).filter((s) => s.status !== 'retiring'))
 const busySlots = computed(() => slots.value.filter((s) => s.status === 'busy').length)
 const waiting = computed(() => enabled.value.reduce((n, t) => n + t.waiting, 0))
+// Waiting jobs by reason, for the counter's detail ("3 for memory").
+const waitingFor = computed(() => {
+  const by: Partial<Record<WaitReason, number>> = {}
+  for (const t of enabled.value) {
+    if (t.waiting > 0) {
+      const r = t.waitReason ?? 'slot'
+      by[r] = (by[r] ?? 0) + t.waiting
+    }
+  }
+  const short: Record<WaitReason, string> = { slot: 'for a slot', memory: 'for memory', strict_slot: 'for a strict slot' }
+  return (Object.keys(by) as WaitReason[]).map((r) => ({ reason: r, n: by[r]!, label: short[r] }))
+})
+const memory = computed(() => snap.value?.memory)
+const memoryWaiter = computed(() => {
+  const m = memory.value
+  if (!m?.waitingTarget) return ''
+  const t = enabled.value.find((x) => x.id === m.waitingTarget)
+  return t ? (t.kind === 'repo' ? `${t.owner}/${t.repo}` : t.owner) : ''
+})
 const problems = computed(() => enabled.value.filter((t) => t.status === 'error' || t.status === 'no-credentials'))
 
 const active = computed(() => recent.value.filter((j) => !j.finishedAt).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)))
@@ -75,6 +94,18 @@ function slotIdle(owner: string): { label: string; title: string } {
     title: `Docker images, layers and build cache of ${owner}'s last jobs are kept here, so the next ${owner} job starts warm. A job of another owner gets this slot rebuilt (wiped) first.`,
   }
 }
+// A busy slot's memory: what its job uses now against what was reserved.
+function slotMemory(s: Slot): { label: string; title: string; over: boolean } | null {
+  if (s.status !== 'busy' || !s.predicted) return null
+  const actual = s.actual ?? 0
+  return {
+    label: actual ? `${bytes(actual)} of ${bytes(s.predicted)}` : `${bytes(s.predicted)} reserved`,
+    title: `Predicted from the last runs of this job: ${bytes(s.predicted)}. ` +
+      (actual ? `Using now: ${bytes(actual)} (runner, plus the slot's memory without page cache).` : 'Current use not measured yet.') +
+      (actual > s.predicted ? ' Above its prediction: the admission counts what it uses.' : ''),
+    over: actual > s.predicted,
+  }
+}
 const slotLabel: Record<string, string> = {
   starting: 'Starting', ready: 'Ready', busy: 'Busy', cleaning: 'Cleaning', error: 'Error', retiring: 'Retiring',
 }
@@ -106,8 +137,10 @@ function level(p: number) {
           <div class="counter-value">{{ busySlots }} <span class="of">of {{ slots.length }} slots</span></div>
         </div>
         <div class="counter">
-          <div class="counter-label">Waiting for a slot</div>
-          <div class="counter-value" :class="{ warn: waiting > 0 }">{{ waiting }}</div>
+          <div class="counter-label">Waiting jobs</div>
+          <div class="counter-value" :class="{ warn: waiting > 0 }">{{ waiting }}
+            <span v-for="w in waitingFor" :key="w.reason" class="of" :title="waitTitle[w.reason]">{{ w.n }} {{ w.label }}</span>
+          </div>
         </div>
         <div class="counter">
           <div class="counter-label" title="Median time between a job being queued and a runner picking it up, last 24 hours">Median wait, 24 h</div>
@@ -136,7 +169,7 @@ function level(p: number) {
           </div>
           <div class="when">
             <div v-if="j.startedAt">{{ duration(now - j.startedAt) }}<span v-if="j.slot >= 0" class="mono"> · slot #{{ j.slot }}</span></div>
-            <div v-else>queued {{ ago(j.queuedAt) }}</div>
+            <div v-else>queued {{ ago(j.queuedAt) }}<span v-if="jobWait(j)" class="warn-text" :title="waitTitle[jobWait(j) as WaitReason]"> · {{ waitLabel[jobWait(j) as WaitReason] }}</span></div>
             <JobLinks :job="j" logs />
           </div>
         </div>
@@ -150,11 +183,25 @@ function level(p: number) {
           <p class="muted small">Each slot runs one job at a time and keeps its Docker cache warm between jobs.</p>
         </div>
       </div>
+      <div v-if="memory && memory.budget" class="box box-body budget" aria-label="Memory budget">
+        <div class="meter-head">
+          <strong title="Host memory minus the reserve kept for the system. A job starts only when its predicted memory fits next to the running jobs.">Memory budget</strong>
+          <span v-if="memory.enabled" class="muted num">{{ bytes(memory.committed) }} committed of {{ bytes(memory.budget) }}
+            <span title="Reserved for the running jobs from their predictions">· predicted {{ bytes(memory.predicted) }}</span>
+            <span title="What the running jobs use now">· using {{ bytes(memory.actual) }}</span></span>
+          <span v-else class="muted">Admission off: only the slot count limits parallel jobs</span>
+        </div>
+        <div class="bar" aria-hidden="true"><div :class="level(pct(memory.committed, memory.budget))" :style="{ width: pct(memory.committed, memory.budget) + '%' }" /></div>
+        <p v-if="memory.enabled && memory.waitingBytes" class="small warn-text" :title="waitTitle.memory">
+          Next to start: a job of {{ memoryWaiter || 'another repository' }} that needs {{ bytes(memory.waitingBytes) }}.
+        </p>
+      </div>
       <div class="slots" role="list" aria-label="Slots">
         <div v-for="s in snap.slots" :key="s.index" class="slot" :class="s.status" role="listitem">
           <div class="slot-head">
             <span class="dot" :class="{ ready: 'ok', busy: 'busy', error: 'error' }[s.status as string] ?? ''" aria-hidden="true" />
             <span class="slot-name">#{{ s.index }}</span>
+            <span v-if="s.strictOnly" class="badge muted slot-strict" title="Reserved for strict jobs (public repositories): they run here instead of wiping another slot's warm cache.">strict</span>
             <span class="slot-state">{{ slotLabel[s.status] ?? s.status }}</span>
           </div>
           <div v-if="s.status === 'busy'" class="slot-body">
@@ -170,8 +217,11 @@ function level(p: number) {
                 <RouterLink v-if="s.runner" :to="`/logs/${s.runner}`">Logs</RouterLink></div>
             </template>
           </div>
-          <div v-else-if="s.status === 'error'" class="slot-body error-text">{{ s.error }}</div>
-          <div v-else class="slot-body muted" :title="slotIdle(s.owner).title">{{ slotIdle(s.owner).label }}</div>
+          <div v-if="slotMemory(s)" class="slot-mem num" :class="{ 'warn-text': slotMemory(s)!.over }" :title="slotMemory(s)!.title">
+            {{ slotMemory(s)!.label }}
+          </div>
+          <div v-if="s.status === 'error'" class="slot-body error-text">{{ s.error }}</div>
+          <div v-else-if="s.status !== 'busy'" class="slot-body muted" :title="slotIdle(s.owner).title">{{ slotIdle(s.owner).label }}</div>
         </div>
       </div>
     </section>

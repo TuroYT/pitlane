@@ -9,11 +9,15 @@ Who can sign in is set in **Users** (see [Users and roles](#users-and-roles)).
 | --- | --- | --- |
 | Parallel jobs (slots) | half the CPU cores (max 8) | One warm Docker daemon per slot. Reducing it retires idle slots first. |
 | Memory limit per job | 0 (unlimited) | Hard limit for the runner and its slot daemon. |
+| Start a job only when its memory fits | on | Memory admission: a job waits while the predicted memory of the running jobs plus its own exceeds the host's memory minus the reserve; a job bigger than that runs alone. See [Scheduling](how-it-works.md#scheduling). |
+| Memory reserve (MB) | 2048 | Kept for the system, Docker, Pitlane and the page cache; at most half the host's memory. |
+| Reserved slots for strict jobs | automatic: 1 while a strict target is enabled, else 0 | Slots only strict jobs use (0 to slots − 1). Strict jobs overflow only to empty slots, so they never wipe a private repository's warm cache, but they may queue. 0 restores the previous behaviour. See [Slots reserved for strict jobs](how-it-works.md#slots-reserved-for-strict-jobs). |
 | CPU weight per job | 0 (Docker default) | `cpu-shares`. It only matters when the host is saturated; a lone job uses every core. |
 | Cache sharing | per GitHub owner | `owner`: a slot that switches to another user/organization is wiped first. `shared`: every repository shares every cache. |
 | Docker Hub mirror | on | Local pull-through cache (`registry:2`, pinned by digest) used by every slot. |
 | Actions cache | on | Serves `actions/cache` (and `setup-*` actions with `cache:`) from the Pitlane host, for non-strict jobs; strict jobs keep GitHub's cache. Entries are kept per repository and branch, never across owners. Turning it off applies to the next jobs and keeps the stored entries. See [How it works](how-it-works.md#actions-cache). |
 | Actions cache size | 20 GB | Total size of the stored entries; beyond it the least recently restored go first. Settings shows the current size and the hit/miss counters since start. |
+| Actions cache share per owner | 50 % | The most one user or organization may store, as a share of the cache size (`actions_cache_owner_pct`, 1 to 100). Uploads in progress count against it, and a larger upload is refused. When an owner goes over it, its own least recently restored entries go first (its newest entry always stays); the size limit then applies to the whole cache. `100` turns it off. |
 | Build cache kept per slot | 20 GB | `docker builder prune --keep-storage` after each job. |
 | Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the least recently used actions cache entries, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
 | Runner image | `ghcr.io/turoyt/pitlane-runner:v<version>` | The runner image released with this Pitlane version: GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). It follows Pitlane upgrades, including when the settings page saved it; to stay on one image, give a digest (`name:tag@sha256:…`). Any image based on `ghcr.io/actions/actions-runner` works. |
@@ -155,7 +159,11 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | `pitlane_slots` | gauge | `status` (starting, ready, busy, cleaning, error, retiring) |
 | `pitlane_slot_wipes_total` | counter | `reason` (`owner_change`, `strict`, `unknown_owner`): slots rebuilt empty before a job since start |
 | `pitlane_runners` | gauge | `target`, `label`, `state` (busy, idle) |
-| `pitlane_jobs_waiting` | gauge | `target`, `label`: jobs assigned by GitHub waiting for a free slot |
+| `pitlane_jobs_waiting` | gauge | `target`, `label`, `reason` (`slot`, `memory`, `strict_slot`): jobs assigned by GitHub that wait, by why (a target waits for one reason at a time, the others are 0) |
+| `pitlane_memory_budget_bytes` | gauge | memory jobs may use: host memory minus the reserve (0 when unknown) |
+| `pitlane_memory_predicted_bytes` | gauge | memory reserved for the running jobs by prediction |
+| `pitlane_memory_committed_bytes` | gauge | what the admission counts: per running job, the larger of its prediction and its current use |
+| `pitlane_memory_admission_enabled` | gauge | 1 when memory admission is on |
 | `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |
 | `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
 | `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |

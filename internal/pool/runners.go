@@ -131,16 +131,30 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		},
 	}, hc, nil, nil, spec.Name)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Canceled while Docker may have created it: remove it by name.
+			p.removeAfterFailedStart(ctx, spec.Name)
+		}
 		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("create runner: %w", err)
 	}
 	if err := p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		_ = p.cli.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true})
+		p.removeAfterFailedStart(ctx, created.ID)
 		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("start runner: %w", err)
 	}
 	p.MarkRunner(slotIdx, spec.Name)
 	return created.ID, nil
+}
+
+// removeAfterFailedStart removes a runner container that could not be
+// started. It runs even when ctx is canceled (the target stopped while its
+// runner was starting): the container carries a JIT config and the labels
+// of a slot that is released and handed out again.
+func (p *Pool) removeAfterFailedStart(ctx context.Context, id string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	p.Remove(cctx, id)
 }
 
 // Wait blocks until the container exits and returns its exit code.
@@ -170,9 +184,14 @@ func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) er
 	return err
 }
 
-// Remove deletes a container.
+// Remove deletes a container. A container already gone, or already being
+// removed (a scale-down and the runner's own exit race), is not an error;
+// any other failure is logged (the container stays until the next restart
+// finds it).
 func (p *Pool) Remove(ctx context.Context, id string) {
-	_ = p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	if err := p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
+		p.log.Warn("remove container", "container", id, "error", err)
+	}
 }
 
 // StopRunner stops a runner container; whoever waits on it then cleans up.
@@ -197,9 +216,10 @@ type Orphan struct {
 	TargetID int64
 	Owner    string // GitHub owner of the target
 	Strict   bool   // strict isolation (also for containers without the label)
-	// Untrusted is set when the target label is missing or invalid: the
-	// container belongs to no known target and its slot is released as
-	// strict (rebuilt). Slot is -1 when the slot label is missing or invalid.
+	// Untrusted is set when the target or owner label is missing or
+	// invalid: the container belongs to no known target, or its slot's data
+	// to no known owner, and its slot is released as strict (rebuilt). Slot
+	// is -1 when the slot label is missing or invalid.
 	Untrusted bool
 	Running   bool
 	Created   time.Time
@@ -234,15 +254,16 @@ func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
 // adoptContainer marks the slot of a runner container left by a previous
 // run as busy and returns it. A strict runner's slot gets the strict owner
 // back (the label carries the target's real owner): nobody else may get the
-// slot without a rebuild. A container whose target label is missing or
-// invalid is untrusted and its slot strict the same way.
+// slot without a rebuild. A container whose target or owner label is missing
+// or invalid is untrusted and its slot strict the same way: a slot with no
+// owner would otherwise look empty and go to any owner without a wipe.
 func (p *Pool) adoptContainer(id string, labels map[string]string, state string, created int64) Orphan {
 	slotIdx, err := strconv.Atoi(labels[LabelSlot])
 	if err != nil || slotIdx < 0 {
 		slotIdx = -1
 	}
 	tid, err := strconv.ParseInt(labels[LabelTarget], 10, 64)
-	untrusted := err != nil || tid <= 0
+	untrusted := err != nil || tid <= 0 || labels[LabelOwner] == ""
 	if untrusted {
 		tid = 0
 	}

@@ -38,7 +38,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, total, err := s.store.JobsPage(r.Context(), f, limit, max(0, offset))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "jobs_list", "cannot list the jobs", err)
 		return
 	}
 	if jobs == nil {
@@ -53,7 +53,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobRepos(w http.ResponseWriter, r *http.Request) {
 	repos, err := s.store.JobRepos(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "job_repos", "cannot list the job repositories", err)
 		return
 	}
 	writeJSON(w, repos)
@@ -127,20 +127,14 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "repository is no longer enabled")
 			return
 		}
-		pem, _ := s.store.GetSecret("app_pem")
-		appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-		client, err := gh.NewAppClient(appID, pem)
-		if err == nil {
-			token, err = client.InstallationToken(r.Context(), t.InstallationID)
-		}
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+		if token, err = s.token(r.Context(), t); err != nil {
+			s.internalErr(w, r, http.StatusBadGateway, "github_token", "cannot get a GitHub token for this repository", err)
 			return
 		}
 	}
 	rc, err := gh.JobLog(r.Context(), token, job.Owner, job.Repo, job.RunID, name)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		s.internalErr(w, r, http.StatusBadGateway, "github_job_log", "cannot fetch the job log from GitHub", err)
 		return
 	}
 	defer rc.Close()
@@ -149,8 +143,9 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 
 // handleGitHubJob redirects to the page of the job a runner ran on GitHub.
 // GitHub's scale set messages do not carry the job's numeric ID, so it is
-// looked up once in the run's job list (by runner name) and cached. When it
-// cannot be found, it falls back to the run page.
+// looked up once in the run's job list (by runner name) and cached, only for
+// a job the store has and only once GitHub found it (the cache is bounded,
+// see jobIDCache). When it cannot be found, it falls back to the run page.
 func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !validName(name) {
@@ -163,8 +158,9 @@ func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runURL := fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", job.Owner, job.Repo, job.RunID)
-	if v, ok := s.jobIDs.Load(name); ok {
-		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, v.(int64)), http.StatusFound)
+	key := jobKey{name, job.RunID}
+	if id, ok := s.jobIDs.get(key); ok {
+		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -175,7 +171,7 @@ func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 		if tok, err = s.token(ctx, t); err == nil {
 			var id int64
 			if id, err = gh.RunJobID(ctx, tok, job.Owner, job.Repo, job.RunID, name); err == nil {
-				s.jobIDs.Store(name, id)
+				s.jobIDs.put(key, id)
 				http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
 				return
 			}

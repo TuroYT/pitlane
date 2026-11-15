@@ -46,14 +46,102 @@ costs least:
    `slots.json`; a slot without one counts as the oldest), then the lowest
    index.
 
-Strict jobs (public repositories) take an empty slot first, then follow the
-same order. When the only choice is to wipe a warm slot while another slot is
-being cleaned after a strict job, the strict job waits for that slot, for at
-most 20 seconds: the cleanup is the same rebuild the warm slot would need, and
-it is already under way, so the job does not start later than it would have.
+Among the free slots of its own repository, a job predicted at 1.5 GB or more
+(see [Scheduling](#scheduling)) takes the most recently used one, whose cache is
+the freshest, and a lighter job the least recently used one, leaving the warm
+ones to the heavy jobs. A job without prediction takes the lowest index.
+
+Strict jobs (public repositories) use the [slots reserved for
+them](#slots-reserved-for-strict-jobs) when there are any. Without reserved
+slots, they take an empty slot first, then follow the same order. When the
+only choice is to wipe a warm slot while another slot is being cleaned after a
+strict job, the strict job waits for that slot, for at most 20 seconds: the
+cleanup is the same rebuild the warm slot would need, and it is already under
+way, so the job does not start later than it would have.
 Each rebuild before a job is logged (`rebuilding slot before its job`, with the
 previous owner and why) and counted in `pitlane_slot_wipes_total{reason}`
 (`owner_change`, `strict`, `unknown_owner`).
+
+## Scheduling
+
+A job starts when a slot is free and, with **memory admission** on (the
+default), when its predicted memory fits next to the running jobs. A 12-slot
+host with 23 GB of memory went down when a burst of builds ran at once:
+admission lets you keep as many slots as CPU allows while memory decides how
+many jobs run together.
+
+### Memory prediction
+
+When GitHub assigns a job, Pitlane predicts its memory from the jobs it already
+measured (see [resource usage per job](#resource-usage-per-job)). The memory of
+a past job is its runner's peak plus its slot's peak **anonymous** memory
+(`memory.stat` `anon`, sampled every 2 seconds): a slot's `memory.peak` also
+counts the page cache filled by image layers and build contexts, which the
+kernel gives back under pressure. Jobs measured before anonymous memory was
+recorded count a quarter of their slot's `memory.peak` instead. Cancelled jobs
+are left out.
+
+1. The same job (repository, workflow file and job name): the 90th percentile
+   of its last 20 runs, or the highest run while it has fewer than 5.
+2. A job never measured: the same over the last 50 jobs of its repository.
+3. A new repository: the last 200 jobs of every repository (at least 5).
+4. Nothing measured yet: 2 GB.
+
+Predictions are at least 256 MB and are cached for a minute.
+
+### Admission
+
+The **budget** is the host's memory (`MemTotal` of `/proc/meminfo`, which is the
+LXC container's limit under lxcfs, lowered to the cgroup's `memory.max` when
+Pitlane does not run in a Docker container) minus the **memory reserve** (2 GB by
+default, at most half the memory) kept for the system, Docker, Pitlane and the
+page cache.
+
+Each slot handed out reserves the prediction of the job it starts for. GitHub
+decides which idle runner gets which job, so new runners reserve the heaviest
+pending jobs first; a warm runner reserves the prediction of its repository (or
+of every job, for an organization). When the job starts, the reservation
+becomes that job's prediction. A running job counts for the larger of its
+reservation and what it uses now (runner `memory.current` plus the slot's
+anonymous memory). A new job starts when this total plus its prediction fits
+the budget.
+
+- **No deadlock.** A job is always admitted when no other job runs, even when
+  its prediction alone is above the budget.
+- **No starvation.** The oldest job refused for memory keeps its place: a job of
+  another target starts only if it leaves room for it. A target that gets a
+  runner and still has jobs waiting goes behind the other waiting targets, so
+  targets take turns.
+- **Failure modes.** A job that suddenly needs more than its history says is
+  not stopped: the next jobs see its real use and wait. A first run, or a new
+  repository, is predicted from the others, then 2 GB. When the host's memory
+  cannot be read, only the slot count limits jobs. After a Pitlane restart,
+  adopted runners reserve their repository's prediction.
+
+Waiting jobs show their reason on the dashboard and the Jobs page (`waiting for
+memory`, `waiting for a slot`, `waiting for a strict slot`) and in
+`pitlane_jobs_waiting{reason}`. The dashboard's **memory budget** meter shows
+what is committed, predicted and used against the budget, and each busy slot
+shows its job's current use against its prediction.
+
+### Slots reserved for strict jobs
+
+A strict job (public repository) rebuilds its slot before and after it runs.
+On a busy host, the only free slot is often another repository's warm one, and
+the strict job wipes it. With **reserved slots for strict jobs** (one by default
+while a strict target is enabled, none otherwise; set 0 to N−1 in Settings):
+
+- non-strict jobs never use the reserved slots (the highest slot numbers,
+  marked `strict` on the dashboard);
+- strict jobs use them first, then overflow only to a slot with nothing to
+  lose (empty, or last used by a strict job or an unknown owner);
+- otherwise strict jobs wait (`waiting for a strict slot`), even if another
+  repository's warm slot is free.
+
+The trade-off: private repositories have one slot less, and strict jobs queue
+behind each other when more of them run at once than there are reserved
+slots. Set 0 to get the previous behaviour back (strict jobs take any slot,
+cheapest wipe first).
 
 ## Caches
 
@@ -87,7 +175,9 @@ points the toolkit's `ACTIONS_CACHE_URL` at Pitlane and makes it use its v1
 protocol; artifacts, OIDC and logs still go to GitHub. Lookups follow GitHub's
 rules (exact key, then prefixes and `restore-keys` in order, newest first; the
 job's branch, then the base and default branches), entries are immutable, and
-the least recently restored are evicted beyond the size limit.
+the least recently restored are evicted beyond the size limit. One owner may
+use at most a share of that size (half by default): beyond it, its own entries
+are evicted first.
 
 - Each runner gets its own token, valid until its job ends; it only opens the
   caches of the target's owner (one repository for a repository target).
@@ -144,9 +234,8 @@ returns the same data in `usage` (`null` when not measured).
 
 The dashboard's **Memory per job** panel shows the p50, p90 and max peak over
 the last 7 days and suggests `floor(usable memory / p90)` slots, usable memory
-being the host's (the LXC container's) memory minus 1 GB (an eighth on hosts
-under 8 GB) for the system, Docker and Pitlane, next to the configured slot
-count and memory limit. Memory, not CPU, is usually what limits parallel jobs:
+being the admission's budget (the host's memory minus the memory reserve),
+next to the configured slot count and memory limit. Memory, not CPU, is usually what limits parallel jobs:
 a job whose memory is near the limit, or whose memory pressure is high, needs
 fewer slots or more RAM. `GET /api/jobs/memory` serves the same data.
 

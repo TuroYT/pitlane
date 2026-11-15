@@ -4,7 +4,7 @@
   "private": true,
   "description": "Dependencies for the Pitlane e2e cache scenario.",
   "dependencies": {
-    "express": "4.22.3",
+    "express": "5.3.0",
     "lodash": "4.18.1",
     "zod": "4.6.7"
   }

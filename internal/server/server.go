@@ -69,7 +69,7 @@ type Server struct {
 	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, string, error)
 	// member replaces isMember (membership checks on GitHub) in tests.
 	member func(ctx context.Context, userToken, login, org, team string) (bool, error)
-	jobIDs sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
+	jobIDs jobIDCache // runner job -> GitHub job ID (see handleGitHubJob)
 	mu     sync.Mutex
 	states map[string]time.Time // OAuth / manifest states
 }
@@ -322,14 +322,30 @@ func median(v []float64) float64 {
 	return v[len(v)/2]
 }
 
+// errAppKey is a GitHub App private key that cannot be read back.
+var errAppKey = errors.New("cannot decrypt app_pem, the GitHub App private key (was master.key replaced or lost?)")
+
+// appClient returns a client authenticated as the GitHub App saved by the
+// setup. A key that cannot be decrypted (master.key replaced or lost) is
+// reported as such, not as an unparsable key.
+func (s *Server) appClient() (*gh.AppClient, error) {
+	pem, err := s.store.GetSecret("app_pem")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errAppKey, err)
+	}
+	appID, err := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("stored GitHub App ID: %w", err)
+	}
+	return gh.NewAppClient(appID, pem)
+}
+
 // token returns a GitHub token able to read Actions data of a target.
 func (s *Server) token(ctx context.Context, t store.Target) (string, error) {
 	if s.cfg.PAT != "" {
 		return s.cfg.PAT, nil
 	}
-	pem, _ := s.store.GetSecret("app_pem")
-	appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-	client, err := gh.NewAppClient(appID, pem)
+	client, err := s.appClient()
 	if err != nil {
 		return "", err
 	}
@@ -363,7 +379,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	targets, err := s.store.Targets()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "targets_list", "cannot list the targets", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -448,9 +464,18 @@ type Settings struct {
 	MetricsTokenSet bool    `json:"metricsTokenSet"`
 	// Actions cache served from the host (internal/cache). Its stats are
 	// read-only, nil when the cache listener is not running.
-	ActionsCache      bool         `json:"actionsCache"`
-	ActionsCacheGB    int          `json:"actionsCacheGb"`
-	ActionsCacheStats *cache.Stats `json:"actionsCacheStats,omitempty"`
+	ActionsCache   bool `json:"actionsCache"`
+	ActionsCacheGB int  `json:"actionsCacheGb"`
+	// Share of the actions cache size one owner may use, in percent.
+	ActionsCacheOwnerPct int          `json:"actionsCacheOwnerPct"`
+	ActionsCacheStats    *cache.Stats `json:"actionsCacheStats,omitempty"`
+	// Memory admission (pool.Admit) and its reserve; slots reserved for
+	// strict jobs (pool.AutoStrictSlots = -1: one while a strict target
+	// is enabled). StrictSlotsActive is what applies now (read-only).
+	MemoryAdmission   bool  `json:"memoryAdmission"`
+	MemoryReserveMB   int64 `json:"memoryReserveMb"`
+	StrictSlots       int   `json:"strictSlots"`
+	StrictSlotsActive int   `json:"strictSlotsActive"`
 }
 
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
@@ -467,7 +492,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, http.StatusBadRequest, "cannot read the request body")
 			return
 		}
 		if json.Valid(b) && len(b) > 2 {
@@ -496,19 +521,23 @@ func (w *statusWriter) WriteHeader(code int) {
 // LoadPoolConfig reads the pool configuration from the store.
 func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
-		StateFile:      filepath.Join(dataDir, "slots.json"),
-		Slots:          st.GetInt("slots", DefaultSlots()),
-		RunnerImage:    st.Get("runner_image", ""),
-		DindImage:      st.Get("dind_image", ""),
-		CPUShares:      int64(st.GetInt("cpu_shares", 0)),
-		MemoryMB:       int64(st.GetInt("memory_mb", 0)),
-		CacheScope:     st.Get("cache_scope", "owner"),
-		Mirror:         st.Get("mirror", "true") == "true",
-		NoQEMU:         st.Get("qemu", "true") != "true",
-		KeepBuildGB:    st.GetInt("keep_build_gb", 20),
-		MinFreeDiskGB:  st.GetInt("min_free_disk_gb", 20),
-		ActionsCache:   st.Get("actions_cache", "true") == "true",
-		ActionsCacheGB: st.GetInt("actions_cache_gb", 20),
+		StateFile:            filepath.Join(dataDir, "slots.json"),
+		Slots:                st.GetInt("slots", DefaultSlots()),
+		RunnerImage:          st.Get("runner_image", ""),
+		DindImage:            st.Get("dind_image", ""),
+		CPUShares:            int64(st.GetInt("cpu_shares", 0)),
+		MemoryMB:             int64(st.GetInt("memory_mb", 0)),
+		CacheScope:           st.Get("cache_scope", "owner"),
+		Mirror:               st.Get("mirror", "true") == "true",
+		NoQEMU:               st.Get("qemu", "true") != "true",
+		KeepBuildGB:          st.GetInt("keep_build_gb", 20),
+		MinFreeDiskGB:        st.GetInt("min_free_disk_gb", 20),
+		ActionsCache:         st.Get("actions_cache", "true") == "true",
+		ActionsCacheGB:       st.GetInt("actions_cache_gb", 20),
+		ActionsCacheOwnerPct: st.GetInt("actions_cache_owner_pct", cache.DefaultOwnerPercent),
+		MemoryAdmission:      st.Get("memory_admission", "true") == "true",
+		MemoryReserveMB:      int64(st.GetInt("memory_reserve_mb", pool.DefaultMemoryReserveMB)),
+		StrictSlots:          st.GetInt("strict_slots", pool.AutoStrictSlots),
 	}
 }
 
@@ -522,7 +551,9 @@ func (s *Server) settings(r *http.Request) Settings {
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
 		HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
-		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheStats: s.actionsCacheStats(),
+		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheOwnerPct: c.ActionsCacheOwnerPct,
+		ActionsCacheStats: s.actionsCacheStats(),
+		MemoryAdmission:   c.MemoryAdmission, MemoryReserveMB: c.MemoryReserveMB, StrictSlots: c.StrictSlots, StrictSlotsActive: s.pool.StrictSlots(),
 	}
 }
 
@@ -533,7 +564,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // settingKeys are the settings PUT /api/settings saves, in the order the
 // audit log lists their changes.
 var settingKeys = []string{"slots", "runner_image", "dind_image", "cpu_shares", "memory_mb", "cache_scope", "mirror", "qemu",
-	"keep_build_gb", "min_free_disk_gb", "actions_cache", "actions_cache_gb", "history_days", "base_url"}
+	"keep_build_gb", "min_free_disk_gb", "actions_cache", "actions_cache_gb", "actions_cache_owner_pct", "memory_admission", "memory_reserve_mb",
+	"strict_slots", "history_days", "base_url"}
 
 // settingValues are the stored values of the settings in.
 func settingValues(in Settings) map[string]string {
@@ -547,6 +579,9 @@ func settingValues(in Settings) map[string]string {
 		"history_days":     strconv.Itoa(max(1, in.HistoryDays)),
 		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
 		"actions_cache":    strconv.FormatBool(in.ActionsCache), "actions_cache_gb": strconv.Itoa(max(1, in.ActionsCacheGB)),
+		"actions_cache_owner_pct": strconv.Itoa(min(100, max(1, in.ActionsCacheOwnerPct))),
+		"memory_admission":        strconv.FormatBool(in.MemoryAdmission), "memory_reserve_mb": strconv.FormatInt(max(0, in.MemoryReserveMB), 10),
+		"strict_slots": strconv.Itoa(max(pool.AutoStrictSlots, in.StrictSlots)),
 	}
 	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
 		kv["base_url"] = b
@@ -565,13 +600,23 @@ func (s *Server) actionsCacheStats() *cache.Stats {
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// Fields missing from the request keep their current value.
 	cur := s.pool.Config()
-	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB}
+	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB,
+		ActionsCacheOwnerPct: cur.ActionsCacheOwnerPct, MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB,
+		StrictSlots: cur.StrictSlots}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		badJSON(w)
 		return
 	}
 	if in.Slots < 1 || in.Slots > 64 {
 		writeErr(w, http.StatusBadRequest, "parallel jobs must be between 1 and 64")
+		return
+	}
+	if in.StrictSlots < pool.AutoStrictSlots || in.StrictSlots >= in.Slots {
+		writeErr(w, http.StatusBadRequest, "slots reserved for strict jobs must be -1 (auto) or between 0 and the number of parallel jobs minus one")
+		return
+	}
+	if in.MemoryReserveMB < 0 {
+		writeErr(w, http.StatusBadRequest, "the memory reserve cannot be negative")
 		return
 	}
 	before := settingValues(s.settings(r))
@@ -593,14 +638,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			metricsAudit = "metrics_token changed"
 		}
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
 			return
 		}
 	}
 	kv := settingValues(in)
 	for k, v := range kv {
 		if err := s.store.Set(k, v); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
 			return
 		}
 	}
@@ -664,6 +709,43 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
+
+// apiError is the body of an error response. Code and RequestID are only
+// set for failures on Pitlane's side (see internalErr).
+type apiError struct {
+	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
+}
+
+// internalErr answers a request that failed on Pitlane's side (database,
+// GitHub API): the client gets msg, a stable code and a request ID, while
+// err itself only goes to the log, under the same request ID. msg must not
+// carry any error text.
+func (s *Server) internalErr(w http.ResponseWriter, r *http.Request, status int, code, msg string, err error) {
+	id := requestID(r)
+	if s.log != nil {
+		s.log.Error(msg, "code", code, "request_id", id, "method", r.Method, "path", r.URL.Path, "status", status, "error", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-Id", id)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiError{Error: fmt.Sprintf("%s (error %s, request %s)", msg, code, id), Code: code, RequestID: id})
+}
+
+// requestID is the X-Request-Id a reverse proxy set on the request, when it
+// looks like one, else a new random ID.
+func requestID(r *http.Request) string {
+	if v := r.Header.Get("X-Request-Id"); v != "" && len(v) <= 64 && strings.IndexFunc(v, func(c rune) bool {
+		return c != '-' && c != '_' && c != '.' && (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z')
+	}) < 0 {
+		return v
+	}
+	return randomHex(8)
+}
+
+// badJSON answers a request body that is not the JSON expected.
+func badJSON(w http.ResponseWriter) { writeErr(w, http.StatusBadRequest, "invalid JSON body") }
 
 type hub struct {
 	mu   sync.Mutex

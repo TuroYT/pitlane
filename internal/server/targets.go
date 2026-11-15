@@ -40,18 +40,20 @@ func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
-	pem, _ := s.store.GetSecret("app_pem")
-	appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-	client, err := gh.NewAppClient(appID, pem)
+	client, err := s.appClient()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		msg := "cannot load the GitHub App"
+		if errors.Is(err, errAppKey) {
+			msg = errAppKey.Error()
+		}
+		s.internalErr(w, r, http.StatusInternalServerError, "github_app", msg, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	insts, err := client.Installations(ctx)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		s.internalErr(w, r, http.StatusBadGateway, "github_installations", "cannot list the GitHub App installations", err)
 		return
 	}
 	list := make([]inst, len(insts))
@@ -63,7 +65,8 @@ func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
 			defer wg.Done()
 			repos, err := client.Repositories(ctx, id)
 			if err != nil {
-				list[i].Error = err.Error()
+				s.log.Error("list installation repositories", "installation", id, "error", err)
+				list[i].Error = "cannot list the repositories of this installation on GitHub (details in the server log)"
 				return
 			}
 			for _, rp := range repos {
@@ -142,7 +145,7 @@ func newTarget(body io.Reader, slots int) (store.Target, targetOptions, error) {
 	}
 	req.MaxJobMinutes = store.DefaultMaxJobMinutes
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		return req.Target, targetOptions{}, err
+		return req.Target, targetOptions{}, errors.New("invalid JSON body")
 	}
 	t, opts := req.Target, targetOptions{Strict: req.Strict, MinRunners: req.MinRunners}
 	t.MinRunners = store.DefaultMinRunners
@@ -193,10 +196,10 @@ func scaleSetName(t store.Target) string {
 
 // checkDuplicate writes a 409 and returns false when t would duplicate an
 // enabled target.
-func (s *Server) checkDuplicate(w http.ResponseWriter, t store.Target) bool {
+func (s *Server) checkDuplicate(w http.ResponseWriter, r *http.Request, t store.Target) bool {
 	all, err := s.store.Targets()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "targets_list", "cannot list the targets", err)
 		return false
 	}
 	if o, dup := duplicateTarget(t, all); dup {
@@ -290,7 +293,7 @@ func (s *Server) StrictReason(ctx context.Context, t store.Target) (string, erro
 func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	t, opts, err := newTarget(r.Body, s.pool.Config().Slots)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error()) // validation messages only, see newTarget
 		return
 	}
 	reason, checkErr := s.checkStrict(r.Context(), t)
@@ -301,12 +304,12 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.checkDuplicate(w, t) {
+	if !s.checkDuplicate(w, r, t) {
 		return
 	}
 	created, err := s.store.CreateTarget(t)
 	if err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+		s.internalErr(w, r, http.StatusConflict, "target_create", "cannot create the target, it may already exist", err)
 		return
 	}
 	s.audit(r, "target.create", created.FullName(), changes(targetKeys, nil, targetValues(created)))
@@ -338,7 +341,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		MaxJobMins   *int    `json:"maxJobMinutes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		badJSON(w)
 		return
 	}
 	if p, _ := s.currentUser(r); !p.can(store.RoleAdmin) &&
@@ -358,7 +361,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		// Only once GitHub confirms the target need not run strict.
 		reason, err := s.checkStrict(r.Context(), t)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "cannot check on GitHub whether "+t.FullName()+" must run strict, strict mode stays on: "+err.Error())
+			s.internalErr(w, r, http.StatusBadGateway, "github_strict_check", "cannot check on GitHub whether "+t.FullName()+" must run strict, strict mode stays on", err)
 			return
 		}
 		if s.mgr.ApplyStrictRequirement(t, reason) {
@@ -386,11 +389,11 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		t.ScaleSetName, t.ScaleSetID = *body.ScaleSetName, 0
 	}
 	t.MinRunners = min(t.MinRunners, t.MaxRunners)
-	if t.Enabled && (!wasEnabled || !strings.EqualFold(t.ScaleSetName, oldLabel)) && !s.checkDuplicate(w, t) {
+	if t.Enabled && (!wasEnabled || !strings.EqualFold(t.ScaleSetName, oldLabel)) && !s.checkDuplicate(w, r, t) {
 		return
 	}
 	if err := s.store.UpdateTarget(t); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "target_save", "cannot save the target", err)
 		return
 	}
 	if detail := changes(targetKeys, before, targetValues(t)); detail != "" {
@@ -406,7 +409,7 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteTarget(t.ID); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "target_delete", "cannot delete the target", err)
 		return
 	}
 	s.audit(r, "target.delete", t.FullName(), "")

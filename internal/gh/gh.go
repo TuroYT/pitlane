@@ -374,13 +374,28 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 	// header on the cross-host redirect.
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, withoutQuery(err)
 	}
 	if resp.StatusCode >= 300 {
 		resp.Body.Close()
 		return nil, fmt.Errorf("download job log: %s", resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// withoutQuery drops the query of the URL in a request error: the signed
+// blob URL a log download is redirected to carries its signature there.
+func withoutQuery(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	u, perr := url.Parse(ue.URL)
+	if perr != nil {
+		return &url.Error{Op: ue.Op, URL: "(unparsable URL)", Err: ue.Err}
+	}
+	u.RawQuery, u.Fragment = "", ""
+	return &url.Error{Op: ue.Op, URL: u.String(), Err: ue.Err}
 }
 
 func do(ctx context.Context, method, u, auth string, body any, out any) error {

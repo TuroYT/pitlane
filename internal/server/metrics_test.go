@@ -76,9 +76,10 @@ func TestWriteMetrics(t *testing.T) {
 		DockerUp: true,
 		Slots:    []pool.SlotState{{Status: "ready"}, {Status: "busy"}, {Status: "busy"}},
 		Targets: []scaler.TargetState{{
-			Target:  store.Target{Kind: "repo", Owner: "acme", Repo: `we"ird`, ScaleSetName: "pitlane"},
-			Waiting: 2,
-			Runners: []scaler.RunnerState{{Busy: true}, {Busy: false}, {Busy: true}},
+			Target:     store.Target{Kind: "repo", Owner: "acme", Repo: `we"ird`, ScaleSetName: "pitlane"},
+			Waiting:    2,
+			WaitReason: pool.WaitMemory,
+			Runners:    []scaler.RunnerState{{Busy: true}, {Busy: false}, {Busy: true}},
 		}},
 		Results:   map[string]int64{"succeeded": 3, "failed": 1},
 		Durations: []float64{10, 20, 30, 40},
@@ -86,6 +87,7 @@ func TestWriteMetrics(t *testing.T) {
 		DiskFree:  5 << 30, DiskTotal: 100 << 30, DiskOK: true,
 		ActionsCache: &cache.Stats{Entries: 3, Bytes: 1024, Hits: 5, Misses: 2, Saves: 3},
 		SlotWipes:    map[string]int64{pool.WipeOwnerChange: 4, pool.WipeStrict: 2},
+		Memory:       pool.MemoryState{Enabled: true, Budget: 21 << 30, Predicted: 6 << 30, Committed: 7 << 30},
 	})
 	out := b.String()
 	for _, want := range []string{
@@ -99,7 +101,13 @@ func TestWriteMetrics(t *testing.T) {
 		`pitlane_slot_wipes_total{reason="unknown_owner"} 0`,
 		`pitlane_runners{target="acme/we\"ird",label="pitlane",state="busy"} 2`,
 		`pitlane_runners{target="acme/we\"ird",label="pitlane",state="idle"} 1`,
-		`pitlane_jobs_waiting{target="acme/we\"ird",label="pitlane"} 2`,
+		`pitlane_jobs_waiting{target="acme/we\"ird",label="pitlane",reason="memory"} 2`,
+		`pitlane_jobs_waiting{target="acme/we\"ird",label="pitlane",reason="slot"} 0`,
+		`pitlane_jobs_waiting{target="acme/we\"ird",label="pitlane",reason="strict_slot"} 0`,
+		"pitlane_memory_budget_bytes 22548578304",
+		"pitlane_memory_predicted_bytes 6442450944",
+		"pitlane_memory_committed_bytes 7516192768",
+		"pitlane_memory_admission_enabled 1",
 		`pitlane_jobs_completed{result="failed"} 1`,
 		"# TYPE pitlane_job_duration_seconds summary",
 		`pitlane_job_duration_seconds{quantile="0.5"} 20`,

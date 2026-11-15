@@ -27,7 +27,7 @@ runs:
       uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       with:
         # web/package.json has no packageManager field; site/ pins its own.
-        version: ${{ inputs.node-package == 'web' && '10' || '' }}
+        version: ${{ inputs.node-package == 'web' && '12' || '' }}
         package_json_file: ${{ inputs.node-package }}/package.json
 
     - if: inputs.node-package != ''
