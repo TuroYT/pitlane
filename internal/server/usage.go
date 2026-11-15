@@ -52,7 +52,7 @@ func newMemorySizing(peaks []float64, memTotal, usable int64, slots int, limitMB
 func (s *Server) handleJobMemory(w http.ResponseWriter, r *http.Request) {
 	peaks, err := s.store.JobMemoryPeaks(r.Context(), time.Now().Add(-memoryWindow).Unix())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "job_memory", "cannot read the job memory peaks", err)
 		return
 	}
 	cfg, mem := s.pool.Config(), s.pool.Memory()

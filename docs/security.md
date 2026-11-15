@@ -164,6 +164,12 @@ that has taken over the host can remove them.
 - Admin actions (targets, settings, users, rules, updates) are recorded in an
   audit log (who, what, when; never secret values), kept as long as the job
   history.
+- When a request fails on Pitlane's side (database, GitHub API), the API
+  answers a generic message with a stable error code and a request ID, such as
+  `cannot list the jobs (error jobs_list, request 3f9c1a2b7d4e6f80)`. The error
+  itself goes only to the server log, under the same `request_id`. A reverse
+  proxy may set the ID with an `X-Request-Id` header (letters, digits, `-`,
+  `_`, `.`, at most 64 characters).
 - Put Pitlane behind HTTPS (a reverse proxy) if it is reachable outside your LAN.
 - `--insecure-no-auth` (`PITLANE_INSECURE_NO_AUTH=true`) turns login off: anyone
   who reaches the UI controls Pitlane as an admin. Use it only with `--listen 127.0.0.1:8080`

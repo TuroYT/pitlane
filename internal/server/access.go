@@ -192,7 +192,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	entries, total, err := s.store.AuditPage(r.Context(), limit, max(0, offset))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "audit_list", "cannot read the audit log", err)
 		return
 	}
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
@@ -221,25 +221,27 @@ func validTeam(s string) bool { return validName(s) }
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := s.store.Users()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "users_list", "cannot list the users", err)
 		return
 	}
 	rules, err := s.store.AccessRules()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "rules_list", "cannot list the access rules", err)
 		return
 	}
 	writeJSON(w, map[string]any{"users": users, "rules": rules})
 }
 
-func storeErr(w http.ResponseWriter, err error) {
+// storeErr answers a failed user or access rule change: the store's own
+// refusals are shown as they are, anything else is an internal error.
+func (s *Server) storeErr(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrLastAdmin):
-		writeErr(w, http.StatusConflict, err.Error())
+		writeErr(w, http.StatusConflict, store.ErrLastAdmin.Error())
 	case errors.Is(err, store.ErrNotFound):
-		writeErr(w, http.StatusNotFound, err.Error())
+		writeErr(w, http.StatusNotFound, store.ErrNotFound.Error())
 	default:
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "access_save", "cannot save the change", err)
 	}
 }
 
@@ -249,7 +251,7 @@ func (s *Server) handlePutUser(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		badJSON(w)
 		return
 	}
 	if !validLogin(login) {
@@ -263,7 +265,7 @@ func (s *Server) handlePutUser(w http.ResponseWriter, r *http.Request) {
 	p, _ := s.currentUser(r)
 	prev, err := s.store.PutUser(store.User{Login: login, Role: body.Role, CreatedBy: p.Login})
 	if err != nil {
-		storeErr(w, err)
+		s.storeErr(w, r, err)
 		return
 	}
 	switch prev {
@@ -279,7 +281,7 @@ func (s *Server) handlePutUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	u, err := s.store.DeleteUser(r.PathValue("login"))
 	if err != nil {
-		storeErr(w, err)
+		s.storeErr(w, r, err)
 		return
 	}
 	s.audit(r, "user.remove", u.Login, "was "+u.Role)
@@ -293,7 +295,7 @@ func (s *Server) handlePutRule(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		badJSON(w)
 		return
 	}
 	org, team := strings.TrimSpace(body.Org), strings.TrimSpace(body.Team)
@@ -311,7 +313,7 @@ func (s *Server) handlePutRule(w http.ResponseWriter, r *http.Request) {
 	p, _ := s.currentUser(r)
 	rule, err := s.store.PutAccessRule(store.AccessRule{Org: org, Team: team, Role: body.Role, CreatedBy: p.Login})
 	if err != nil {
-		storeErr(w, err)
+		s.storeErr(w, r, err)
 		return
 	}
 	s.audit(r, "rule.put", rule.Subject(), "role "+rule.Role)
@@ -322,7 +324,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	rule, err := s.store.DeleteAccessRule(id)
 	if err != nil {
-		storeErr(w, err)
+		s.storeErr(w, r, err)
 		return
 	}
 	s.audit(r, "rule.remove", rule.Subject(), "was "+rule.Role)

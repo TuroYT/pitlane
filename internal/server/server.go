@@ -322,13 +322,16 @@ func median(v []float64) float64 {
 	return v[len(v)/2]
 }
 
+// errAppKey is a GitHub App private key that cannot be read back.
+var errAppKey = errors.New("cannot decrypt app_pem, the GitHub App private key (was master.key replaced or lost?)")
+
 // appClient returns a client authenticated as the GitHub App saved by the
 // setup. A key that cannot be decrypted (master.key replaced or lost) is
 // reported as such, not as an unparsable key.
 func (s *Server) appClient() (*gh.AppClient, error) {
 	pem, err := s.store.GetSecret("app_pem")
 	if err != nil {
-		return nil, fmt.Errorf("read the GitHub App private key: %w", err)
+		return nil, fmt.Errorf("%w: %w", errAppKey, err)
 	}
 	appID, err := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
 	if err != nil {
@@ -376,7 +379,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	targets, err := s.store.Targets()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "targets_list", "cannot list the targets", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -487,7 +490,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			writeErr(w, http.StatusBadRequest, "cannot read the request body")
 			return
 		}
 		if json.Valid(b) && len(b) > 2 {
@@ -595,7 +598,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB,
 		MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB, StrictSlots: cur.StrictSlots}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		badJSON(w)
 		return
 	}
 	if in.Slots < 1 || in.Slots > 64 {
@@ -629,14 +632,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			metricsAudit = "metrics_token changed"
 		}
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
 			return
 		}
 	}
 	kv := settingValues(in)
 	for k, v := range kv {
 		if err := s.store.Set(k, v); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
 			return
 		}
 	}
@@ -700,6 +703,43 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
+
+// apiError is the body of an error response. Code and RequestID are only
+// set for failures on Pitlane's side (see internalErr).
+type apiError struct {
+	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
+}
+
+// internalErr answers a request that failed on Pitlane's side (database,
+// GitHub API): the client gets msg, a stable code and a request ID, while
+// err itself only goes to the log, under the same request ID. msg must not
+// carry any error text.
+func (s *Server) internalErr(w http.ResponseWriter, r *http.Request, status int, code, msg string, err error) {
+	id := requestID(r)
+	if s.log != nil {
+		s.log.Error(msg, "code", code, "request_id", id, "method", r.Method, "path", r.URL.Path, "status", status, "error", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Request-Id", id)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(apiError{Error: fmt.Sprintf("%s (error %s, request %s)", msg, code, id), Code: code, RequestID: id})
+}
+
+// requestID is the X-Request-Id a reverse proxy set on the request, when it
+// looks like one, else a new random ID.
+func requestID(r *http.Request) string {
+	if v := r.Header.Get("X-Request-Id"); v != "" && len(v) <= 64 && strings.IndexFunc(v, func(c rune) bool {
+		return c != '-' && c != '_' && c != '.' && (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z')
+	}) < 0 {
+		return v
+	}
+	return randomHex(8)
+}
+
+// badJSON answers a request body that is not the JSON expected.
+func badJSON(w http.ResponseWriter) { writeErr(w, http.StatusBadRequest, "invalid JSON body") }
 
 type hub struct {
 	mu   sync.Mutex

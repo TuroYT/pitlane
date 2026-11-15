@@ -38,7 +38,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, total, err := s.store.JobsPage(r.Context(), f, limit, max(0, offset))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "jobs_list", "cannot list the jobs", err)
 		return
 	}
 	if jobs == nil {
@@ -53,7 +53,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobRepos(w http.ResponseWriter, r *http.Request) {
 	repos, err := s.store.JobRepos(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "job_repos", "cannot list the job repositories", err)
 		return
 	}
 	writeJSON(w, repos)
@@ -128,13 +128,13 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if token, err = s.token(r.Context(), t); err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			s.internalErr(w, r, http.StatusBadGateway, "github_token", "cannot get a GitHub token for this repository", err)
 			return
 		}
 	}
 	rc, err := gh.JobLog(r.Context(), token, job.Owner, job.Repo, job.RunID, name)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		s.internalErr(w, r, http.StatusBadGateway, "github_job_log", "cannot fetch the job log from GitHub", err)
 		return
 	}
 	defer rc.Close()
