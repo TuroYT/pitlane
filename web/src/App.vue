@@ -83,6 +83,7 @@ const role = computed(() => status.value?.role || '')
   <div v-if="!ready" class="boot" role="status">Loading…</div>
   <RouterView v-else-if="route.meta.bare" @refresh="refresh" />
   <div v-else class="shell">
+    <a class="skip" href="#main">Skip to content</a>
     <header class="header">
       <div class="header-top">
         <RouterLink to="/" class="brand"><BrandMark :size="28" /> Pitlane</RouterLink>
@@ -102,7 +103,7 @@ const role = computed(() => status.value?.role || '')
         </RouterLink>
       </nav>
     </header>
-    <main class="content">
+    <main id="main" class="content" tabindex="-1">
       <RouterView />
     </main>
     <footer class="foot muted">

@@ -340,6 +340,7 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .table .actions { text-align: right; white-space: nowrap; }
 .table .actions a { margin-left: 12px; }
 .table td.right, .table th.right { text-align: right; }
+.table td.right { white-space: nowrap; }
 .table td.empty { padding: 24px 16px; text-align: center; color: var(--muted); }
 .table select { width: auto; min-width: 120px; }
 .table code { white-space: nowrap; overflow-wrap: normal; }
@@ -402,3 +403,6 @@ pre.logs {
 .clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 320px; }
 .repo-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 label .optional { font-weight: 400; color: var(--muted); }
+.skip { position: absolute; left: 8px; top: -48px; z-index: 10; padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+.skip:focus { top: 8px; }
+.content:focus { outline: none; }
