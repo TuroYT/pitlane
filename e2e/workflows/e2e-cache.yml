@@ -48,7 +48,8 @@ jobs:
           key: ${{ env.E2E_KEY }}-exact
 
       - name: save timing
-        run: echo "::notice title=e2e-timing::cache save 64 MiB: $(( $(date +%s) - E2E_T0 ))s"
+        run: |
+          echo "::notice title=e2e-timing::cache save 64 MiB: $(( $(date +%s) - E2E_T0 ))s"
 
   restore:
     needs: save

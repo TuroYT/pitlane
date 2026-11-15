@@ -102,7 +102,7 @@ dispatch() { # scenario -> run id on stdout
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   until out=$(gh api "${args[@]}" 2>&1); do
     tries=$((tries + 1))
-    [ $tries -lt 12 ] || { echo "$out" >&2; die "cannot dispatch $wf"; }
+    [ $tries -lt 12 ] || { echo "$out" >&2; die "cannot dispatch $wf (GitHub rejects workflows with invalid YAML this way: check the run list of the repository)"; }
     sleep 5
   done
   id=$(jq -r '.workflow_run_id // empty' <<<"$out" 2>/dev/null || true)
