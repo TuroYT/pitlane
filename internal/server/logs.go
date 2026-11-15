@@ -127,13 +127,7 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "repository is no longer enabled")
 			return
 		}
-		pem, _ := s.store.GetSecret("app_pem")
-		appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-		client, err := gh.NewAppClient(appID, pem)
-		if err == nil {
-			token, err = client.InstallationToken(r.Context(), t.InstallationID)
-		}
-		if err != nil {
+		if token, err = s.token(r.Context(), t); err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
