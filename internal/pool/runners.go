@@ -131,16 +131,30 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 		},
 	}, hc, nil, nil, spec.Name)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Canceled while Docker may have created it: remove it by name.
+			p.removeAfterFailedStart(ctx, spec.Name)
+		}
 		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("create runner: %w", err)
 	}
 	if err := p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		_ = p.cli.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true})
+		p.removeAfterFailedStart(ctx, created.ID)
 		p.revokeCache(spec.Name)
 		return "", fmt.Errorf("start runner: %w", err)
 	}
 	p.MarkRunner(slotIdx, spec.Name)
 	return created.ID, nil
+}
+
+// removeAfterFailedStart removes a runner container that could not be
+// started. It runs even when ctx is canceled (the target stopped while its
+// runner was starting): the container carries a JIT config and the labels
+// of a slot that is released and handed out again.
+func (p *Pool) removeAfterFailedStart(ctx context.Context, id string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	p.Remove(cctx, id)
 }
 
 // Wait blocks until the container exits and returns its exit code.
@@ -170,9 +184,14 @@ func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) er
 	return err
 }
 
-// Remove deletes a container.
+// Remove deletes a container. A container already gone, or already being
+// removed (a scale-down and the runner's own exit race), is not an error;
+// any other failure is logged (the container stays until the next restart
+// finds it).
 func (p *Pool) Remove(ctx context.Context, id string) {
-	_ = p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+	if err := p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
+		p.log.Warn("remove container", "container", id, "error", err)
+	}
 }
 
 // StopRunner stops a runner container; whoever waits on it then cleans up.
