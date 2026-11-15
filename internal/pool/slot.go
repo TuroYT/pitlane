@@ -141,8 +141,8 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	p.mu.Unlock()
 
-	if b, _ := p.cacheBroker(); b != nil && old.ActionsCacheGB != cfg.ActionsCacheGB {
-		b.SetLimit(int64(cfg.ActionsCacheGB) << 30)
+	if old.ActionsCacheGB != cfg.ActionsCacheGB || old.ActionsCacheOwnerPct != cfg.ActionsCacheOwnerPct {
+		p.applyCacheLimits()
 	}
 	if old.RunnerImage != cfg.RunnerImage {
 		go func() {
@@ -470,11 +470,16 @@ func (p *Pool) Slots() []SlotState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]SlotState, 0, len(p.slots))
+	reserved := p.reservedLocked()
 	for i := 0; i < len(p.slots)+8; i++ {
 		if s, ok := p.slots[i]; ok {
 			st := s.SlotState
 			if s.retire {
 				st.Status = "retiring"
+			}
+			st.StrictOnly = reserved[i]
+			if res, ok := p.reserved[i]; ok {
+				st.Predicted, st.Actual = res, p.meters[i].Current()
 			}
 			out = append(out, st)
 		}

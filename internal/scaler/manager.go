@@ -56,6 +56,7 @@ type Manager struct {
 	// set a fake).
 	connect func(creds Credentials, t store.Target, version string) (scaleSetAPI, error)
 	log     *slog.Logger
+	predict *predictor
 	logDir  string
 	creds   func() Credentials
 	changed func()
@@ -75,6 +76,7 @@ func New(st *store.Store, p Pool, dataDir string, creds func() Credentials, chan
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
 	return &Manager{store: st, pool: p, connect: newScaleSetAPI, log: log, logDir: logDir, creds: creds, changed: changed,
+		predict: newPredictor(st.MemoryHistory),
 		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
@@ -282,11 +284,14 @@ func (m *Manager) Sync() {
 		return
 	}
 	want := map[int64]store.Target{}
+	strict := false
 	for _, t := range targets {
 		if t.Enabled {
 			want[t.ID] = t
+			strict = strict || t.Strict
 		}
 	}
+	m.pool.SetStrictDemand(strict)
 	m.mu.Lock()
 	for id, t := range m.targets {
 		w, ok := want[id]
@@ -307,6 +312,10 @@ func (m *Manager) Sync() {
 		}
 		t := newTarget(m, w)
 		for _, r := range m.adopted[id] {
+			// Adopted after a restart: its job is unknown, reserve what the
+			// target's jobs usually need.
+			r.predicted, _ = m.predict.predict(m.ctx, jobKey{owner: w.Owner, repo: w.Repo})
+			m.pool.SetPrediction(r.lease.Slot, r.predicted)
 			t.runners[r.name] = r
 			go t.watch(r)
 		}
@@ -373,16 +382,21 @@ type RunnerState struct {
 	JobName   string `json:"jobName"`
 	Repo      string `json:"repo"`
 	StartedAt int64  `json:"startedAt"`
+	// Predicted is the memory reserved for its job (bytes).
+	Predicted int64 `json:"predicted"`
 }
 
 // TargetState is shown in the UI.
 type TargetState struct {
 	store.Target
-	Status  string        `json:"status"`
-	Error   string        `json:"error,omitempty"`
-	Desired int           `json:"desired"`
-	Waiting int           `json:"waiting"`
-	Runners []RunnerState `json:"runners"`
+	Status  string `json:"status"`
+	Error   string `json:"error,omitempty"`
+	Desired int    `json:"desired"`
+	Waiting int    `json:"waiting"`
+	// WaitReason says why jobs wait (pool.WaitSlot, WaitMemory,
+	// WaitStrictSlot), "" when none does.
+	WaitReason string        `json:"waitReason,omitempty"`
+	Runners    []RunnerState `json:"runners"`
 }
 
 // Snapshot returns the live state of every target.
@@ -395,10 +409,10 @@ func (m *Manager) Snapshot() []TargetState {
 		ts := TargetState{Target: st, Status: "disabled", Runners: []RunnerState{}}
 		if t, ok := m.targets[st.ID]; ok {
 			t.mu.Lock()
-			ts.Status, ts.Error, ts.Desired, ts.Waiting = t.status, t.err, t.desired, t.waiting
+			ts.Status, ts.Error, ts.Desired, ts.Waiting, ts.WaitReason = t.status, t.err, t.desired, t.waiting, t.waitReason
 			ts.ScaleSetID = t.scaleSetID
 			for _, r := range t.runners {
-				ts.Runners = append(ts.Runners, RunnerState{Name: r.name, Slot: r.lease.Slot, Busy: r.busy, JobName: r.jobName, Repo: r.repo, StartedAt: r.startedAt.Unix()})
+				ts.Runners = append(ts.Runners, RunnerState{Name: r.name, Slot: r.lease.Slot, Busy: r.busy, JobName: r.jobName, Repo: r.repo, StartedAt: r.startedAt.Unix(), Predicted: r.predicted})
 			}
 			t.mu.Unlock()
 			sort.Slice(ts.Runners, func(i, j int) bool { return ts.Runners[i].Slot < ts.Runners[j].Slot })
@@ -426,7 +440,19 @@ type runner struct {
 	repo        string
 	startedAt   time.Time
 	meter       *pool.Meter // resources used by its job (nil: not measured)
+	predicted   int64       // memory reserved for its job (bytes)
 }
+
+// pendingJob is a job GitHub assigned to the scale set that no runner has
+// started yet.
+type pendingJob struct {
+	key       jobKey
+	predicted int64
+	at        time.Time
+}
+
+// pendingTTL forgets a pending job whose start or completion was never seen.
+const pendingTTL = 24 * time.Hour
 
 type target struct {
 	m      *Manager
@@ -443,7 +469,9 @@ type target struct {
 	err         string
 	desired     int
 	waiting     int
+	waitReason  string
 	waitSince   time.Time
+	pending     map[string]pendingJob // by GitHub job ID
 	runners     map[string]*runner
 	lost        map[string]lostJob // jobs bound to dead runners, by job ID
 	starting    int                // runners being prepared/started in the background
@@ -454,7 +482,7 @@ type target struct {
 
 func newTarget(m *Manager, t store.Target) *target {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{}, lost: map[string]lostJob{},
+	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{}, lost: map[string]lostJob{}, pending: map[string]pendingJob{},
 		log: m.log.With("target", t.FullName())}
 }
 
@@ -629,8 +657,10 @@ func (t *target) reconcile() {
 		return
 	}
 	cfg := t.t
-	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, time.Now())))
+	now := time.Now()
+	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, now)))
 	have := t.starting
+	waiting := t.starting // runners not running a job yet
 	var idle, stale []*runner
 	for _, r := range t.runners {
 		if r.exited {
@@ -641,18 +671,38 @@ func (t *target) reconcile() {
 			continue
 		}
 		have++
-		if !r.busy && time.Since(r.startedAt) > 30*time.Second {
-			idle = append(idle, r)
+		if !r.busy {
+			waiting++
+			if time.Since(r.startedAt) > 30*time.Second {
+				idle = append(idle, r)
+			}
 		}
+	}
+	preds := pendingPredictions(t.pending, now)
+	since := now
+	if t.waiting > 0 {
+		since = t.waitSince
 	}
 	t.mu.Unlock()
 
 	// Runners are prepared and started in parallel, in the background: the
 	// listener is never blocked and a slow start does not delay the others.
+	// Runners not running a job yet cover the heaviest pending jobs; each
+	// new one reserves the memory of the next (GitHub picks which runner
+	// runs which job, so this is the safe bet), or of a typical job of the
+	// target for a warm runner.
 	started := 0
+	reason := ""
 	for i := 0; i < want-have; i++ {
-		lease, ok := t.m.pool.Acquire(t.ctx, cfg.Owner, cfg.ID, cfg.Strict)
-		if !ok {
+		predicted := int64(0)
+		if k := waiting + i; k < len(preds) {
+			predicted = preds[k]
+		} else {
+			predicted, _ = t.m.predict.predict(t.ctx, jobKey{owner: cfg.Owner, repo: cfg.Repo})
+		}
+		lease, why := t.m.pool.Admit(t.ctx, pool.Request{Owner: cfg.Owner, TargetID: cfg.ID, Strict: cfg.Strict, Predicted: predicted, Since: since})
+		if why != "" {
+			reason = why
 			break
 		}
 		started++
@@ -695,11 +745,18 @@ func (t *target) reconcile() {
 	}
 
 	t.mu.Lock()
-	if missing > 0 && t.waiting == 0 {
+	// A target that got a runner and still waits goes behind the others
+	// (reconcileAll serves the longest waiting first): targets take turns.
+	if missing > 0 && (t.waiting == 0 || started > 0) {
 		t.waitSince = time.Now()
 	}
-	changed := t.waiting != missing || started > 0
-	t.waiting = missing
+	if missing == 0 {
+		reason = ""
+	} else if reason == "" {
+		reason = pool.WaitSlot // capped by MaxRunners or still starting
+	}
+	changed := t.waiting != missing || started > 0 || t.waitReason != reason
+	t.waiting, t.waitReason = missing, reason
 	t.mu.Unlock()
 	if changed {
 		t.m.changed()
@@ -765,7 +822,7 @@ func (t *target) startRunner(lease pool.Lease) error {
 		return err
 	}
 	r := &runner{name: name, containerID: id, lease: lease, runnerID: jit.runnerID, startedAt: time.Now(),
-		meter: t.m.pool.MeasureJob(t.ctx, id, lease.Slot)}
+		meter: t.m.pool.MeasureJob(t.ctx, id, lease.Slot), predicted: lease.Predicted}
 	t.mu.Lock()
 	t.runners[name] = r
 	t.mu.Unlock()
@@ -860,7 +917,9 @@ func storeUsage(u pool.JobUsage) store.JobUsage {
 	c := func(c pool.CgroupUsage) store.ContainerUsage {
 		return store.ContainerUsage{MemPeak: v(c.MemPeak), CPUUsec: v(c.CPUUsec), CPUSomeUsec: v(c.CPUSomeUsec), IOFullUsec: v(c.IOFullUsec), MemFullUsec: v(c.MemFullUsec)}
 	}
-	return store.JobUsage{WallMs: u.Wall.Milliseconds(), Runner: c(u.Runner), Slot: c(u.Slot)}
+	slot := c(u.Slot)
+	slot.AnonPeak = v(u.Slot.AnonPeak) // only the slot's is stored (its peak counts the page cache)
+	return store.JobUsage{WallMs: u.Wall.Milliseconds(), Runner: c(u.Runner), Slot: slot}
 }
 
 // maxArchivedLog bounds the archived log of one runner (its output is
@@ -996,6 +1055,41 @@ func (s *scaler) upsertJob(j store.Job) {
 	}
 }
 
+// keyOf names a job for the memory prediction.
+func keyOf(j store.Job) jobKey {
+	return jobKey{owner: j.Owner, repo: j.Repo, workflow: j.WorkflowRef, job: j.JobName}
+}
+
+// pendingJob returns the pending entry of a job that just started, or a
+// fresh prediction when it was never seen pending (assigned before a
+// restart).
+func (s *scaler) pendingJob(ctx context.Context, j store.Job) pendingJob {
+	s.t.mu.Lock()
+	pj, ok := s.t.pending[j.JobID]
+	s.t.mu.Unlock()
+	if ok {
+		return pj
+	}
+	k := keyOf(j)
+	pred, _ := s.t.m.predict.predict(ctx, k)
+	return pendingJob{key: k, predicted: pred, at: time.Now()}
+}
+
+// pendingPredictions prunes the pending jobs older than pendingTTL and
+// returns the predictions of the others, heaviest first. Callers hold t.mu.
+func pendingPredictions(pending map[string]pendingJob, now time.Time) []int64 {
+	out := make([]int64, 0, len(pending))
+	for id, pj := range pending {
+		if now.Sub(pj.at) > pendingTTL {
+			delete(pending, id)
+			continue
+		}
+		out = append(out, pj.predicted)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
+	return out
+}
+
 func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
 	if msg == nil {
 		s.t.reconcile()
@@ -1005,7 +1099,19 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
 			ids = append(ids, j.RunnerRequestID)
-			s.upsertJob(s.job(j.JobMessageBase))
+			job := s.job(j.JobMessageBase)
+			if job.QueuedAt == 0 {
+				// GitHub did not say when the job was queued: it was just
+				// now, near enough (the history and its pruning need a date).
+				job.QueuedAt = time.Now().Unix()
+			}
+			s.upsertJob(job)
+			key := keyOf(job)
+			pred, source := s.t.m.predict.predict(ctx, key)
+			s.t.log.Debug("job memory predicted", "job", job.JobName, "repo", job.Repo, "bytes", pred, "from", source)
+			s.t.mu.Lock()
+			s.t.pending[job.JobID] = pendingJob{key: key, predicted: pred, at: time.Now()}
+			s.t.mu.Unlock()
 		}
 		if err := s.session.acquireJobs(ctx, ids); err != nil {
 			return fmt.Errorf("acquire jobs: %w", err)
@@ -1018,8 +1124,21 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		if job.StartedAt == 0 {
 			job.StartedAt = time.Now().Unix()
 		}
+		if job.QueuedAt == 0 {
+			// Only used when the job was never seen queued (the store keeps
+			// the earliest known queue time).
+			job.QueuedAt = job.StartedAt
+		}
+		pj := s.pendingJob(ctx, job)
 		s.t.mu.Lock()
+		delete(s.t.pending, j.JobID)
+		refine := -1
 		if r, ok := s.t.runners[j.RunnerName]; ok {
+			if !r.busy && r.predicted != pj.predicted {
+				// The job is known now: reserve what it needs, not what
+				// the heaviest pending job needed.
+				r.predicted, refine = pj.predicted, r.lease.Slot
+			}
 			if !r.busy || r.busySince.IsZero() {
 				r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, time.Now())
 			}
@@ -1033,6 +1152,9 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			delete(s.t.lost, j.JobID) // started again elsewhere: it needs a runner
 		}
 		s.t.mu.Unlock()
+		if refine >= 0 {
+			s.t.m.pool.SetPrediction(refine, pj.predicted)
+		}
 		s.upsertJob(job)
 	}
 	for _, j := range msg.JobCompletedMessages {
@@ -1047,6 +1169,7 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			job.Result = "canceled"
 		}
 		s.t.mu.Lock()
+		delete(s.t.pending, j.JobID)
 		delete(s.t.lost, j.JobID)
 		if r, ok := s.t.runners[j.RunnerName]; ok && r.jobID == j.JobID {
 			r.jobID = ""

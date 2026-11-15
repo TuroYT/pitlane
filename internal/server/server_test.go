@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
@@ -91,7 +92,8 @@ func TestGitHubJobRedirect(t *testing.T) {
 	s := New(Config{}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j1", RunID: 123, Owner: "acme", Repo: "api", RunnerName: "pitlane-a", Slot: -1})
 	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j2", RunID: 124, Owner: "acme", Repo: "api", RunnerName: "pitlane-b", Slot: -1})
-	s.jobIDs.Store("pitlane-b", int64(555))
+	s.jobIDs.put(jobKey{"pitlane-b", 124}, 555)
+	s.jobIDs.put(jobKey{"pitlane-a", 999}, 777) // another run: never used for run 123
 
 	get := func(name string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", "/api/runners/"+name+"/github", nil)
@@ -119,12 +121,42 @@ func TestActionsCacheSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	if c := LoadPoolConfig(st, t.TempDir()); !c.ActionsCache || c.ActionsCacheGB != 20 {
-		t.Fatalf("defaults: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	if c := LoadPoolConfig(st, t.TempDir()); !c.ActionsCache || c.ActionsCacheGB != 20 || c.ActionsCacheOwnerPct != 50 {
+		t.Fatalf("defaults: %v %d %d%%", c.ActionsCache, c.ActionsCacheGB, c.ActionsCacheOwnerPct)
 	}
 	_ = st.Set("actions_cache", "false")
 	_ = st.Set("actions_cache_gb", "50")
-	if c := LoadPoolConfig(st, t.TempDir()); c.ActionsCache || c.ActionsCacheGB != 50 {
-		t.Fatalf("stored: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	_ = st.Set("actions_cache_owner_pct", "30")
+	if c := LoadPoolConfig(st, t.TempDir()); c.ActionsCache || c.ActionsCacheGB != 50 || c.ActionsCacheOwnerPct != 30 {
+		t.Fatalf("stored: %v %d %d%%", c.ActionsCache, c.ActionsCacheGB, c.ActionsCacheOwnerPct)
+	}
+	for in, want := range map[int]string{0: "1", 30: "30", 250: "100"} {
+		if got := settingValues(Settings{ActionsCacheOwnerPct: in})["actions_cache_owner_pct"]; got != want {
+			t.Errorf("owner share %d saved as %s, want %s", in, got, want)
+		}
+	}
+}
+
+// Memory admission is on by default with a 2 GiB reserve, strict slots are
+// automatic, and the stored values are loaded.
+func TestSchedulingSettings(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	c := LoadPoolConfig(st, t.TempDir())
+	if !c.MemoryAdmission || c.MemoryReserveMB != pool.DefaultMemoryReserveMB || c.StrictSlots != pool.AutoStrictSlots {
+		t.Fatalf("defaults: %+v", c)
+	}
+	kv := settingValues(Settings{Slots: 8, MemoryAdmission: false, MemoryReserveMB: -5, StrictSlots: -7})
+	if kv["memory_admission"] != "false" || kv["memory_reserve_mb"] != "0" || kv["strict_slots"] != "-1" {
+		t.Fatalf("values: %v", kv)
+	}
+	_ = st.Set("memory_admission", "false")
+	_ = st.Set("memory_reserve_mb", "4096")
+	_ = st.Set("strict_slots", "2")
+	if c := LoadPoolConfig(st, t.TempDir()); c.MemoryAdmission || c.MemoryReserveMB != 4096 || c.StrictSlots != 2 {
+		t.Fatalf("stored: %+v", c)
 	}
 }

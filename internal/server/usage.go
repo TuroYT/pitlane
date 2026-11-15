@@ -20,7 +20,8 @@ type memorySizing struct {
 	P90 *float64 `json:"p90"`
 	Max *float64 `json:"max"`
 	// MemTotal is the memory Pitlane's host (or LXC container) has, Usable
-	// what is left for jobs once reserveBytes is set aside.
+	// what is left for jobs once the memory reserve is set aside (the
+	// admission's budget, see pool.Admit).
 	MemTotal int64 `json:"memTotal"`
 	Usable   int64 `json:"usable"`
 	// SuggestedSlots = floor(Usable / P90); nil without measured jobs.
@@ -29,14 +30,10 @@ type memorySizing struct {
 	MemoryLimitMB  int64 `json:"memoryLimitMb"` // per runner and per slot daemon, 0 = none
 }
 
-// reserveBytes is the memory kept for the host itself (system, Docker,
-// Pitlane): 1 GiB, or an eighth of the memory on small hosts.
-func reserveBytes(total int64) int64 { return min(1<<30, total/8) }
-
-func newMemorySizing(peaks []float64, memTotal int64, slots int, limitMB int64) memorySizing {
+func newMemorySizing(peaks []float64, memTotal, usable int64, slots int, limitMB int64) memorySizing {
 	m := memorySizing{WindowDays: int(memoryWindow / (24 * time.Hour)), Count: len(peaks), MemTotal: memTotal, Slots: slots, MemoryLimitMB: limitMB}
 	if memTotal > 0 {
-		m.Usable = memTotal - reserveBytes(memTotal)
+		m.Usable = usable
 	}
 	if len(peaks) == 0 {
 		return m
@@ -55,9 +52,9 @@ func newMemorySizing(peaks []float64, memTotal int64, slots int, limitMB int64) 
 func (s *Server) handleJobMemory(w http.ResponseWriter, r *http.Request) {
 	peaks, err := s.store.JobMemoryPeaks(r.Context(), time.Now().Add(-memoryWindow).Unix())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.internalErr(w, r, http.StatusInternalServerError, "job_memory", "cannot read the job memory peaks", err)
 		return
 	}
-	cfg := s.pool.Config()
-	writeJSON(w, newMemorySizing(peaks, readHost(s.cfg.DataDir).MemTotal, cfg.Slots, cfg.MemoryMB))
+	cfg, mem := s.pool.Config(), s.pool.Memory()
+	writeJSON(w, newMemorySizing(peaks, mem.Total, mem.Budget, cfg.Slots, cfg.MemoryMB))
 }

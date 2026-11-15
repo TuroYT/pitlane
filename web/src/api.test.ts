@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, hasRole, live, onUnauthorized, post, targetName } from './api'
+import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, hasRole, jobWait, live, onUnauthorized, post, targetName } from './api'
 
 function reply(status: number, body: unknown, statusText = '') {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText })
@@ -207,5 +207,24 @@ describe('hasRole', () => {
     expect(hasRole('', 'viewer')).toBe(false)
     expect(hasRole(undefined, 'viewer')).toBe(false)
     expect(hasRole('root', 'viewer')).toBe(false)
+  })
+})
+
+describe('jobWait', () => {
+  afterEach(() => {
+    live.snap = null
+  })
+  const target = { id: 7, kind: 'repo', owner: 'acme', repo: 'web', status: 'listening', desired: 2, runners: [] }
+  it('says why a queued job waits, from its target', () => {
+    live.snap = { targets: [{ ...target, waiting: 2, waitReason: 'memory' }], slots: [], time: 0 } as never
+    expect(jobWait({ targetId: 7, startedAt: 0, finishedAt: 0 })).toBe('memory')
+    expect(jobWait({ targetId: 7, startedAt: 10, finishedAt: 0 })).toBe('')
+    expect(jobWait({ targetId: 8, startedAt: 0, finishedAt: 0 })).toBe('')
+  })
+  it('defaults to a slot and says nothing when the target does not wait', () => {
+    live.snap = { targets: [{ ...target, waiting: 1 }], slots: [], time: 0 } as never
+    expect(jobWait({ targetId: 7, startedAt: 0, finishedAt: 0 })).toBe('slot')
+    live.snap = { targets: [{ ...target, waiting: 0, waitReason: 'memory' }], slots: [], time: 0 } as never
+    expect(jobWait({ targetId: 7, startedAt: 0, finishedAt: 0 })).toBe('')
   })
 })

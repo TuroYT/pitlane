@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -474,5 +476,101 @@ func TestJobUsage(t *testing.T) {
 	}
 	if peaks, _ := s.JobMemoryPeaks(ctx, 300); len(peaks) != 0 {
 		t.Errorf("peaks after: %v", peaks)
+	}
+}
+
+func TestMemoryHistory(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	i := func(v int64) *int64 { return &v }
+	add := func(n int, owner, repo, wf, job, result string, runner, slot, anon *int64) {
+		name := fmt.Sprintf("r-%d", n)
+		if err := s.UpsertJob(Job{TargetID: 1, JobID: fmt.Sprint(n), Owner: owner, Repo: repo, WorkflowRef: wf, JobName: job,
+			RunnerName: name, Slot: 0, StartedAt: 1, FinishedAt: 2, Result: result}); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := s.SetJobUsage(ctx, name, JobUsage{WallMs: 1, Runner: ContainerUsage{MemPeak: runner}, Slot: ContainerUsage{MemPeak: slot, AnonPeak: anon}}); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+	}
+	add(1, "acme", "web", "ci.yml", "build", "success", i(3000), i(8000), nil)    // old row: slot/4
+	add(2, "acme", "web", "ci.yml", "build", "success", i(3100), i(9000), i(500)) // anon known
+	add(3, "acme", "web", "ci.yml", "build", "canceled", i(10), nil, nil)         // ignored
+	add(4, "acme", "web", "ci.yml", "test", "failure", i(2100), nil, nil)         // other job
+	add(5, "other", "web", "ci.yml", "build", "success", i(9999), nil, nil)       // other owner
+	add(6, "acme", "api", "ci.yml", "build", "success", nil, nil, nil)            // not measured
+	for _, tc := range []struct {
+		name                 string
+		owner, repo, wf, job string
+		want                 []int64
+	}{
+		{"job", "acme", "web", "ci.yml", "build", []int64{3600, 5000}},
+		{"repo", "acme", "web", "", "", []int64{2100, 3600, 5000}},
+		{"global", "", "", "", "", []int64{9999, 2100, 3600, 5000}},
+		{"unknown job", "acme", "web", "ci.yml", "lint", nil},
+	} {
+		got, err := s.MemoryHistory(ctx, tc.owner, tc.repo, tc.wf, tc.job, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if got, _ := s.MemoryHistory(ctx, "", "", "", "", 1); len(got) != 1 {
+		t.Errorf("limit: %v", got)
+	}
+}
+
+func TestPruneJobsKeepsRecentJobsWithoutQueueTime(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().Unix()
+	old := time.Now().Add(-40 * 24 * time.Hour).Unix()
+	for _, j := range []Job{
+		{JobID: "recent-no-queue", StartedAt: now, FinishedAt: now}, // GitHub sent no queue time
+		{JobID: "no-dates"}, // nothing known: kept
+		{JobID: "old", QueuedAt: old, StartedAt: old, FinishedAt: old},          // pruned
+		{JobID: "queued-long-ago-finished-now", QueuedAt: old, FinishedAt: now}, // still recent
+	} {
+		j.TargetID, j.Slot = 1, -1
+		if err := s.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PruneJobs(30 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	jobs, _, err := s.JobsPage(context.Background(), JobFilter{}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, j := range jobs {
+		kept = append(kept, j.JobID)
+	}
+	slices.Sort(kept)
+	if want := []string{"no-dates", "queued-long-ago-finished-now", "recent-no-queue"}; !slices.Equal(kept, want) {
+		t.Fatalf("kept %v, want %v", kept, want)
+	}
+}
+
+func TestUpsertJobKeepsEarliestQueueTime(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, q := range []int64{100, 0, 150, 90} {
+		if err := s.UpsertJob(Job{TargetID: 1, JobID: "j", Slot: -1, QueuedAt: q}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs, _, _ := s.JobsPage(context.Background(), JobFilter{}, 10, 0)
+	if len(jobs) != 1 || jobs[0].QueuedAt != 90 {
+		t.Fatalf("queued_at %+v, want the earliest known (90)", jobs)
 	}
 }

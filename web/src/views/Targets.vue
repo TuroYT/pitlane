@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, post, live, targetName, type Installation, type TargetState } from '../api'
+import { api, post, live, targetName, waitLabel, type Installation, type TargetState } from '../api'
 import { can, status } from '../session'
 import Icon from '../components/Icon.vue'
 
@@ -155,7 +155,7 @@ async function copy(text: string) {
                 <strong>{{ targetName(t) }}</strong>
                 <div v-if="t.runners.length" class="muted small">
                   {{ t.runners.filter((r) => r.busy).length }} busy · {{ t.runners.filter((r) => !r.busy).length }} idle
-                  <span v-if="t.waiting"> · {{ t.waiting }} waiting for a slot</span>
+                  <span v-if="t.waiting"> · {{ t.waiting }} {{ waitLabel[t.waitReason ?? 'slot'] }}</span>
                 </div>
               </td>
               <td>

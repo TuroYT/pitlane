@@ -27,7 +27,12 @@ type Pool interface {
 	RunnerContainers(ctx context.Context) ([]pool.Orphan, error)
 	RunnerNames(ctx context.Context) (map[string]bool, error)
 	Released() <-chan struct{}
-	Acquire(ctx context.Context, owner string, targetID int64, strict bool) (pool.Lease, bool)
+	// Admit reserves a slot for a job, or returns why it must wait.
+	Admit(ctx context.Context, r pool.Request) (pool.Lease, string)
+	// SetPrediction refines the memory reserved for a leased slot's job.
+	SetPrediction(slot int, bytes int64)
+	// SetStrictDemand says whether a strict target is enabled.
+	SetStrictDemand(on bool)
 	Prepare(ctx context.Context, l pool.Lease) error
 	Release(ctx context.Context, l pool.Lease)
 	StartRunner(ctx context.Context, spec pool.RunnerSpec) (string, error)
