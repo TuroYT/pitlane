@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, post, connectLive, disconnectLive, live, onUnauthorized, roleHelp, type Role, type Status } from './api'
 import { can, status } from './session'
@@ -62,29 +62,42 @@ const allNav: { to: string; label: string; icon: string; role?: Role }[] = [
   { to: '/audit', label: 'Audit log', icon: 'audit', role: 'admin' },
 ]
 const nav = computed(() => allNav.filter((n) => !n.role || can(n.role)))
+
+// A job's log page belongs to Jobs.
+function isActive(to: string) {
+  const p = route.path
+  if (to === '/') return p === '/'
+  return p.startsWith(to) || (to === '/jobs' && p.startsWith('/logs'))
+}
+
+// On a narrow screen the tab bar scrolls: keep the current tab in view.
+const navEl = ref<HTMLElement>()
+watch(() => [route.path, ready.value], () => nextTick(() => {
+  const a = navEl.value?.querySelector<HTMLElement>('[aria-current="page"]')
+  a?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}))
 const role = computed(() => status.value?.role || '')
 </script>
 
 <template>
-  <div v-if="!ready" class="boot">Loading…</div>
+  <div v-if="!ready" class="boot" role="status">Loading…</div>
   <RouterView v-else-if="route.meta.bare" @refresh="refresh" />
   <div v-else class="shell">
     <header class="header">
       <div class="header-top">
         <RouterLink to="/" class="brand"><BrandMark :size="28" /> Pitlane</RouterLink>
         <div class="who">
-          <span class="live" :title="live.connected ? 'Live updates connected' : 'Reconnecting…'">
+          <span class="live" role="status" :title="live.connected ? 'Live updates connected' : 'Reconnecting…'">
             <span class="dot" :class="live.connected ? 'ok' : 'off'" />{{ live.connected ? 'Live' : 'Reconnecting…' }}
           </span>
           <span class="login muted">@{{ status?.user }}</span>
           <span v-if="role" class="badge muted" :title="roleHelp[role]">{{ role }}</span>
-          <button class="small" @click="logout">Sign out</button>
+          <button type="button" class="small" @click="logout">Sign out</button>
         </div>
       </div>
-      <nav class="underline-nav" aria-label="Main">
-        <RouterLink v-for="n in nav" :key="n.to" :to="n.to"
-          :class="{ active: n.to === '/' ? route.path === '/' : route.path.startsWith(n.to) || (n.to === '/jobs' && route.path.startsWith('/logs')) }"
-          :aria-current="(n.to === '/' ? route.path === '/' : route.path.startsWith(n.to)) ? 'page' : undefined">
+      <nav ref="navEl" class="underline-nav" aria-label="Main">
+        <RouterLink v-for="n in nav" :key="n.to" :to="n.to" :class="{ active: isActive(n.to) }"
+          :aria-current="isActive(n.to) ? 'page' : undefined">
           <Icon :name="n.icon" />{{ n.label }}
         </RouterLink>
       </nav>
