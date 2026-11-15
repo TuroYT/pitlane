@@ -61,8 +61,7 @@ representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at:
 
-<!-- TODO(maintainer): replace this line with a private contact address for conduct reports. -->
-**TODO: contact address to be added by the maintainer.**
+contact@romain-pinsolle.fr
 
 All complaints will be reviewed and investigated promptly and fairly.
 
