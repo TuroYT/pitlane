@@ -19,6 +19,9 @@ import (
 	"time"
 
 	"github.com/TuroYT/pitlane/internal/cache"
+	// Installed as the runner's externals/node*/bin/node, the binary runs as
+	// the Node shim from this package's init, before anything else.
+	_ "github.com/TuroYT/pitlane/internal/nodeshim"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/server"
