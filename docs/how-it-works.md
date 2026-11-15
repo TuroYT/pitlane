@@ -133,15 +133,17 @@ while a strict target is enabled, none otherwise; set 0 to N−1 in Settings):
 
 - non-strict jobs never use the reserved slots (the highest slot numbers,
   marked `strict` on the dashboard);
-- strict jobs use them first, then overflow only to a slot with nothing to
-  lose (empty, or last used by a strict job or an unknown owner);
-- otherwise strict jobs wait (`waiting for a strict slot`), even if another
-  repository's warm slot is free.
+- strict jobs use them first, then overflow to a slot with nothing to lose
+  (empty, or last used by a strict job or an unknown owner), then to a warm
+  slot whose owner keeps another warm one (least recently used first);
+- they never wipe an owner's last warm slot: then they wait (`waiting for a
+  strict slot`) until a reserved slot frees up. They also wait, at most 20 s,
+  while a slot is being rebuilt after a strict job, since it comes back clean.
 
-The trade-off: private repositories have one slot less, and strict jobs queue
-behind each other when more of them run at once than there are reserved
-slots. Set 0 to get the previous behaviour back (strict jobs take any slot,
-cheapest wipe first).
+The trade-off: private repositories have one slot less, and when several
+strict jobs run at once (a CI with parallel jobs), the extra ones each cost
+another owner one warm slot. Set 0 to get the previous behaviour back (strict
+jobs take any slot, cheapest wipe first).
 
 ## Caches
 

@@ -35,6 +35,7 @@ type simResult struct {
 	budget      int64
 	warmWipes   int // warm caches lost (slot wiped while its owner could use it)
 	strictWarm  int // of which by strict jobs
+	strictLast  int // of which an owner's last warm slot
 	wipes       int64
 	makespan    time.Duration
 	meanWait    time.Duration
@@ -142,6 +143,9 @@ func simulate(t *testing.T, slots int, admission bool, strictSlots int) simResul
 					res.warmWipes++
 					if j.strict {
 						res.strictWarm++
+						if l.prevKeeps == 0 {
+							res.strictLast++
+						}
 					}
 				}
 				if err := p.Prepare(ctx, l); err != nil {
@@ -228,12 +232,12 @@ func TestSimulateProductionBurst(t *testing.T) {
 		if r.overBudget {
 			t.Errorf("%s: over-commit, peak %d > budget %d", name, r.maxActual, r.budget)
 		}
-		if r.strictWarm != 0 {
-			t.Errorf("%s: strict jobs wiped %d warm caches, want none", name, r.strictWarm)
+		if r.strictLast != 0 {
+			t.Errorf("%s: strict jobs wiped %d owners' last warm slot, want none", name, r.strictLast)
 		}
 	}
-	// v1.1 never wipes more warm caches than v1.0.1 (strict jobs wipe none,
-	// checked above); the remaining wipes come from jobs of another owner and
+	// v1.1 never wipes more warm caches than v1.0.1 (strict jobs only take a
+	// spare one, checked above); the remaining wipes come from jobs of another owner and
 	// are unavoidable with the owner cache scope. The replay is not fully
 	// deterministic, so only these invariants are asserted.
 	for name, p := range map[string][2]simResult{"8 slots": {old8, new8}, "12 slots": {old12, new12}} {
