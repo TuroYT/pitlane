@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, cacheSummary, post, type Settings } from '../api'
 import Updates from '../components/Updates.vue'
 import { can } from '../session'
@@ -12,6 +12,14 @@ const saving = ref(false)
 const saved = ref(false)
 const error = ref('')
 const metricsToken = ref('')
+
+// "Reserved slots for strict jobs": automatic (-1) or a count.
+const strictAuto = computed({
+  get: () => (s.value?.strictSlots ?? -1) < 0,
+  set: (auto: boolean) => {
+    if (s.value) s.value.strictSlots = auto ? -1 : Math.max(0, s.value.strictSlotsActive)
+  },
+})
 
 const loadError = ref('')
 onMounted(async () => {
@@ -31,6 +39,7 @@ async function save(clearMetricsToken = false) {
   const body: Settings = { ...s.value }
   delete body.metricsToken
   delete body.actionsCacheStats
+  body.strictSlots = strictAuto.value ? -1 : Math.max(0, body.strictSlots)
   if (clearMetricsToken) body.metricsToken = ''
   else if (metricsToken.value.trim()) body.metricsToken = metricsToken.value.trim()
   try {
@@ -80,6 +89,35 @@ async function save(clearMetricsToken = false) {
           <input v-model.number="s.cpuShares" type="number" min="0" />
           <small>Relative share when the host is saturated (Docker cpu-shares); 0 means the default. A lone job always gets every core.</small>
         </label>
+      </div>
+      <label class="inline">
+        <input v-model="s.memoryAdmission" type="checkbox" /><span>Start a job only when its memory fits</span>
+      </label>
+      <p class="small muted">
+        Each job's memory is predicted from its last runs (90th percentile of the runner's peak plus its slot's memory without
+        page cache), then from its repository's jobs, then from every job, else 2 GB. A job waits while the running jobs and
+        its prediction exceed the host's memory minus the reserve. A job bigger than that still runs, alone.
+      </p>
+      <div class="grid2">
+        <label>
+          Memory reserve (MB)
+          <input v-model.number="s.memoryReserveMb" type="number" min="0" :disabled="!s.memoryAdmission" />
+          <small>Kept for the system, Docker, Pitlane and the page cache. At most half the host's memory.</small>
+        </label>
+        <div class="stack">
+          <label class="inline">
+            <input v-model="strictAuto" type="checkbox" /><span>Reserve a slot for strict jobs when a strict target exists</span>
+          </label>
+          <label v-if="!strictAuto">
+            Reserved slots for strict jobs
+            <input v-model.number="s.strictSlots" type="number" min="0" :max="Math.max(0, s.slots - 1)" />
+          </label>
+          <small class="muted">
+            Strict jobs (public repositories) only run in these slots, or in an empty slot, so they never wipe a private
+            repository's warm cache; other jobs never use them. Strict jobs may queue behind each other.
+            Reserved now: {{ s.strictSlotsActive }}.
+          </small>
+        </div>
       </div>
     </section>
 
