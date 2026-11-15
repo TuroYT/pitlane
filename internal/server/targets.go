@@ -309,6 +309,7 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.audit(r, "target.create", created.FullName(), changes(targetKeys, nil, targetValues(created)))
 	s.mgr.Sync()
 	writeJSON(w, created)
 }
@@ -340,6 +341,12 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if p, _ := s.currentUser(r); !p.can(store.RoleAdmin) &&
+		(body.MinRunners != nil || body.MaxRunners != nil || body.ScaleSetName != nil || body.Strict != nil || body.MaxJobMins != nil) {
+		writeErr(w, http.StatusForbidden, "operators can only enable or disable a target")
+		return
+	}
+	before := targetValues(t)
 	wasEnabled, oldLabel := t.Enabled, t.ScaleSetName
 	if body.Enabled != nil {
 		t.Enabled = *body.Enabled
@@ -386,6 +393,9 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if detail := changes(targetKeys, before, targetValues(t)); detail != "" {
+		s.audit(r, "target.update", t.FullName(), detail)
+	}
 	s.mgr.Sync()
 	writeJSON(w, t)
 }
@@ -399,6 +409,17 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, "target.delete", t.FullName(), "")
 	s.mgr.Sync()
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// targetKeys are the target fields the audit log reports, in order.
+var targetKeys = []string{"enabled", "label", "warm runners", "max parallel", "strict", "job limit (min)"}
+
+func targetValues(t store.Target) map[string]string {
+	return map[string]string{
+		"enabled": strconv.FormatBool(t.Enabled), "label": scaleSetName(t), "warm runners": strconv.Itoa(t.MinRunners),
+		"max parallel": strconv.Itoa(t.MaxRunners), "strict": strconv.FormatBool(t.Strict), "job limit (min)": strconv.Itoa(t.MaxJobMinutes),
+	}
 }

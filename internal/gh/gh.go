@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,18 +173,38 @@ func AuthorizeURL(clientID, redirectURI, state string) string {
 	return "https://github.com/login/oauth/authorize?" + q.Encode()
 }
 
-// ExchangeCode turns an OAuth code into the login of the signed-in user.
-func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
+// StatusError is a GitHub API answer with an error status.
+type StatusError struct {
+	Code int
+	msg  string
+}
+
+func (e *StatusError) Error() string { return e.msg }
+
+// statusCode returns the HTTP status of a GitHub API error, 0 for another
+// error.
+func statusCode(err error) int {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code
+	}
+	return 0
+}
+
+// ExchangeCode turns an OAuth code into the login of the signed-in user and
+// their user access token (used right away for membership checks, never
+// stored).
+func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (login, token string, err error) {
 	body := url.Values{"client_id": {clientID}, "client_secret": {clientSecret}, "code": {code}, "redirect_uri": {redirectURI}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(body.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	var tok struct {
@@ -191,18 +212,63 @@ func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI
 		Error       string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if tok.AccessToken == "" {
-		return "", fmt.Errorf("oauth: %s", tok.Error)
+		return "", "", fmt.Errorf("oauth: %s", tok.Error)
 	}
 	var user struct {
 		Login string `json:"login"`
 	}
 	if err := do(ctx, http.MethodGet, apiBase+"/user", "Bearer "+tok.AccessToken, nil, &user); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return user.Login, nil
+	return user.Login, tok.AccessToken, nil
+}
+
+// OrgMember reports whether login is an active member of org, asked with
+// the user's own access token. GitHub answers that for a GitHub App user
+// token only when the App has the "Members" organization permission and is
+// installed on org; otherwise the public membership is checked, which needs
+// no permission (a member who keeps their membership private is then not
+// seen).
+func OrgMember(ctx context.Context, userToken, org, login string) (bool, error) {
+	var m struct {
+		State string `json:"state"`
+	}
+	err := do(ctx, http.MethodGet, apiBase+"/user/memberships/orgs/"+url.PathEscape(org), "Bearer "+userToken, nil, &m)
+	if err == nil {
+		return m.State == "active", nil
+	}
+	if c := statusCode(err); c != http.StatusForbidden && c != http.StatusNotFound && c != http.StatusUnauthorized {
+		return false, err
+	}
+	err = do(ctx, http.MethodGet, apiBase+"/orgs/"+url.PathEscape(org)+"/public_members/"+url.PathEscape(login), "", nil, nil)
+	if statusCode(err) == http.StatusNotFound {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// TeamMember reports whether login is an active member of the team (by
+// slug) of org, asked with the user's own access token. It needs the
+// "Members" organization permission on a GitHub App installed on org.
+// GitHub answers 404 both to "not a member" and to a team the token cannot
+// see: either way the user is not a member as far as Pitlane can tell.
+// Other refusals (403: missing permission) are errors.
+func TeamMember(ctx context.Context, userToken, org, team, login string) (bool, error) {
+	var m struct {
+		State string `json:"state"`
+	}
+	err := do(ctx, http.MethodGet, fmt.Sprintf("%s/orgs/%s/teams/%s/memberships/%s", apiBase, url.PathEscape(org), url.PathEscape(team), url.PathEscape(login)),
+		"Bearer "+userToken, nil, &m)
+	if statusCode(err) == http.StatusNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return m.State == "active", nil
 }
 
 // ---------------------------------------------------------------- helpers
@@ -344,7 +410,7 @@ func do(ctx context.Context, method, u, auth string, body any, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("github %s %s: %d %s", method, u, resp.StatusCode, strings.TrimSpace(string(msg)))
+		return &StatusError{Code: resp.StatusCode, msg: fmt.Sprintf("github %s %s: %d %s", method, u, resp.StatusCode, strings.TrimSpace(string(msg)))}
 	}
 	if out == nil {
 		return nil

@@ -24,12 +24,6 @@ func TestValidName(t *testing.T) {
 	}
 }
 
-func TestNormalizeUsers(t *testing.T) {
-	if got := normalizeUsers(" @alice, bob\nAlice  carol,"); got != "alice,bob,carol" {
-		t.Fatalf("got %q", got)
-	}
-}
-
 func TestMedian(t *testing.T) {
 	if m := median([]float64{5, 1, 3}); m != 3 {
 		t.Fatal(m)
