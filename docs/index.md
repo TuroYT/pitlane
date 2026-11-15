@@ -25,7 +25,7 @@ features:
   - title: 'Docker images: 393 s → 127 s'
     details: Each slot keeps its own Docker daemon between jobs, so layers and services images are already there. On the benchmark below, image builds and smoke test took 127 s against 393 s on GitHub-hosted runners.
   - title: actions/cache on local disk
-    details: actions/cache and setup-* actions with cache are served by the Pitlane host, with no workflow change. 200 MB are saved in about 1 s, against 9 s on GitHub's cache.
+    details: actions/cache and setup-* actions with cache are served by the Pitlane host, with no workflow change. 200 MB are saved in about 1 s, against 9 s on GitHub's cache. Strict jobs keep GitHub's cache.
   - title: A fresh runner for every job
     details: Each job gets a brand-new runner that is deleted afterwards. npm/pnpm/yarn/pip/Go caches and toolchains stay on disk, per GitHub owner.
   - title: No public URL
@@ -33,7 +33,7 @@ features:
   - title: A web UI with roles
     details: Live slots and runners, every job traced back to its repository, workflow and pull request, per-job peak memory, and admin, operator and viewer roles with an audit log.
   - title: One static binary
-    details: Install it with systemd, Docker Compose, or a one-liner on Proxmox. It updates itself and checks the release's Sigstore attestation first.
+    details: Install it with systemd, Docker Compose, or a one-liner on Proxmox. Installed as a binary, it updates itself from the web UI and checks the release's Sigstore attestation first.
 ---
 
 ## Quick start
