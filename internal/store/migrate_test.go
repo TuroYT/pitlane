@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +36,7 @@ func legacyDB(t *testing.T, dir string, k int) {
 	}
 	if has("settings") {
 		exec(`INSERT INTO settings (key, value) VALUES ('history_days', '12')`)
+		exec(`INSERT INTO settings (key, value) VALUES ('allowed_users', 'alice, @Bob,,ALICE ,carol')`)
 	}
 	if has("targets") {
 		exec(`INSERT INTO targets (kind, owner, repo, max_runners, scale_set_name, created_at) VALUES ('repo', 'acme', 'api', 3, 'pitlane-api', 1700000000)`)
@@ -50,6 +52,17 @@ func legacyDB(t *testing.T, dir string, k int) {
 		exec(`INSERT INTO runners (runner_id, target_id, name, created_at) VALUES (55, 1, 'pitlane-a', 1700000000)`)
 	}
 }
+
+// usersMigration is the number of migrations before the allow list is
+// turned into users.
+var usersMigration = func() int {
+	for i, m := range migrations {
+		if strings.Contains(m, "INSERT OR IGNORE INTO users") {
+			return i
+		}
+	}
+	panic("no users migration")
+}()
 
 // Every schema an earlier version may have left migrates to the latest one
 // and keeps its data.
@@ -88,6 +101,19 @@ func TestMigrateFromEveryEarlierSchema(t *testing.T) {
 			jobs, err := s.Jobs(context.Background(), 10)
 			if err != nil || len(jobs) != 1 || jobs[0].JobID != "j1" || jobs[0].Result != "succeeded" || jobs[0].WorkflowRef != "ci.yml" {
 				t.Fatalf("schema %d: jobs %+v %v", k, jobs, err)
+			}
+		}
+		// Every login of the former allow list becomes an admin (unless the
+		// users table already existed: the allow list was then a mirror).
+		if k >= 1 && k <= usersMigration {
+			users, err := s.Users()
+			if err != nil || len(users) != 3 || users[0].Login != "alice" || users[1].Login != "Bob" || users[2].Login != "carol" {
+				t.Fatalf("schema %d: users %+v %v", k, users, err)
+			}
+			for _, u := range users {
+				if u.Role != RoleAdmin || u.CreatedBy != "migration" {
+					t.Errorf("schema %d: migrated %+v", k, u)
+				}
 			}
 		}
 		if k >= 8 && s.RunnerIDByName("pitlane-a") != 55 {

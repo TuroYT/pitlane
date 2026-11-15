@@ -1,5 +1,21 @@
 import { reactive } from 'vue'
 
+/** Roles, from the least to the most privileged ('' when signed out). */
+export type Role = 'viewer' | 'operator' | 'admin'
+
+const roleRanks: Record<string, number> = { viewer: 1, operator: 2, admin: 3 }
+
+/** Whether role grants at least what min does. */
+export function hasRole(role: string | undefined, min: Role): boolean {
+  return (roleRanks[role ?? ''] ?? 0) >= roleRanks[min]
+}
+
+export const roleHelp: Record<Role, string> = {
+  viewer: 'Reads the dashboard, jobs, logs and metrics; changes nothing',
+  operator: 'Viewer, plus pausing or resuming targets, checking for updates and pulling the runner image',
+  admin: 'Everything: targets, settings, users, updates',
+}
+
 export interface Status {
   version: string
   mode: 'none' | 'app' | 'pat'
@@ -7,6 +23,7 @@ export interface Status {
   setupUnlocked: boolean
   signedIn: boolean
   user: string
+  role: Role | ''
   baseUrl: string
   app: { slug: string; name: string; htmlUrl: string; owner: string }
 }
@@ -144,7 +161,6 @@ export interface Settings {
   minFreeDiskGb: number
   metricsToken?: string
   metricsTokenSet: boolean
-  allowedUsers: string
   historyDays: number
   baseUrl: string
   actionsCache: boolean
@@ -177,6 +193,38 @@ export interface Installation {
   type: 'User' | 'Organization'
   repos: { name: string; fullName: string; private: boolean }[]
   error?: string
+}
+
+export interface User {
+  login: string
+  role: Role
+  createdAt: number
+  createdBy: string
+}
+
+/** Grants role to the members of an organization (team '') or of a team. */
+export interface AccessRule {
+  id: number
+  org: string
+  team: string
+  role: Role
+  createdAt: number
+  createdBy: string
+}
+
+/** GET /api/users */
+export interface Access {
+  users: User[]
+  rules: AccessRule[]
+}
+
+export interface AuditEntry {
+  id: number
+  at: number
+  actor: string
+  action: string
+  subject: string
+  detail: string
 }
 
 export class ApiError extends Error {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, live, onUnauthorized, post, targetName } from './api'
+import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, hasRole, live, onUnauthorized, post, targetName } from './api'
 
 function reply(status: number, body: unknown, statusText = '') {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText })
@@ -190,5 +190,20 @@ describe('cacheSummary', () => {
       .toBe('3.0 GB in 2 entries. Since start: 3 restored, 1 missed (75% hits), 2 saved, 0 evicted.')
     expect(cacheSummary({ entries: 1, bytes: 0, limitBytes: 0, hits: 0, misses: 0, saves: 0, evictions: 0 }))
       .toBe('0 B in 1 entry. Since start: 0 restored, 0 missed, 0 saved, 0 evicted.')
+  })
+})
+
+describe('hasRole', () => {
+  it('orders viewer < operator < admin', () => {
+    expect(hasRole('admin', 'operator')).toBe(true)
+    expect(hasRole('operator', 'operator')).toBe(true)
+    expect(hasRole('operator', 'admin')).toBe(false)
+    expect(hasRole('viewer', 'operator')).toBe(false)
+    expect(hasRole('viewer', 'viewer')).toBe(true)
+  })
+  it('grants nothing without a known role', () => {
+    expect(hasRole('', 'viewer')).toBe(false)
+    expect(hasRole(undefined, 'viewer')).toBe(false)
+    expect(hasRole('root', 'viewer')).toBe(false)
   })
 })

@@ -15,12 +15,13 @@ import (
 	"time"
 
 	"github.com/TuroYT/pitlane/internal/gh"
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
 // EnsureSetupToken creates the one-time token protecting the first setup.
 func (s *Server) EnsureSetupToken() string {
 	file := filepath.Join(s.cfg.DataDir, "setup-token")
-	if s.store.Get("allowed_users", "") != "" {
+	if s.store.HasUsers() {
 		_ = os.Remove(file)
 		return ""
 	}
@@ -54,34 +55,19 @@ func (s *Server) setSetupToken(tok string) {
 // ------------------------------------------------------------------- auth
 
 const (
+	// sessionTTL is how long a sign-in lasts.
+	sessionTTL = 30 * 24 * time.Hour
+	// ruleSessionTTL is how long a sign-in granted by an organization or
+	// team rule lasts: its membership is only checked at sign-in, so someone
+	// who left the organization keeps access at most this long.
+	ruleSessionTTL = 12 * time.Hour
+)
+
+const (
 	sessionCookie = "pitlane_session"
 	setupCookie   = "pitlane_setup"
 	stateCookie   = "pitlane_state"
 )
-
-func (s *Server) currentUser(r *http.Request) (string, bool) {
-	if s.cfg.InsecureNoAuth {
-		return "admin", true
-	}
-	c, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return "", false
-	}
-	login, ok := s.store.SessionLogin(c.Value)
-	if !ok || !s.allowed(login) {
-		return "", false
-	}
-	return login, true
-}
-
-func (s *Server) allowed(login string) bool {
-	for _, u := range strings.Split(s.store.Get("allowed_users", ""), ",") {
-		if strings.EqualFold(strings.TrimSpace(u), login) && login != "" {
-			return true
-		}
-	}
-	return false
-}
 
 func (s *Server) hasSetupCookie(r *http.Request) bool {
 	tok := s.getSetupToken()
@@ -90,16 +76,6 @@ func (s *Server) hasSetupCookie(r *http.Request) bool {
 	}
 	c, err := r.Cookie(setupCookie)
 	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1
-}
-
-func (s *Server) auth(h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.currentUser(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "not signed in")
-			return
-		}
-		h(w, r)
-	})
 }
 
 func (s *Server) setCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
@@ -137,7 +113,7 @@ func (s *Server) consumeState(purpose, st string) bool {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	user, signedIn := s.currentUser(r)
+	p, signedIn := s.currentUser(r)
 	mode := "none"
 	switch {
 	case s.cfg.PAT != "":
@@ -148,10 +124,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"version":       s.cfg.Version,
 		"mode":          mode,
-		"needsSetup":    s.store.Get("allowed_users", "") == "" && !s.cfg.InsecureNoAuth,
+		"needsSetup":    !s.store.HasUsers() && !s.cfg.InsecureNoAuth,
 		"setupUnlocked": s.hasSetupCookie(r),
 		"signedIn":      signedIn,
-		"user":          user,
+		"user":          p.Login,
+		"role":          p.Role,
 		"baseUrl":       s.knownBaseURL(r), // "" before setup: the UI proposes its own address
 		"app": map[string]string{
 			"slug":    s.store.Get("app_slug", ""),
@@ -231,11 +208,11 @@ func (s *Server) handleSetupManifest(w http.ResponseWriter, r *http.Request) {
 // canManageApp reports whether the request may create the GitHub App: during
 // first setup it needs the setup token cookie, afterwards a signed-in admin.
 func (s *Server) canManageApp(r *http.Request) bool {
-	if !s.appConfigured() && s.store.Get("allowed_users", "") == "" {
+	if !s.appConfigured() && !s.store.HasUsers() {
 		return s.hasSetupCookie(r)
 	}
-	_, signedIn := s.currentUser(r)
-	return signedIn && !s.cfg.InsecureNoAuth || (s.cfg.InsecureNoAuth && !s.appConfigured())
+	p, signedIn := s.currentUser(r)
+	return signedIn && p.Role == store.RoleAdmin && !s.cfg.InsecureNoAuth || (s.cfg.InsecureNoAuth && !s.appConfigured())
 }
 
 func (s *Server) handleSetupCallback(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +237,7 @@ func (s *Server) handleSetupCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setCookie(w, r, stateCookie, "", -1)
 	s.log.Info("GitHub App created", "app", app.Slug)
+	s.audit(r, "github-app.create", app.Slug, app.HTMLURL)
 	if s.mgr != nil {
 		s.mgr.Restart()
 	}
@@ -315,15 +293,15 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.exchangeCode != nil {
 		exchange = s.exchangeCode
 	}
-	login, err := exchange(r.Context(), s.store.Get("app_client_id", ""), secret, r.URL.Query().Get("code"), s.baseURL(r)+"/auth/callback")
+	login, userToken, err := exchange(r.Context(), s.store.Get("app_client_id", ""), secret, r.URL.Query().Get("code"), s.baseURL(r)+"/auth/callback")
 	if err != nil {
 		s.log.Error("oauth", "error", err)
 		http.Redirect(w, r, "/login?error=oauth", http.StatusFound)
 		return
 	}
 	// The first person to sign in with the setup token becomes the admin.
-	if s.store.Get("allowed_users", "") == "" && s.hasSetupCookie(r) {
-		if err := s.store.Set("allowed_users", login); err != nil {
+	if !s.store.HasUsers() && s.hasSetupCookie(r) {
+		if _, err := s.store.PutUser(store.User{Login: login, Role: store.RoleAdmin, CreatedBy: "setup"}); err != nil {
 			s.log.Error("register first admin", "login", login, "error", err)
 			writeErr(w, http.StatusInternalServerError, "cannot register the first admin: "+err.Error())
 			return
@@ -331,18 +309,27 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		s.EnsureSetupToken() // deletes the token file
 		s.setSetupToken("")
 		s.log.Info("first admin registered", "login", login)
+		if err := s.store.AddAudit(store.AuditEntry{Actor: login, Action: "user.add", Subject: login, Detail: "role admin (first admin, setup token)"}); err != nil {
+			s.log.Error("write audit log", "error", err)
+		}
 	}
-	if !s.allowed(login) {
+	role, memberships := s.signInRole(r.Context(), login, userToken)
+	if role == "" {
 		s.log.Warn("sign-in refused", "login", login)
 		http.Redirect(w, r, "/login?error=forbidden&login="+url.QueryEscape(login), http.StatusFound) //nolint:gosec // G710: fixed local path, the login is query-escaped
 		return
 	}
 	token := randomHex(32)
-	if err := s.store.CreateSession(token, login, 30*24*time.Hour); err != nil {
+	ttl := sessionTTL
+	if len(memberships) > 0 {
+		ttl = ruleSessionTTL
+	}
+	s.log.Info("signed in", "login", login, "role", role, "rules", strings.Join(memberships, ","))
+	if err := s.store.CreateSession(token, login, ttl, memberships...); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.setCookie(w, r, sessionCookie, token, 30*24*3600)
+	s.setCookie(w, r, sessionCookie, token, int(ttl/time.Second))
 	s.setCookie(w, r, stateCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusFound)
 }

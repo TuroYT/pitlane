@@ -19,6 +19,19 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
+func addUser(t *testing.T, st *store.Store, login, role string) {
+	t.Helper()
+	if _, err := st.PutUser(store.User{Login: login, Role: role}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// onlyAdmin reports whether login is the one and only user, an admin.
+func onlyAdmin(st *store.Store, login string) bool {
+	users, err := st.Users()
+	return err == nil && len(users) == 1 && users[0].Login == login && users[0].Role == store.RoleAdmin
+}
+
 // authServer is a server with a configured GitHub App whose OAuth exchange
 // returns login (no network).
 func authServer(t *testing.T, login string) (*Server, *store.Store) {
@@ -29,7 +42,9 @@ func authServer(t *testing.T, login string) (*Server, *store.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	s := New(Config{DataDir: t.TempDir(), BaseURL: "http://pitlane.test"}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), fstest.MapFS{})
-	s.exchangeCode = func(context.Context, string, string, string, string) (string, error) { return login, nil }
+	s.exchangeCode = func(context.Context, string, string, string, string) (string, string, error) {
+		return login, "user-token", nil
+	}
 	if err := st.Set("app_client_id", "Iv1.test"); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +77,7 @@ var uiHeader = http.Header{"X-Pitlane": {"1"}}
 
 func TestAPIRequiresSession(t *testing.T) {
 	s, st := authServer(t, "alice")
-	_ = st.Set("allowed_users", "alice")
+	addUser(t, st, "alice", store.RoleAdmin)
 	h := s.Handler()
 	if w := do(h, "GET", "/api/jobs", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no session: %d", w.Code)
@@ -80,8 +95,11 @@ func TestAPIRequiresSession(t *testing.T) {
 	if w := do(h, "GET", "/api/jobs", nil, &http.Cookie{Name: sessionCookie, Value: hex.EncodeToString(sum[:])}); w.Code != http.StatusUnauthorized {
 		t.Fatalf("stored hash accepted as a session: %d", w.Code)
 	}
-	// A session of a user removed from the allow list no longer works.
-	_ = st.Set("allowed_users", "bob")
+	// A session of a user removed no longer works.
+	addUser(t, st, "bob", store.RoleAdmin)
+	if _, err := st.DeleteUser("alice"); err != nil {
+		t.Fatal(err)
+	}
 	if w := do(h, "GET", "/api/jobs", nil, sess); w.Code != http.StatusUnauthorized {
 		t.Fatalf("removed user: %d", w.Code)
 	}
@@ -89,7 +107,7 @@ func TestAPIRequiresSession(t *testing.T) {
 
 func TestSessionExpiry(t *testing.T) {
 	s, st := authServer(t, "alice")
-	_ = st.Set("allowed_users", "alice")
+	addUser(t, st, "alice", store.RoleAdmin)
 	_ = st.CreateSession("old", "alice", -time.Second)
 	if w := do(s.Handler(), "GET", "/api/jobs", nil, &http.Cookie{Name: sessionCookie, Value: "old"}); w.Code != http.StatusUnauthorized {
 		t.Fatalf("expired session: %d", w.Code)
@@ -98,7 +116,7 @@ func TestSessionExpiry(t *testing.T) {
 
 func TestLogoutDeletesSession(t *testing.T) {
 	s, st := authServer(t, "alice")
-	_ = st.Set("allowed_users", "alice")
+	addUser(t, st, "alice", store.RoleAdmin)
 	_ = st.CreateSession("tok", "alice", time.Hour)
 	sess := &http.Cookie{Name: sessionCookie, Value: "tok"}
 	h := s.Handler()
@@ -115,7 +133,7 @@ func TestLogoutDeletesSession(t *testing.T) {
 
 func TestCSRFHeaderOnAuthenticatedRoutes(t *testing.T) {
 	s, st := authServer(t, "alice")
-	_ = st.Set("allowed_users", "alice")
+	addUser(t, st, "alice", store.RoleAdmin)
 	_ = st.CreateSession("tok", "alice", time.Hour)
 	sess := &http.Cookie{Name: sessionCookie, Value: "tok"}
 	h := s.Handler()
@@ -146,7 +164,7 @@ func login(t *testing.T, h http.Handler, extra ...*http.Cookie) *httptest.Respon
 
 func TestOAuthCallbackState(t *testing.T) {
 	s, st := authServer(t, "alice")
-	_ = st.Set("allowed_users", "alice")
+	addUser(t, st, "alice", store.RoleAdmin)
 	h := s.Handler()
 
 	w := login(t, h)
@@ -214,7 +232,7 @@ func TestFirstAdminNeedsSetupCookie(t *testing.T) {
 		if !strings.HasPrefix(w.Header().Get("Location"), "/login?error=forbidden") || cookie(w, sessionCookie) != nil {
 			t.Fatalf("got %q", w.Header().Get("Location"))
 		}
-		if st.Get("allowed_users", "") != "" {
+		if st.HasUsers() {
 			t.Fatal("first admin registered without the setup token")
 		}
 	})
@@ -222,7 +240,7 @@ func TestFirstAdminNeedsSetupCookie(t *testing.T) {
 		s, st := authServer(t, "mallory")
 		s.EnsureSetupToken()
 		login(t, s.Handler(), &http.Cookie{Name: setupCookie, Value: "guess"})
-		if st.Get("allowed_users", "") != "" {
+		if st.HasUsers() {
 			t.Fatal("first admin registered with a wrong setup token")
 		}
 	})
@@ -234,16 +252,18 @@ func TestFirstAdminNeedsSetupCookie(t *testing.T) {
 			t.Fatal("setup token file missing")
 		}
 		w := login(t, s.Handler(), &http.Cookie{Name: setupCookie, Value: tok})
-		if cookie(w, sessionCookie) == nil || st.Get("allowed_users", "") != "alice" {
+		if cookie(w, sessionCookie) == nil || !onlyAdmin(st, "alice") {
 			t.Fatalf("first admin not registered: %q", w.Header().Get("Location"))
 		}
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
 			t.Fatal("setup token file kept after the first sign-in")
 		}
 		// The token is single use: the next person is not made admin.
-		s.exchangeCode = func(context.Context, string, string, string, string) (string, error) { return "mallory", nil }
+		s.exchangeCode = func(context.Context, string, string, string, string) (string, string, error) {
+			return "mallory", "user-token", nil
+		}
 		login(t, s.Handler(), &http.Cookie{Name: setupCookie, Value: tok})
-		if st.Get("allowed_users", "") != "alice" {
+		if !onlyAdmin(st, "alice") {
 			t.Fatal("setup token reused")
 		}
 	})
@@ -274,7 +294,7 @@ func TestCanManageApp(t *testing.T) {
 				_ = st.Set("app_client_id", "")
 			}
 			if tc.env.admins {
-				_ = st.Set("allowed_users", "alice")
+				addUser(t, st, "alice", store.RoleAdmin)
 			}
 			s.cfg.InsecureNoAuth = tc.env.noAuth
 			s.setSetupToken("tok")

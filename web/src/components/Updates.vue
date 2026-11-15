@@ -46,6 +46,10 @@ interface UpdatesState {
   settings: UpdateSettings
 }
 
+// Operators (admin false) may check and pull the runner image; installing a
+// release and the preferences are for admins (the server enforces it).
+withDefaults(defineProps<{ admin?: boolean }>(), { admin: true })
+
 const st = ref<UpdatesState | null>(null)
 const prefs = ref<UpdateSettings | null>(null)
 const error = ref('')
@@ -155,7 +159,7 @@ onUnmounted(() => window.clearTimeout(timer))
     <p v-if="p.applyError" class="alert error">Update failed, nothing was replaced: {{ p.applyError }}</p>
     <p v-if="p.lastUpdate" class="muted small">Last update: {{ p.lastUpdate }}</p>
 
-    <template v-if="p.capability.canSelfUpdate">
+    <template v-if="admin && p.capability.canSelfUpdate">
       <div v-if="p.updateAvailable" class="filters">
         <button type="button" class="primary" :disabled="!!p.phase || busy === 'apply'"
           @click="act('apply', `Install Pitlane ${p.latest} and restart? Running jobs keep running.`)">
@@ -170,12 +174,12 @@ onUnmounted(() => window.clearTimeout(timer))
         checksum only, which does not protect against a compromised release.
       </p>
     </template>
-    <div v-else class="stack">
+    <div v-else-if="admin" class="stack">
       <p class="muted small">{{ p.capability.reason }}. To update, run:</p>
       <pre class="code">{{ p.manualCommand }}</pre>
     </div>
 
-    <div v-if="prefs" class="stack">
+    <div v-if="admin && prefs" class="stack">
       <label class="inline">
         <input v-model="prefs.autoUpdate" type="checkbox" :disabled="!p.capability.canSelfUpdate" />
         Install updates automatically (patch and minor releases of the same major version; while in 0.x only patch releases; never pre-releases; only when no job runs)
@@ -220,10 +224,10 @@ onUnmounted(() => window.clearTimeout(timer))
       </button>
       <small class="muted">New runners use the pulled image; busy runners are never touched.</small>
     </div>
-    <label v-if="prefs" class="inline">
+    <label v-if="admin && prefs" class="inline">
       <input v-model="prefs.autoPull" type="checkbox" /> Pull the runner image automatically every day
     </label>
-    <div v-if="prefs" class="filters">
+    <div v-if="admin && prefs" class="filters">
       <button type="button" class="small" @click="savePrefs">Save update preferences</button>
       <span v-if="savedPrefs" class="ok-text">Saved</span>
     </div>

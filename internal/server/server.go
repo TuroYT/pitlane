@@ -3,12 +3,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -18,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,11 +64,14 @@ type Server struct {
 	compare    compareCache
 	// strictCheck replaces StrictReason in tests.
 	strictCheck func(ctx context.Context, t store.Target) (string, error)
-	// exchangeCode replaces gh.ExchangeCode (OAuth code -> login) in tests.
-	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error)
-	jobIDs       sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
-	mu           sync.Mutex
-	states       map[string]time.Time // OAuth / manifest states
+	// exchangeCode replaces gh.ExchangeCode (OAuth code -> login, user
+	// token) in tests.
+	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, string, error)
+	// member replaces isMember (membership checks on GitHub) in tests.
+	member func(ctx context.Context, userToken, login, org, team string) (bool, error)
+	jobIDs sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
+	mu     sync.Mutex
+	states map[string]time.Time // OAuth / manifest states
 }
 
 // New creates the server. web is the built UI (may be nil).
@@ -186,42 +192,92 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// route is an HTTP route and the least role it needs ("" for a public
+// route, which checks what it needs itself).
+type route struct {
+	pattern string
+	role    string
+	h       http.HandlerFunc
+}
+
+const (
+	viewer   = store.RoleViewer
+	operator = store.RoleOperator
+	admin    = store.RoleAdmin
+)
+
+// routes lists every route. The role is the floor: a few handlers check
+// more (an operator may only pause or resume a target).
+func (s *Server) routes() []route {
+	return []route{
+		{"GET /healthz", "", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) }},
+		{"GET /readyz", "", s.handleReadyz},
+		{"GET /metrics", "", s.handleMetrics}, // own authorization (token, session or loopback)
+
+		// Public: status, setup and login.
+		{"GET /api/status", "", s.handleStatus},
+		{"POST /api/setup/unlock", "", s.handleSetupUnlock},
+		{"POST /api/setup/manifest", "", s.handleSetupManifest}, // setup token, then admins only
+		{"GET /setup/callback", "", s.handleSetupCallback},
+		{"GET /auth/login", "", s.handleLogin},
+		{"GET /auth/callback", "", s.handleAuthCallback},
+		{"POST /api/logout", "", s.handleLogout},
+
+		// Read only.
+		{"GET /api/state", viewer, s.handleState},
+		{"GET /api/events", viewer, s.handleEvents},
+		{"GET /api/jobs", viewer, s.handleJobs},
+		{"GET /api/jobs/repos", viewer, s.handleJobRepos},
+		{"GET /api/jobs/memory", viewer, s.handleJobMemory},
+		{"GET /api/runners/{name}/logs", viewer, s.handleLogs},
+		{"GET /api/runners/{name}/job-log", viewer, s.handleJobLog},
+		{"GET /api/runners/{name}/github", viewer, s.handleGitHubJob},
+		{"GET /api/compare", viewer, s.handleCompare},
+
+		// Operators: pause or resume targets (checked in the handler), updates
+		// status, update check, runner image pull.
+		{"PATCH /api/targets/{id}", operator, s.handleUpdateTarget},
+		{"GET /api/updates", operator, s.handleUpdates},
+		{"POST /api/updates/check", operator, s.handleUpdates},
+		{"POST /api/updates/pull-runner", operator, s.handleUpdates},
+
+		// Admins.
+		{"GET /api/installations", admin, s.handleInstallations},
+		{"POST /api/targets", admin, s.handleCreateTarget},
+		{"DELETE /api/targets/{id}", admin, s.handleDeleteTarget},
+		{"GET /api/settings", admin, s.handleGetSettings},
+		{"PUT /api/settings", admin, s.handlePutSettings},
+		{"/api/updates", admin, s.handleUpdates},  // anything else under /api/updates:
+		{"/api/updates/", admin, s.handleUpdates}, // apply, preferences
+		{"GET /api/users", admin, s.handleUsers},
+		{"PUT /api/users/{login}", admin, s.handlePutUser},
+		{"DELETE /api/users/{login}", admin, s.handleDeleteUser},
+		{"POST /api/access-rules", admin, s.handlePutRule},
+		{"DELETE /api/access-rules/{id}", admin, s.handleDeleteRule},
+		{"GET /api/audit", admin, s.handleAudit},
+
+		{"/", "", s.handleWeb},
+	}
+}
+
 // Handler returns the HTTP handler.
-func (s *Server) Handler() http.Handler {
+func (s *Server) Handler() http.Handler { return s.handler(nil) }
+
+// handler builds the HTTP handler; stub, in tests, replaces each route's
+// handler (the role checks stay).
+func (s *Server) handler(stub func(route) http.HandlerFunc) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /metrics", s.handleMetrics) // own authorization (token, session or loopback)
-
-	// Public: status, setup and login.
-	mux.HandleFunc("GET /api/status", s.handleStatus)
-	mux.HandleFunc("POST /api/setup/unlock", s.handleSetupUnlock)
-	mux.HandleFunc("POST /api/setup/manifest", s.handleSetupManifest)
-	mux.HandleFunc("GET /setup/callback", s.handleSetupCallback)
-	mux.HandleFunc("GET /auth/login", s.handleLogin)
-	mux.HandleFunc("GET /auth/callback", s.handleAuthCallback)
-	mux.HandleFunc("POST /api/logout", s.handleLogout)
-
-	// Authenticated API.
-	mux.Handle("GET /api/state", s.auth(s.handleState))
-	mux.Handle("GET /api/events", s.auth(s.handleEvents))
-	mux.Handle("GET /api/installations", s.auth(s.handleInstallations))
-	mux.Handle("POST /api/targets", s.auth(s.handleCreateTarget))
-	mux.Handle("PATCH /api/targets/{id}", s.auth(s.handleUpdateTarget))
-	mux.Handle("DELETE /api/targets/{id}", s.auth(s.handleDeleteTarget))
-	mux.Handle("GET /api/jobs", s.auth(s.handleJobs))
-	mux.Handle("GET /api/jobs/repos", s.auth(s.handleJobRepos))
-	mux.Handle("GET /api/jobs/memory", s.auth(s.handleJobMemory))
-	mux.Handle("GET /api/runners/{name}/logs", s.auth(s.handleLogs))
-	mux.Handle("GET /api/runners/{name}/job-log", s.auth(s.handleJobLog))
-	mux.Handle("GET /api/runners/{name}/github", s.auth(s.handleGitHubJob))
-	mux.Handle("GET /api/settings", s.auth(s.handleGetSettings))
-	mux.Handle("GET /api/compare", s.auth(s.handleCompare))
-	mux.Handle("PUT /api/settings", s.auth(s.handlePutSettings))
-	mux.Handle("/api/updates", s.auth(s.handleUpdates))
-	mux.Handle("/api/updates/", s.auth(s.handleUpdates))
-
-	mux.HandleFunc("/", s.handleWeb)
+	for _, rt := range s.routes() {
+		h := rt.h
+		if stub != nil {
+			h = stub(rt)
+		}
+		if rt.role == "" {
+			mux.HandleFunc(rt.pattern, h)
+		} else {
+			mux.Handle(rt.pattern, s.require(rt.role, h))
+		}
+	}
 	return s.csrf(mux)
 }
 
@@ -383,7 +439,6 @@ type Settings struct {
 	QEMU          bool   `json:"qemu"`
 	KeepBuildGB   int    `json:"keepBuildGb"`
 	MinFreeDiskGB int    `json:"minFreeDiskGb"`
-	AllowedUsers  string `json:"allowedUsers"`
 	HistoryDays   int    `json:"historyDays"`
 	BaseURL       string `json:"baseUrl"`
 	// Bearer token required by /metrics. Never returned: GET only says
@@ -403,7 +458,39 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "updates are not available")
 		return
 	}
-	s.upd.ServeHTTP(w, r)
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		s.upd.ServeHTTP(w, r)
+		return
+	}
+	// Mutations go to the audit log, with the preferences saved.
+	var detail string
+	if r.Body != nil {
+		b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if json.Valid(b) && len(b) > 2 {
+			detail = string(b)
+		}
+		r.Body = io.NopCloser(bytes.NewReader(b))
+	}
+	sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+	s.upd.ServeHTTP(sw, r)
+	if sw.code < 400 {
+		s.audit(r, "updates."+strings.TrimPrefix(r.URL.Path, "/api/updates/"), "", detail)
+	}
+}
+
+// statusWriter remembers the status code of a response.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
 }
 
 // LoadPoolConfig reads the pool configuration from the store.
@@ -428,15 +515,43 @@ func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 // DefaultSlots is half the CPUs, between 1 and 8.
 func DefaultSlots() int { return min(8, max(1, runtime.NumCPU()/2)) }
 
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+func (s *Server) settings(r *http.Request) Settings {
 	c := s.pool.Config()
-	writeJSON(w, Settings{
+	return Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
-		AllowedUsers: s.store.Get("allowed_users", ""), HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
+		HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
 		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheStats: s.actionsCacheStats(),
-	})
+	}
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.settings(r))
+}
+
+// settingKeys are the settings PUT /api/settings saves, in the order the
+// audit log lists their changes.
+var settingKeys = []string{"slots", "runner_image", "dind_image", "cpu_shares", "memory_mb", "cache_scope", "mirror", "qemu",
+	"keep_build_gb", "min_free_disk_gb", "actions_cache", "actions_cache_gb", "history_days", "base_url"}
+
+// settingValues are the stored values of the settings in.
+func settingValues(in Settings) map[string]string {
+	if in.CacheScope != "owner" && in.CacheScope != "shared" {
+		in.CacheScope = "owner"
+	}
+	kv := map[string]string{
+		"slots": strconv.Itoa(in.Slots), "runner_image": strings.TrimSpace(in.RunnerImage), "dind_image": strings.TrimSpace(in.DindImage),
+		"cpu_shares": strconv.FormatInt(max(0, in.CPUShares), 10), "memory_mb": strconv.FormatInt(max(0, in.MemoryMB), 10),
+		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "qemu": strconv.FormatBool(in.QEMU), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
+		"history_days":     strconv.Itoa(max(1, in.HistoryDays)),
+		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
+		"actions_cache":    strconv.FormatBool(in.ActionsCache), "actions_cache_gb": strconv.Itoa(max(1, in.ActionsCacheGB)),
+	}
+	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
+		kv["base_url"] = b
+	}
+	return kv
 }
 
 func (s *Server) actionsCacheStats() *cache.Stats {
@@ -455,16 +570,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	user, _ := s.currentUser(r)
-	in.AllowedUsers = normalizeUsers(in.AllowedUsers)
-	if !s.cfg.InsecureNoAuth && !containsFold(strings.Split(in.AllowedUsers, ","), user) {
-		writeErr(w, http.StatusBadRequest, "you cannot remove yourself from the allowed users")
-		return
-	}
 	if in.Slots < 1 || in.Slots > 64 {
 		writeErr(w, http.StatusBadRequest, "parallel jobs must be between 1 and 64")
 		return
 	}
+	before := settingValues(s.settings(r))
+	var metricsAudit string
 	if in.MetricsToken != nil {
 		tok := strings.TrimSpace(*in.MetricsToken)
 		if tok != "" && len(tok) < 16 {
@@ -473,34 +584,28 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		var err error
 		if tok == "" {
+			if s.store.Get(metricsTokenKey, "") != "" {
+				metricsAudit = "metrics_token removed"
+			}
 			err = s.store.Set(metricsTokenKey, "")
 		} else {
 			err = s.store.SetSecret(metricsTokenKey, tok)
+			metricsAudit = "metrics_token changed"
 		}
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
-	if in.CacheScope != "owner" && in.CacheScope != "shared" {
-		in.CacheScope = "owner"
-	}
-	kv := map[string]string{
-		"slots": strconv.Itoa(in.Slots), "runner_image": strings.TrimSpace(in.RunnerImage), "dind_image": strings.TrimSpace(in.DindImage),
-		"cpu_shares": strconv.FormatInt(max(0, in.CPUShares), 10), "memory_mb": strconv.FormatInt(max(0, in.MemoryMB), 10),
-		"cache_scope": in.CacheScope, "mirror": strconv.FormatBool(in.Mirror), "qemu": strconv.FormatBool(in.QEMU), "keep_build_gb": strconv.Itoa(max(1, in.KeepBuildGB)),
-		"allowed_users": in.AllowedUsers, "history_days": strconv.Itoa(max(1, in.HistoryDays)),
-		"min_free_disk_gb": strconv.Itoa(max(0, in.MinFreeDiskGB)),
-		"actions_cache":    strconv.FormatBool(in.ActionsCache), "actions_cache_gb": strconv.Itoa(max(1, in.ActionsCacheGB)),
-	}
-	if b := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/"); b != "" {
-		kv["base_url"] = b
-	}
+	kv := settingValues(in)
 	for k, v := range kv {
 		if err := s.store.Set(k, v); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	}
+	if detail := strings.Join(slices.DeleteFunc([]string{changes(settingKeys, before, kv), metricsAudit}, func(x string) bool { return x == "" }), "; "); detail != "" {
+		s.audit(r, "settings.update", "", detail)
 	}
 	go func() {
 		if err := s.pool.Configure(context.Background(), LoadPoolConfig(s.store, s.cfg.DataDir)); err != nil {
@@ -509,16 +614,6 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		s.Notify()
 	}()
 	s.handleGetSettings(w, r)
-}
-
-func normalizeUsers(s string) string {
-	var out []string
-	for _, u := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' }) {
-		if u = strings.TrimPrefix(strings.TrimSpace(u), "@"); u != "" && !containsFold(out, u) {
-			out = append(out, u)
-		}
-	}
-	return strings.Join(out, ",")
 }
 
 func containsFold(list []string, v string) bool {

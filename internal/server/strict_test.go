@@ -36,7 +36,7 @@ func newStrictServer(t *testing.T, gh fakeGitHub) *Server {
 	}
 	t.Cleanup(func() { st.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := New(Config{}, st, &pool.Pool{}, log, nil)
+	s := New(Config{InsecureNoAuth: true}, st, &pool.Pool{}, log, nil) // signed in as an admin
 	s.strictCheck = gh.check
 	// Not started: Sync only notifies.
 	s.SetManager(scaler.New(st, nil, t.TempDir(), func() scaler.Credentials { return scaler.Credentials{} }, func() {}, log))

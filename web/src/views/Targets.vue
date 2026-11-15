@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, post, live, targetName, type Installation, type TargetState } from '../api'
-import { status } from '../session'
+import { can, status } from '../session'
+
+// The server enforces the same: operators may only pause or resume.
+const isAdmin = computed(() => can('admin'))
+const canToggle = computed(() => can('operator'))
 
 const installs = ref<Installation[]>([])
 const installUrl = ref('')
@@ -11,7 +15,7 @@ const search = ref('')
 const manual = ref({ kind: 'repo' as 'repo' | 'org', name: '' })
 
 async function loadInstalls() {
-  if (status.value?.mode !== 'app') return
+  if (status.value?.mode !== 'app' || !isAdmin.value) return
   loading.value = true
   error.value = ''
   try {
@@ -86,6 +90,9 @@ function copy(text: string) {
 <template>
   <div class="stack-lg">
     <h1>Repositories</h1>
+    <p v-if="!isAdmin" class="alert info small">
+      Your role is {{ status?.role }}: {{ canToggle ? 'you can enable or disable targets, nothing else' : 'read only' }}.
+    </p>
     <p v-if="error" class="alert error">{{ error }}</p>
 
     <section>
@@ -133,20 +140,20 @@ function copy(text: string) {
                 <div v-if="t.error" class="small error-text ellipsis" :title="t.error">{{ t.error }}</div>
               </td>
               <td>
-                <input type="number" class="num" min="0" :max="t.maxRunners" :value="t.minRunners"
+                <input type="number" class="num" min="0" :max="t.maxRunners" :value="t.minRunners" :disabled="!isAdmin"
                   @change="update(t, { minRunners: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
-                <input type="number" class="num" min="1" max="64" :value="t.maxRunners"
+                <input type="number" class="num" min="1" max="64" :value="t.maxRunners" :disabled="!isAdmin"
                   @change="update(t, { maxRunners: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
-                <input type="number" class="num" min="0" step="10" :value="t.maxJobMinutes"
+                <input type="number" class="num" min="0" step="10" :value="t.maxJobMinutes" :disabled="!isAdmin"
                   @change="update(t, { maxJobMinutes: +($event.target as HTMLInputElement).value })" />
               </td>
               <td>
                 <label class="switch" :title="t.strictRequired ? `Required: ${t.strictRequired}` : ''">
-                  <input type="checkbox" :checked="t.strict" :disabled="!!t.strictRequired && t.strict"
+                  <input type="checkbox" :checked="t.strict" :disabled="!isAdmin || (!!t.strictRequired && t.strict)"
                     @change="update(t, { strict: ($event.target as HTMLInputElement).checked })" />
                   <span />
                 </label>
@@ -157,18 +164,18 @@ function copy(text: string) {
               </td>
               <td>
                 <label class="switch">
-                  <input type="checkbox" :checked="t.enabled" @change="update(t, { enabled: ($event.target as HTMLInputElement).checked })" />
+                  <input type="checkbox" :checked="t.enabled" :disabled="!canToggle" @change="update(t, { enabled: ($event.target as HTMLInputElement).checked })" />
                   <span />
                 </label>
               </td>
-              <td class="actions"><button class="ghost small danger" @click="remove(t)">Remove</button></td>
+              <td class="actions"><button v-if="isAdmin" class="ghost small danger" @click="remove(t)">Remove</button></td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <section v-if="status?.mode === 'app'">
+    <section v-if="isAdmin && status?.mode === 'app'">
       <div class="row-between">
         <h2>Add repositories</h2>
         <div class="filters">
@@ -204,7 +211,7 @@ function copy(text: string) {
       </div>
     </section>
 
-    <section v-else class="card">
+    <section v-else-if="isAdmin" class="card">
       <h2>Add a repository or organization</h2>
       <form class="filters" @submit.prevent="addManual">
         <select v-model="manual.kind">

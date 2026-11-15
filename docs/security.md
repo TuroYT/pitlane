@@ -139,10 +139,34 @@ that has taken over the host can remove them.
 ## Access
 
 - The first setup is protected by a one-time token, available only on the host.
-- Only GitHub logins listed in **Allowed GitHub users** can sign in.
+  The first person to sign in with it becomes the first admin; the token is
+  then deleted.
+- Only GitHub logins listed in **Users**, or matching one of its organization
+  or team rules, can sign in, with a role: `viewer` (read only), `operator`
+  (also pauses or resumes targets, checks for updates, pulls the runner image)
+  or `admin` (everything). See [Users and roles](configuration.md#users-and-roles).
+- Roles are enforced by the server on every API route (HTTP 403 for a lower
+  role) and read again on every request: a demoted user loses the rights at
+  once, a removed user's sessions are deleted. Settings, the update
+  preferences, users, the audit log and the GitHub installations are for
+  admins only; no role ever gets a secret back (the metrics token, the App's
+  key and secrets are never returned by the API). Runner and job logs are
+  visible to every role: keep secrets out of logs (GitHub masks registered
+  secrets).
+- There is always at least one admin listed in **Users**: removing or demoting
+  the last one is refused. Admins granted by a rule do not count, since GitHub
+  may stop confirming the membership.
+- Organization and team rules are checked once, at sign-in, with the user's
+  GitHub token, which Pitlane uses right away and never stores. A check that
+  fails grants nothing. Sessions granted by a rule last 12 hours, so leaving the
+  organization or team on GitHub removes access within that time; removing the
+  rule in Pitlane removes it at once.
+- Admin actions (targets, settings, users, rules, updates) are recorded in an
+  audit log (who, what, when; never secret values), kept as long as the job
+  history.
 - Put Pitlane behind HTTPS (a reverse proxy) if it is reachable outside your LAN.
 - `--insecure-no-auth` (`PITLANE_INSECURE_NO_AUTH=true`) turns login off: anyone
-  who reaches the UI controls Pitlane. Use it only with `--listen 127.0.0.1:8080`
+  who reaches the UI controls Pitlane as an admin. Use it only with `--listen 127.0.0.1:8080`
   behind a reverse proxy on the same host that authenticates every request. The
   default `--listen :8080` would expose it to the whole network.
 
