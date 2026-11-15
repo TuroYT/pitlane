@@ -1100,6 +1100,11 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		for _, j := range msg.JobAvailableMessages {
 			ids = append(ids, j.RunnerRequestID)
 			job := s.job(j.JobMessageBase)
+			if job.QueuedAt == 0 {
+				// GitHub did not say when the job was queued: it was just
+				// now, near enough (the history and its pruning need a date).
+				job.QueuedAt = time.Now().Unix()
+			}
 			s.upsertJob(job)
 			key := keyOf(job)
 			pred, source := s.t.m.predict.predict(ctx, key)
@@ -1118,6 +1123,11 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		job.StartedAt = unix(j.RunnerAssignTime)
 		if job.StartedAt == 0 {
 			job.StartedAt = time.Now().Unix()
+		}
+		if job.QueuedAt == 0 {
+			// Only used when the job was never seen queued (the store keeps
+			// the earliest known queue time).
+			job.QueuedAt = job.StartedAt
 		}
 		pj := s.pendingJob(ctx, job)
 		s.t.mu.Lock()

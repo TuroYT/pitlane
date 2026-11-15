@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -518,5 +519,58 @@ func TestMemoryHistory(t *testing.T) {
 	}
 	if got, _ := s.MemoryHistory(ctx, "", "", "", "", 1); len(got) != 1 {
 		t.Errorf("limit: %v", got)
+	}
+}
+
+func TestPruneJobsKeepsRecentJobsWithoutQueueTime(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().Unix()
+	old := time.Now().Add(-40 * 24 * time.Hour).Unix()
+	for _, j := range []Job{
+		{JobID: "recent-no-queue", StartedAt: now, FinishedAt: now}, // GitHub sent no queue time
+		{JobID: "no-dates"}, // nothing known: kept
+		{JobID: "old", QueuedAt: old, StartedAt: old, FinishedAt: old},          // pruned
+		{JobID: "queued-long-ago-finished-now", QueuedAt: old, FinishedAt: now}, // still recent
+	} {
+		j.TargetID, j.Slot = 1, -1
+		if err := s.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PruneJobs(30 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	jobs, _, err := s.JobsPage(context.Background(), JobFilter{}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, j := range jobs {
+		kept = append(kept, j.JobID)
+	}
+	slices.Sort(kept)
+	if want := []string{"no-dates", "queued-long-ago-finished-now", "recent-no-queue"}; !slices.Equal(kept, want) {
+		t.Fatalf("kept %v, want %v", kept, want)
+	}
+}
+
+func TestUpsertJobKeepsEarliestQueueTime(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, q := range []int64{100, 0, 150, 90} {
+		if err := s.UpsertJob(Job{TargetID: 1, JobID: "j", Slot: -1, QueuedAt: q}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs, _, _ := s.JobsPage(context.Background(), JobFilter{}, 10, 0)
+	if len(jobs) != 1 || jobs[0].QueuedAt != 90 {
+		t.Fatalf("queued_at %+v, want the earliest known (90)", jobs)
 	}
 }
