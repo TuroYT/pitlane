@@ -111,7 +111,7 @@ already have the hardware and would rather not pay per minute.
 - **A fleet of machines.** A Pitlane instance drives one Docker host. Scheduling
   jobs across many nodes is what ARC on Kubernetes or GARM are built for.
 - **No time to run a host.** Self-hosting means updates, disk space and a
-  machine that can fail. Pitlane updates itself and prunes its caches, but the
+  machine that can fail. Pitlane prunes its caches and, installed as a binary, updates itself, but the
   host is still yours.
 
 ## What it costs
