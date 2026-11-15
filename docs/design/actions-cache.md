@@ -105,17 +105,20 @@ rely on the same claim.
 4. **Node shim in the externals + v1 protocol (chosen).** Pitlane already
    copies the runner image's `externals/` into a per-slot volume (job
    containers need it at `/__e`). While copying, Pitlane replaces every
-   `externals/node*/bin/node` with a 6-line `sh` script that, *only when*
-   Pitlane injected `PITLANE_CACHE_URL` into the runner container,
-   sets `ACTIONS_CACHE_URL` to Pitlane's server and unsets
-   `ACTIONS_CACHE_SERVICE_V2`, then `exec`s the real Node binary. The client
+   `externals/node*/bin/node` with a copy of its own (static) binary, kept
+   next to the real one (`node.pitlane`). Started as `node`, Pitlane runs as
+   a shim before anything else (`internal/nodeshim`): *only when* Pitlane
+   injected `PITLANE_CACHE_URL` into the runner container, it sets
+   `ACTIONS_CACHE_URL` to Pitlane's server and removes
+   `ACTIONS_CACHE_SERVICE_V2`, then `execve`s the real Node binary with the
+   same arguments and the rest of the environment byte for byte. The client
    then speaks v1 to Pitlane. `ACTIONS_RESULTS_URL` is untouched: artifacts,
    OIDC, logs and job summaries keep going to GitHub.
 
 ### Why option 4
 
 - **Fails safe at every layer.** No `PITLANE_CACHE_URL` (feature off, strict
-  job, cache listener down, job container) → the shim is a plain `exec`, jobs
+  job, cache listener down, job container) → the shim is a plain `execve`, jobs
   use GitHub's cache exactly as today. Pitlane's server down or failing → the
   client logs a warning and the job goes on (cache miss / save skipped). A
   future `@actions/cache` without v1 would ignore `ACTIONS_CACHE_URL` and
@@ -124,9 +127,9 @@ rely on the same claim.
   it works with the official image or a custom one, and survives runner
   upgrades (the externals copy is redone for each image, the shim with it).
 - **Artifacts never go through Pitlane.**
-- **Job containers keep working.** The runner already runs `sh -c` inside job
-  containers before starting JavaScript actions (OS detection in
-  `StepHost.cs`), so the shim adds no requirement. The runner does not pass
+- **Job containers keep working.** The shim is a static binary (no libc), so
+  it runs in glibc and musl (`node*_alpine`) job containers alike; it only
+  needs the kernel. The runner does not pass
   `PITLANE_CACHE_URL` into job containers, so their actions use GitHub's
   cache (Pitlane's address is not reachable from the slot daemon's networks
   anyway).
@@ -158,6 +161,26 @@ already recommends the slot's local build cache instead.
   joins the slot networks like the mirror and relays only the cache port to
   Pitlane's container by name. The shim
   appends `$GITHUB_REPOSITORY/`.
+
+### Node shim (`internal/nodeshim`)
+
+- Detection: `os.Executable()` (`/proc/self/exe`, so `nodejs -> node`
+  symlinks resolve) has the base name `node`. Pitlane itself is never
+  installed under that name, so the normal command cannot enter shim mode.
+  The check runs in the package's `init`; the package only imports the
+  standard library, so the shim runs before the rest of Pitlane initialises
+  (about 5 ms per Node start).
+- `execve`, no fork: the real Node replaces the shim, so exit codes,
+  signals, stdio and the process ID are the runner's own. A missing
+  `node.pitlane` exits 127 with a message.
+- Install (`shimScript`, in the container that copies the externals):
+  Pitlane streams its running binary (`/proc/self/exe`, valid even after a
+  self-update replaced the file) into that container. The script first runs
+  it as `node` in front of itself in a temporary directory (it must print
+  Pitlane's version); if that fails, no runtime is touched. Each runtime is
+  then switched with `mv` (real binary to `node.pitlane`, shim to `node`)
+  and restored on any error; the runtimes share one copy (hard links).
+  A failure leaves the stock Node: jobs use GitHub's cache.
 - Storage: `<data dir>/actions-cache/`, one `<id>.json` (metadata) and one
   `<id>.tgz` (archive) per entry, uploads in `tmp/`. The index is rebuilt by
   scanning at start; no database table, no migration.
@@ -213,7 +236,13 @@ already recommends the slot's local build cache instead.
 
 - `internal/cache`: protocol handlers, matching rules, branch scopes, owner
   and repository isolation, tokens (revocation, identity binding, restarts),
-  upload limits, LRU eviction, index reload; `TestNodeShim` runs the shim.
+  upload limits, LRU eviction, index reload.
+- `internal/nodeshim`: environment transformation (names with `-` or `.`,
+  empty values, `=` and newlines in values, duplicates) and the shim exec
+  (arguments, `argv[0]`, exit code, environment byte for byte).
+- `internal/pool`: `TestShimScript` installs the built Pitlane binary over
+  fake runtimes (idempotent, shared copy), and a missing or broken binary
+  leaves them untouched.
 - `PITLANE_E2E=1 go test ./internal/cache -run Toolkit` drives the real
   `@actions/cache` client (6.3.0 by default; `PITLANE_E2E_TOOLKIT=4.1.0` or
   `5.3.0` for the versions bundled in `actions/cache@v4`/`v5`) through the
@@ -221,5 +250,31 @@ already recommends the slot's local build cache instead.
   (`ACTIONS_CACHE_SERVICE_V2=True`, GitHub URLs): 40 MB save in two chunks,
   restore by `restore-keys`, miss.
 - `PITLANE_E2E_DOCKER=1 go test ./internal/pool -run PinnedRunner` installs
-  the shim into the externals of the runner image pinned in
-  `images/runner/Dockerfile` and runs each Node runtime through it.
+  the shim (the built Pitlane binary) into the externals of the runner image
+  pinned in `images/runner/Dockerfile`, starts each Node runtime through it
+  with no shell in between (glibc ones in the runner image, `*_alpine` in an
+  Alpine container, externals at `/__e`), checks that hyphenated inputs
+  survive and that `ACTIONS_CACHE_URL` is rewritten only with
+  `PITLANE_CACHE_URL`, and runs the real `@actions/core`
+  `getBooleanInput('include-hidden-files')` through it.
+
+## Lessons
+
+- **Never put a shell between the runner and Node.** v0.2.0-rc.1 used a
+  6-line `sh` script as the shim. POSIX shells only export variables whose
+  names are valid identifiers, and the runner passes action inputs as
+  `INPUT_<NAME>` with the name upper-cased but hyphens kept
+  (`INPUT_INCLUDE-HIDDEN-FILES`, `INPUT_FETCH-DEPTH`). `exec node` from `sh`
+  silently dropped every hyphenated input: `actions/upload-artifact@v4`
+  failed with `Input does not meet YAML 1.2 "Core Schema" specification:
+  include-hidden-files`, and the failed job then skipped `actions/cache`'s
+  post-step save. The unit test fed the shim only identifier-safe variables,
+  so it passed. The shim must hand the environment over untouched except for
+  the variables it means to change, and its tests must use the names the
+  runner really produces.
+- **A `NODE_OPTIONS=--require` preload was rejected.** It is inherited by
+  every Node process of the job (`run:` steps, setup-node's Node, tools), is
+  overwritten by a workflow's own `NODE_OPTIONS`, and points at a file that
+  does not exist in job containers or other images (Node then refuses to
+  start). Replacing the `node` binary affects only the runner's JavaScript
+  actions.

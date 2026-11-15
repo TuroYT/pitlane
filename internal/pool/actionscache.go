@@ -1,9 +1,11 @@
 package pool
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -14,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 
 	"github.com/TuroYT/pitlane/internal/cache"
+	"github.com/TuroYT/pitlane/internal/nodeshim"
 )
 
 // CacheBroker is the actions cache server (internal/cache) as the pool sees
@@ -55,18 +58,76 @@ func (p *Pool) cacheBroker() (CacheBroker, int) {
 
 // externalsKey identifies what a slot's externals volume holds: the runner
 // image's externals with this version of the Node shim.
-func externalsKey(imageID string) string { return imageID + "+shim" + cache.ShimVersion }
+func externalsKey(imageID string) string { return imageID + "+shim" + nodeshim.Version }
 
-// shimScript installs cache.NodeShim in front of every Node runtime of the
-// externals copied to dir. It is best effort: a runtime whose shim cannot
-// be written keeps its original binary (jobs then use GitHub's cache).
-func shimScript(dir string) string {
-	return `for n in ` + dir + `/node*/bin/node; do
+// shimInContainer is where copyExternals puts Pitlane's own binary, the Node
+// shim (internal/nodeshim), in the container that copies the externals.
+const shimInContainer = "/pitlane-node-shim"
+
+// shimScript installs the shim binary in front of every Node runtime of the
+// externals copied to dir, the real binary kept next to it as node.pitlane.
+// It is best effort and never leaves a runtime without a working node: when
+// the shim is missing or does not work in this image (checked by running it
+// in front of itself, which prints Pitlane's version), nothing is installed;
+// a runtime whose shim cannot be written keeps its original binary. Jobs then
+// use GitHub's cache. The runtimes share one copy of the binary (hard links).
+func shimScript(dir, shim string) string {
+	return `(s='` + shim + `'
+t=$(mktemp -d) && cp "$s" "$t/node" && ln -s "$s" "$t/node.pitlane" && v=$("$t/node" version 2>/dev/null)
+[ -n "$t" ] && rm -rf "$t"
+case "$v" in pitlane\ *) ;; *) false ;; esac || { echo "pitlane: no working node shim, the runner externals keep their node" >&2; exit 0; }
+f=
+for n in ` + dir + `/node*/bin/node; do
   [ -f "$n" ] && [ ! -L "$n" ] && [ ! -e "$n.pitlane" ] || continue
-  { cat > "$n.tmp" <<'PITLANE_SHIM'
-` + cache.NodeShim + `PITLANE_SHIM
-  } && chmod 755 "$n.tmp" && mv "$n" "$n.pitlane" && mv "$n.tmp" "$n" || { [ -e "$n" ] || mv "$n.pitlane" "$n"; rm -f "$n.tmp"; }
-done; true`
+  { { [ -n "$f" ] && ln "$f" "$n.tmp" 2>/dev/null; } || cp "$s" "$n.tmp"; } && chmod 755 "$n.tmp" && mv "$n" "$n.pitlane" && mv "$n.tmp" "$n" && f=$n ||
+    { [ -e "$n" ] || mv "$n.pitlane" "$n"; rm -f "$n.tmp"; }
+done); true`
+}
+
+// openShim opens the binary to install as the Node shim: the running
+// Pitlane, through /proc/self/exe so that it is still the right file after a
+// self-update replaced it on disk.
+func (p *Pool) openShim() (*os.File, error) {
+	if p.shimExe != "" {
+		return os.Open(p.shimExe)
+	}
+	f, err := os.Open("/proc/self/exe")
+	if err == nil {
+		return f, nil
+	}
+	exe, eerr := os.Executable()
+	if eerr != nil {
+		return nil, err
+	}
+	return os.Open(exe)
+}
+
+// stageShim copies Pitlane's running binary to shimInContainer in a created
+// (not yet started) container.
+func (p *Pool) stageShim(ctx context.Context, id string) error {
+	f, err := p.openShim()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(pw)
+		err := tw.WriteHeader(&tar.Header{Name: strings.TrimPrefix(shimInContainer, "/"), Mode: 0o755, Size: st.Size(), Typeflag: tar.TypeReg})
+		if err == nil {
+			_, err = io.Copy(tw, f)
+		}
+		if err == nil {
+			err = tw.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	defer func() { _ = pr.Close() }() // stops the writer if the copy fails
+	return p.cli.CopyToContainer(ctx, id, "/", pr, container.CopyToContainerOptions{})
 }
 
 // cacheEnv registers a runner with the actions cache and returns the

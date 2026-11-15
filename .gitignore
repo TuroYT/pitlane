@@ -2,3 +2,6 @@
 /dist/
 /.data/
 *.log
+
+# Local builds
+/pitlane
