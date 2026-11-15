@@ -6,34 +6,34 @@ layout: home
 hero:
   name: Pitlane
   text: Ephemeral GitHub Actions runners with caches that stay warm
-  tagline: One binary, a web UI, no Kubernetes. Each job gets a fresh runner on your own Docker host, and Docker layers, package caches and toolchains stay on disk between jobs.
+  tagline: Each job gets a fresh runner on your own Docker host. Docker layers, package caches and toolchains stay on disk, so a private monorepo's CI went from ~6 min 30 on GitHub-hosted runners to ~3 min. One binary, a web UI, no Kubernetes.
   image:
     src: /logo.svg
     alt: Pitlane logo
   actions:
     - theme: brand
-      text: Get started
+      text: Install in two minutes
       link: /getting-started
     - theme: alt
-      text: How it works
-      link: /how-it-works
+      text: Compare with the alternatives
+      link: /why
     - theme: alt
       text: GitHub
       link: https://github.com/TuroYT/pitlane
 
 features:
+  - title: 'Docker images: 393 s → 127 s'
+    details: Each slot keeps its own Docker daemon between jobs, so layers and services images are already there. On the benchmark below, image builds and smoke test took 127 s against 393 s on GitHub-hosted runners.
+  - title: actions/cache on local disk
+    details: actions/cache and setup-* actions with cache are served by the Pitlane host, with no workflow change. 200 MB are saved in about 1 s, against 9 s on GitHub's cache.
   - title: A fresh runner for every job
-    details: Each job gets a brand-new runner. Docker images, build layers, npm/pnpm/yarn/pip/Go caches and toolchains stay on disk between jobs, and actions/cache restores and saves from the Pitlane host.
-  - title: Docker works as on GitHub
-    details: services, container jobs and docker build work out of the box. Each slot has its own Docker-in-Docker daemon, and jobs never touch the host's Docker.
-  - title: Jobs start within seconds
-    details: Pitlane long-polls GitHub through the official scale set API, the one GitHub's Kubernetes controller uses. There is no webhook and no public URL to expose.
-  - title: A web UI to see what runs where
-    details: Live slots and runners, every job traced back to its repository, workflow, branch or pull request, wait and duration trends, runner logs and one-click repository enablement.
-  - title: Two-minute setup
-    details: Pitlane creates its own GitHub App in one click and uses it to sign you in with GitHub.
+    details: Each job gets a brand-new runner that is deleted afterwards. npm/pnpm/yarn/pip/Go caches and toolchains stay on disk, per GitHub owner.
+  - title: No public URL
+    details: Pitlane long-polls GitHub through the official scale set API, the one GitHub's Kubernetes controller uses. Jobs start within seconds, and there is no webhook to expose.
+  - title: A web UI with roles
+    details: Live slots and runners, every job traced back to its repository, workflow and pull request, per-job peak memory, and admin, operator and viewer roles with an audit log.
   - title: One static binary
-    details: Install it with systemd, Docker Compose, or a one-liner on Proxmox.
+    details: Install it with systemd, Docker Compose, or a one-liner on Proxmox. It updates itself and checks the release's Sigstore attestation first.
 ---
 
 ## Quick start
@@ -95,5 +95,16 @@ the slot's network namespace, and lets it run exactly one job. Afterwards, the
 job's containers, networks, volumes and workspace are wiped, while images and
 build cache stay. Read more in [How it works](how-it-works.md).
 
-Pitlane is young: it provides Linux runners only, and expects rough edges.
-Issues and pull requests are welcome.
+## Limits
+
+Pitlane is young, and has limits worth knowing before you install it:
+
+- Linux runners only (amd64 and arm64), on GitHub.com.
+- Each slot is a privileged Docker-in-Docker container: a job can take over the
+  host. Run code you trust, on a host dedicated to CI ([Security](security.md)).
+- Public repositories run in strict mode (throwaway caches, wiped slot), which
+  keeps jobs apart but is not a sandbox.
+
+[Why Pitlane](why.md) compares it with actions-runner-controller, runscaler,
+GARM, terraform-aws-github-runner and hosted runners. Issues and pull requests
+are welcome.
