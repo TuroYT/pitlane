@@ -57,21 +57,34 @@ Job timeouts are not covered: they depend on the instance's settings.
 
 ## Expected results
 
-Every scenario concludes `success`. A typical run against a 4-slot instance:
+Every scenario concludes `success`. Measured on the instance that serves
+`SheepHost/pitlane-org-test` (Pitlane v0.1.1, GitHub's cache backend):
 
-| Scenario | Wall time | Notes |
+| Scenario | First run (all dispatched together) | Rerun, idle instance |
 | --- | --- | --- |
-| `basic`, `services`, `container`, `docker`, `cache`, `artifacts`, `logs`, `multiarch` | 2–3 min each, in parallel | Dispatched together, so most of the time is jobs queuing for a free slot. |
-| `matrix` | about 1 min | Runs alone: peak concurrency 4/4, legs start within a second of each other. |
+| `basic` | 141 s | 36 s |
+| `services` | 124 s | 25 s |
+| `container` | 136 s | 39 s |
+| `docker` | 125 s | 30 s |
+| `cache` | 139 s | 67 s |
+| `artifacts` | 154 s | |
+| `logs` | 141 s | |
+| `multiarch` | 160 s | |
+| `matrix` (alone) | 58 s, peak concurrency 4/4 | |
+
+When the scenarios are dispatched together, most of their wall time is jobs
+waiting for a free slot (80–115 s in the "max queue" column); the jobs
+themselves take seconds to a minute.
 
 Timings to look at in the report:
 
-- **docker build 2** is 0–1 s; **docker build 1** is cold (about 30 s, mostly
-  the 8 s sleep and pulling `alpine`) the first time a slot builds the image,
-  then warm.
-- **npm ci** takes a second or two: Pitlane keeps the npm cache on disk, even
-  when setup-node reports `cache-hit=false` on a first run.
-- **arm64 build under QEMU** is around 15–20 s for the fixture image.
+- **docker build 2** is 0–1 s. **docker build 1** is cold (10–30 s) the first
+  time a slot builds the fixture image, warm after that.
+- **cache save / restore** of 64 MiB: about 15 s and 4 s.
+- **npm ci** takes 1–8 s: Pitlane keeps the npm cache on disk, so it is fast
+  even when setup-node reports `cache-hit=false` on a first run.
+- **arm64 build under QEMU**: about 16 s for the fixture image.
+- **matrix**: the 4 legs start within a second of each other.
 
 `multiarch` registers QEMU `binfmt_misc` handlers, which are global to the
 host kernel. On a host where that is not allowed (some unprivileged containers),
