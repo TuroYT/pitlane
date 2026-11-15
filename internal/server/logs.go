@@ -143,8 +143,9 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 
 // handleGitHubJob redirects to the page of the job a runner ran on GitHub.
 // GitHub's scale set messages do not carry the job's numeric ID, so it is
-// looked up once in the run's job list (by runner name) and cached. When it
-// cannot be found, it falls back to the run page.
+// looked up once in the run's job list (by runner name) and cached, only for
+// a job the store has and only once GitHub found it (the cache is bounded,
+// see jobIDCache). When it cannot be found, it falls back to the run page.
 func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !validName(name) {
@@ -157,8 +158,9 @@ func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runURL := fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", job.Owner, job.Repo, job.RunID)
-	if v, ok := s.jobIDs.Load(name); ok {
-		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, v.(int64)), http.StatusFound)
+	key := jobKey{name, job.RunID}
+	if id, ok := s.jobIDs.get(key); ok {
+		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -169,7 +171,7 @@ func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 		if tok, err = s.token(ctx, t); err == nil {
 			var id int64
 			if id, err = gh.RunJobID(ctx, tok, job.Owner, job.Repo, job.RunID, name); err == nil {
-				s.jobIDs.Store(name, id)
+				s.jobIDs.put(key, id)
 				http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
 				return
 			}
