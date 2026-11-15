@@ -121,13 +121,19 @@ func TestActionsCacheSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	if c := LoadPoolConfig(st, t.TempDir()); !c.ActionsCache || c.ActionsCacheGB != 20 {
-		t.Fatalf("defaults: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	if c := LoadPoolConfig(st, t.TempDir()); !c.ActionsCache || c.ActionsCacheGB != 20 || c.ActionsCacheOwnerPct != 50 {
+		t.Fatalf("defaults: %v %d %d%%", c.ActionsCache, c.ActionsCacheGB, c.ActionsCacheOwnerPct)
 	}
 	_ = st.Set("actions_cache", "false")
 	_ = st.Set("actions_cache_gb", "50")
-	if c := LoadPoolConfig(st, t.TempDir()); c.ActionsCache || c.ActionsCacheGB != 50 {
-		t.Fatalf("stored: %v %d", c.ActionsCache, c.ActionsCacheGB)
+	_ = st.Set("actions_cache_owner_pct", "30")
+	if c := LoadPoolConfig(st, t.TempDir()); c.ActionsCache || c.ActionsCacheGB != 50 || c.ActionsCacheOwnerPct != 30 {
+		t.Fatalf("stored: %v %d %d%%", c.ActionsCache, c.ActionsCacheGB, c.ActionsCacheOwnerPct)
+	}
+	for in, want := range map[int]string{0: "1", 30: "30", 250: "100"} {
+		if got := settingValues(Settings{ActionsCacheOwnerPct: in})["actions_cache_owner_pct"]; got != want {
+			t.Errorf("owner share %d saved as %s, want %s", in, got, want)
+		}
 	}
 }
 

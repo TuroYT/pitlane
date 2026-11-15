@@ -141,7 +141,8 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	p.mu.Unlock()
 
-	if b, _ := p.cacheBroker(); b != nil && old.ActionsCacheGB != cfg.ActionsCacheGB {
+	if b, _ := p.cacheBroker(); b != nil && (old.ActionsCacheGB != cfg.ActionsCacheGB || old.ActionsCacheOwnerPct != cfg.ActionsCacheOwnerPct) {
+		b.SetOwnerShare(cfg.ActionsCacheOwnerPct)
 		b.SetLimit(int64(cfg.ActionsCacheGB) << 30)
 	}
 	if old.RunnerImage != cfg.RunnerImage {

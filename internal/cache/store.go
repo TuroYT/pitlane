@@ -161,6 +161,67 @@ func (s *Server) evictLocked(limit int64) int64 {
 	return freed
 }
 
+// DefaultOwnerPercent is the share of the cache size one owner may use by
+// default.
+const DefaultOwnerPercent = 50
+
+// ownerOf is the owner of a namespace ("owner/repo").
+func ownerOf(ns string) string {
+	owner, _, _ := strings.Cut(ns, "/")
+	return owner
+}
+
+// ownerLimitLocked is the most one owner may store: its share of the limit,
+// at least one byte; 0 when there is no limit. Callers hold s.mu.
+func (s *Server) ownerLimitLocked() int64 {
+	if s.limit <= 0 {
+		return 0
+	}
+	return max(1, s.limit/100*int64(s.ownerPct)+s.limit%100*int64(s.ownerPct)/100)
+}
+
+// evictOwnerLocked removes the least recently used entries of an owner,
+// never keep, until the owner stores at most limit bytes. Callers hold s.mu.
+func (s *Server) evictOwnerLocked(owner string, limit int64, keep int64) {
+	var stored int64
+	for _, e := range s.entries {
+		if ownerOf(e.NS) == owner {
+			stored += e.Size
+		}
+	}
+	for _, e := range s.lruLocked() {
+		if stored <= limit {
+			return
+		}
+		if e.ID == keep || ownerOf(e.NS) != owner {
+			continue
+		}
+		stored -= e.Size
+		s.removeLocked(e)
+		s.evictions++
+	}
+}
+
+// enforceLimitsLocked brings every owner back within its share, evicting
+// its own least recently used entries (never keep, the entry just saved: an
+// owner keeps at least that one), then the whole cache within the limit,
+// least recently used first. Callers hold s.mu.
+func (s *Server) enforceLimitsLocked(keep int64) {
+	if s.limit <= 0 {
+		return
+	}
+	if ownerLimit := s.ownerLimitLocked(); ownerLimit < s.limit {
+		owners := map[string]bool{}
+		for _, e := range s.entries {
+			owners[ownerOf(e.NS)] = true
+		}
+		for o := range owners {
+			s.evictOwnerLocked(o, ownerLimit, keep)
+		}
+	}
+	s.evictLocked(s.limit)
+}
+
 // Evict removes least recently used entries until at least n bytes are
 // freed (or nothing is left) and returns the bytes freed. The low-disk
 // pruning calls it.
@@ -179,9 +240,16 @@ func (s *Server) SetLimit(bytes int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.limit = bytes
-	if bytes > 0 {
-		s.evictLocked(bytes)
-	}
+	s.enforceLimitsLocked(0)
+}
+
+// SetOwnerShare sets the share of the limit one owner may use, in percent
+// (1 to 100), and evicts down to it.
+func (s *Server) SetOwnerShare(percent int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ownerPct = min(100, max(1, percent))
+	s.enforceLimitsLocked(0)
 }
 
 // match finds the entry to restore, as GitHub does: for each readable scope

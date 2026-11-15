@@ -333,6 +333,7 @@ func TestRevokeDropsUploads(t *testing.T) {
 
 func TestUploadChecks(t *testing.T) {
 	s, ts := newServer(t, "")
+	s.SetOwnerShare(100) // the global limit only (see TestOwnerShare)
 	s.SetLimit(100)
 	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
 	if code := c.save("big", "v", make([]byte, 101)); code != http.StatusBadRequest {
@@ -374,6 +375,7 @@ func TestUploadChecks(t *testing.T) {
 func TestEvictionLRU(t *testing.T) {
 	dir := t.TempDir()
 	s, ts := newServer(t, dir)
+	s.SetOwnerShare(100) // one owner: the global LRU only (see TestOwnerShare)
 	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
 	for _, k := range []string{"a", "b", "c"} {
 		if c.save(k, "v", make([]byte, 40)) != http.StatusNoContent {
@@ -462,6 +464,94 @@ func TestScopes(t *testing.T) {
 	for _, h := range []string{"", "Bearer", "Bearer a.b", "Bearer a.!!!.c", "Basic x"} {
 		if read, write, ok := scopes(h); !ok || write != "" || len(read) != 1 || read[0] != "" {
 			t.Errorf("%q: %v %q %v", h, read, write, ok)
+		}
+	}
+}
+
+// One owner may use its share of the cache: its reservations count against
+// it, and saving beyond it evicts its own entries, never another owner's.
+func TestOwnerShare(t *testing.T) {
+	s, ts := newServer(t, "")
+	s.SetLimit(100) // default share: 50 bytes per owner
+	if st := s.Stats(); st.OwnerLimitBytes != 50 {
+		t.Fatalf("owner limit: %+v", st)
+	}
+	other := newClient(t, s, ts, "pitlane-o", Identity{Owner: "other"}, "other/web")
+	for _, k := range []string{"o1", "o2"} {
+		if code := other.save(k, "v", make([]byte, 20)); code != http.StatusNoContent {
+			t.Fatalf("save %s: %d", k, code)
+		}
+	}
+	flood := newClient(t, s, ts, "pitlane-f", Identity{Owner: "acme"}, "acme/api")
+	if code := flood.save("big", "v", make([]byte, 51)); code != http.StatusBadRequest {
+		t.Fatalf("over the owner's share: %d", code)
+	}
+	// Sparse reservations: nothing uploaded, the share is still taken.
+	reserve := func(c client, key string, size int) int {
+		r := c.do("POST", "_apis/artifactcache/caches", strings.NewReader(fmt.Sprintf(`{"key":%q,"version":"v","cacheSize":%d}`, key, size)))
+		return r.StatusCode
+	}
+	if code := reserve(flood, "r1", 30); code != http.StatusCreated {
+		t.Fatalf("reserve: %d", code)
+	}
+	if code := reserve(flood, "r2", 30); code != http.StatusTooManyRequests {
+		t.Fatalf("reservations over the owner's share: %d", code)
+	}
+	// Another owner can still reserve its share meanwhile.
+	if code := reserve(other, "o3", 10); code != http.StatusCreated {
+		t.Fatalf("other owner blocked: %d", code)
+	}
+	s.Revoke("pitlane-f")
+	s.Revoke("pitlane-o")
+	flood = newClient(t, s, ts, "pitlane-f2", Identity{Owner: "acme"}, "acme/api")
+	for i := range 20 {
+		if code := flood.save(fmt.Sprint("k", i), "v", make([]byte, 25)); code != http.StatusNoContent {
+			t.Fatalf("save k%d: %d", i, code)
+		}
+	}
+	other = newClient(t, s, ts, "pitlane-o2", Identity{Owner: "other"}, "other/web")
+	for _, k := range []string{"o1", "o2"} {
+		if got, _ := other.restore("v", k); got != k {
+			t.Fatalf("%s evicted by another owner's saves", k)
+		}
+	}
+	if got, _ := flood.restore("v", "k19"); got != "k19" {
+		t.Fatal("the newest entry of the flooding owner was evicted")
+	}
+	if got, _ := flood.restore("v", "k0"); got != "" {
+		t.Fatal("the flooding owner kept more than its share")
+	}
+	if st := s.Stats(); st.Bytes != 90 {
+		t.Fatalf("stats: %+v", st)
+	}
+
+	// Lowering the share evicts each owner down to it, least recently
+	// used first.
+	s.SetOwnerShare(25)
+	if got, _ := other.restore("v", "o2"); got != "o2" {
+		t.Fatal("o2 evicted")
+	}
+	if got, _ := other.restore("v", "o1"); got != "" {
+		t.Fatal("other kept more than its share")
+	}
+	if st := s.Stats(); st.Bytes != 45 || st.OwnerLimitBytes != 25 {
+		t.Fatalf("stats after lowering the share: %+v", st)
+	}
+}
+
+func TestOwnerLimit(t *testing.T) {
+	s := &Server{ownerPct: 50}
+	if got := s.ownerLimitLocked(); got != 0 {
+		t.Fatalf("no limit: %d", got)
+	}
+	for _, tc := range []struct {
+		limit int64
+		pct   int
+		want  int64
+	}{{100, 50, 50}, {20 << 30, 50, 10 << 30}, {3, 1, 1}, {101, 100, 101}, {1 << 62, 50, 1 << 61}} {
+		s.limit, s.ownerPct = tc.limit, tc.pct
+		if got := s.ownerLimitLocked(); got != tc.want {
+			t.Errorf("%d bytes at %d%%: %d, want %d", tc.limit, tc.pct, got, tc.want)
 		}
 	}
 }

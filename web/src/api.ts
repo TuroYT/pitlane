@@ -190,6 +190,8 @@ export interface Settings {
   baseUrl: string
   actionsCache: boolean
   actionsCacheGb: number
+  /** Share of the actions cache size one owner may use, in percent. */
+  actionsCacheOwnerPct: number
   // Read-only; missing when the cache listener is not running.
   actionsCacheStats?: ActionsCacheStats
   memoryAdmission: boolean
@@ -204,6 +206,8 @@ export interface ActionsCacheStats {
   entries: number
   bytes: number
   limitBytes: number
+  /** Most one owner may store (0 without a limit); optional for older servers. */
+  ownerLimitBytes?: number
   hits: number
   misses: number
   saves: number

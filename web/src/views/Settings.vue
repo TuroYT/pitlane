@@ -147,6 +147,14 @@ async function save(clearMetricsToken = false) {
           <template v-else><br />The cache listener is not running (see Pitlane's log): jobs use GitHub's cache.</template>
         </small>
       </label>
+      <label v-if="s.actionsCache">
+        Actions cache share per owner (%)
+        <input v-model.number="s.actionsCacheOwnerPct" type="number" min="1" max="100" />
+        <small>
+          The most one user or organization may store, uploads in progress included. Beyond it, its own least recently
+          used entries go first, so one owner cannot push out the others' caches. 100 turns the share off.
+        </small>
+      </label>
       <label class="inline">
         <input v-model="s.qemu" type="checkbox" /><span>Multi-architecture builds (QEMU emulation, applied at the next restart)</span>
       </label>

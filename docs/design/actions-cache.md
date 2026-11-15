@@ -190,8 +190,12 @@ already recommends the slot's local build cache instead.
 - Lookup semantics as GitHub (scopes from the `ac` claim, then exact key,
   key prefix, each restore key prefix, newest first). Entries are immutable,
   a reserve on an existing or pending key returns 409.
-- Size limit (setting, default 20 GB) with LRU eviction (last restore time),
-  plus a hook in the low-disk pruning (`internal/pool/disk.go`): after idle
+- Size limit (setting, default 20 GB) with LRU eviction (last restore time).
+  Each owner may use a share of it (default 50 %, at least one byte):
+  reservations over the owner's remaining share are refused, and a commit
+  that puts the owner over its share evicts its own least recently used
+  entries (never the one just saved) before the global LRU runs, so one
+  owner's jobs cannot push out another owner's entries. Plus a hook in the low-disk pruning (`internal/pool/disk.go`): after idle
   slots' build caches and images, before per-owner cache volumes.
 
 ### Isolation and authentication
@@ -225,9 +229,12 @@ already recommends the slot's local build cache instead.
 
 ### Settings and UI
 
-- `actions_cache` (default on) and `actions_cache_gb` (default 20) in the
-  settings table; Settings → Caches shows them with the current size, entry
-  count and hit/miss counters since start.
+- `actions_cache` (default on), `actions_cache_gb` (default 20) and
+  `actions_cache_owner_pct` (default 50: the share of the size one owner may
+  use, reservations included; over it, the owner's own least recently used
+  entries are evicted before the global LRU applies) in the settings table;
+  Settings → Caches shows them with the current size, entry count and
+  hit/miss counters since start.
 - Turning it off stops injecting `PITLANE_CACHE_URL` for new runners (the shim
   stays, inert) and keeps the stored entries until they are evicted or the
   directory is removed.

@@ -19,11 +19,12 @@ import (
 )
 
 type fakeBroker struct {
-	mu      sync.Mutex
-	reg     map[string]cache.Identity
-	revoked []string
-	limit   int64
-	stored  int64
+	mu       sync.Mutex
+	reg      map[string]cache.Identity
+	revoked  []string
+	limit    int64
+	ownerPct int
+	stored   int64
 }
 
 func newBroker() *fakeBroker { return &fakeBroker{reg: map[string]cache.Identity{}} }
@@ -43,6 +44,8 @@ func (b *fakeBroker) Revoke(runner string) {
 }
 
 func (b *fakeBroker) SetLimit(n int64) { b.limit = n }
+
+func (b *fakeBroker) SetOwnerShare(percent int) { b.ownerPct = percent }
 
 func (b *fakeBroker) Dir() string { return "/cache" }
 
@@ -176,8 +179,8 @@ func TestCacheEnvOnlyForNonStrictJobsWhenOn(t *testing.T) {
 		t.Fatalf("no server: %q", e)
 	}
 	p.SetCache(b, 8091)
-	if b.limit != 20<<30 {
-		t.Fatalf("limit %d", b.limit)
+	if b.limit != 20<<30 || b.ownerPct != cache.DefaultOwnerPercent {
+		t.Fatalf("limit %d, owner share %d%%", b.limit, b.ownerPct)
 	}
 	if e := p.cacheEnv(context.Background(), cfg, strict); e != "" || len(b.reg) != 0 {
 		t.Fatalf("strict job got %q", e)

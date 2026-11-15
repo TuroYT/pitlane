@@ -29,6 +29,8 @@ type CacheBroker interface {
 	Revoke(runner string)
 	// SetLimit bounds the stored bytes (LRU eviction).
 	SetLimit(bytes int64)
+	// SetOwnerShare bounds what one owner may store, in percent of the limit.
+	SetOwnerShare(percent int)
 	// Evict frees at least n bytes, least recently used entries first, and
 	// returns the bytes freed.
 	Evict(n int64) int64
@@ -43,9 +45,10 @@ type CacheBroker interface {
 func (p *Pool) SetCache(b CacheBroker, port int) {
 	p.mu.Lock()
 	p.cache, p.cachePort = b, port
-	limit := int64(p.cfg.ActionsCacheGB) << 30
+	limit, share := int64(p.cfg.ActionsCacheGB)<<30, p.cfg.ActionsCacheOwnerPct
 	p.mu.Unlock()
 	if b != nil {
+		b.SetOwnerShare(share)
 		b.SetLimit(limit)
 	}
 }

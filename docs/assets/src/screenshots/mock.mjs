@@ -111,7 +111,7 @@ const compare = [
 const settings = {
   slots: 6, runnerImage: 'ghcr.io/turoyt/pitlane-runner:v1.0.0', dindImage: 'docker:28-dind', cpuShares: 0, memoryMb: 0,
   cacheScope: 'owner', mirror: true, qemu: false, keepBuildGb: 20, minFreeDiskGb: 50, metricsTokenSet: true, historyDays: 30,
-  baseUrl: 'http://pitlane.lan:8080', actionsCache: true, actionsCacheGb: 50,
+  baseUrl: 'http://pitlane.lan:8080', actionsCache: true, actionsCacheGb: 50, actionsCacheOwnerPct: 50,
   actionsCacheStats: { entries: 312, bytes: 18.4 * 1073741824, limitBytes: 50 * 1073741824, hits: 1840, misses: 212, saves: 260, evictions: 14 },
 }
 const updates = {
