@@ -28,7 +28,8 @@ container:
 - **Docker image builds and smoke test: 393 s → 127 s**, because layers and
   `services:` images are already in the slot.
 - **`actions/cache`: 200 MB saved in about 1 s**, against about 9 s on GitHub's
-  cache, with no workflow change.
+  cache, with no workflow change (strict jobs for public repositories keep
+  GitHub's cache).
 
 ```yaml
 jobs:
@@ -74,14 +75,14 @@ That's it. See [Getting started](docs/getting-started.md) for details.
 
 ## Why Pitlane
 
-- **A fresh runner for every job, with warm caches.** Each job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs, and `actions/cache` restores and saves from the Pitlane host instead of GitHub's cache.
+- **A fresh runner for every job, with warm caches.** Each job gets a brand-new runner. Docker images, build layers, `npm`/`pnpm`/`yarn`/`pip`/Go caches and toolchains stay on disk between jobs, and `actions/cache` restores and saves from the Pitlane host instead of GitHub's cache (except for strict jobs, which keep GitHub's cache).
 - **Docker works as on GitHub.** `services:`, `container:` jobs and `docker build` work out of the box. Each slot has its own Docker-in-Docker daemon, and jobs never touch the host's Docker.
 - **Jobs start within seconds, with no public URL.** Pitlane long-polls GitHub through the official scale set API, the one GitHub's Kubernetes controller uses. There is no webhook to expose.
 - **A web UI to see what runs where.** Live slots and runners, every job traced back to its repository, workflow, branch or pull request and run on GitHub, wait and duration trends, per-job peak memory, runner logs, one-click repository enablement, settings applied live.
 - **Two-minute setup.** Pitlane creates its own GitHub App in one click and uses it to sign you in with GitHub.
 - **Several people, with roles.** Sign in with GitHub as `admin`, `operator` or `viewer`, by login or by organization and team rules. Admin actions go to an audit log.
 - **Public repositories run strict.** Their jobs get throwaway caches and a wiped Docker daemon before and after each job. Read [Security](docs/security.md) before you enable one: strict mode is not a sandbox.
-- **One static binary.** Install it with systemd, Docker Compose, or a one-liner on Proxmox. It updates itself from the web UI and refuses a binary whose Sigstore build attestation does not check out.
+- **One static binary.** Install it with systemd, Docker Compose, or a one-liner on Proxmox. Installed as a binary, it updates itself from the web UI and refuses a binary whose Sigstore build attestation does not check out; with Compose, you pull the new image.
 
 ## Faster than GitHub-hosted runners
 
