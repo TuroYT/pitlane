@@ -1,0 +1,99 @@
+# Pitlane e2e (d): docker build with buildx, layer cache reuse, and docker
+# compose. The slot's Docker daemon keeps images and build cache between jobs,
+# so the first build of a run is already warm when the same slot built it
+# before; the second build of the run must always come from the cache.
+name: e2e-docker
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: docker and buildx versions
+        run: |
+          docker version --format 'client {{.Client.Version}} / server {{.Server.Version}}'
+          docker buildx version
+          docker buildx ls
+
+      - name: first build
+        run: |
+          set -eu
+          # BuildKit plain progress prints "#7 [3/4] RUN sleep 8 ..." then "#7 CACHED".
+          slow_cached() { n=$(grep -m1 -oE '^#[0-9]+ \[[^]]*\] RUN sleep 8' "$1" | cut -d' ' -f1); [ -n "$n" ] && grep -qx "$n CACHED" "$1"; }
+          start=$(date +%s)
+          docker buildx build --progress=plain --load -t pitlane-e2e:latest e2e/fixtures/docker 2>&1 | tee "$RUNNER_TEMP/build1.log"
+          took=$(( $(date +%s) - start ))
+          if slow_cached "$RUNNER_TEMP/build1.log"; then warm=warm; else warm=cold; fi
+          echo "first build: ${took}s ($warm slot cache)"
+          echo "::notice title=e2e-timing::docker build 1: ${took}s (${warm})"
+
+      - name: second build reuses every layer
+        run: |
+          set -eu
+          # BuildKit plain progress prints "#7 [3/4] RUN sleep 8 ..." then "#7 CACHED".
+          slow_cached() { n=$(grep -m1 -oE '^#[0-9]+ \[[^]]*\] RUN sleep 8' "$1" | cut -d' ' -f1); [ -n "$n" ] && grep -qx "$n CACHED" "$1"; }
+          start=$(date +%s)
+          docker buildx build --progress=plain --load -t pitlane-e2e:latest e2e/fixtures/docker 2>&1 | tee "$RUNNER_TEMP/build2.log"
+          took=$(( $(date +%s) - start ))
+          echo "second build: ${took}s"
+          echo "::notice title=e2e-timing::docker build 2: ${took}s"
+          slow_cached "$RUNNER_TEMP/build2.log"
+          # The slow layer sleeps 8 s: a cached build is well under that.
+          test "$took" -lt 8
+
+      - name: run the image
+        run: |
+          set -eu
+          out=$(docker run --rm pitlane-e2e:latest)
+          echo "$out"
+          echo "$out" | grep -q 'hello from the pitlane e2e image'
+
+  compose:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: compose up
+        working-directory: e2e/fixtures/compose
+        run: |
+          set -eu
+          docker compose version
+          start=$(date +%s)
+          docker compose -p e2e up -d --wait --wait-timeout 120
+          echo "::notice title=e2e-timing::compose up --wait: $(( $(date +%s) - start ))s"
+          docker compose -p e2e ps
+
+      - name: talk to the stack
+        working-directory: e2e/fixtures/compose
+        run: |
+          set -eu
+          curl -fsS http://localhost:18080/ | grep -qi nginx
+          test "$(docker compose -p e2e exec -T cache redis-cli ping)" = PONG
+
+      - name: compose down
+        if: always()
+        working-directory: e2e/fixtures/compose
+        run: |
+          set -eu
+          docker compose -p e2e down -v --remove-orphans
+          test -z "$(docker compose -p e2e ps -q)"

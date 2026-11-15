@@ -1,0 +1,89 @@
+# Pitlane e2e (c): a `container:` job. Every step, and the JavaScript actions,
+# run inside node:22 (started in the slot's Docker daemon), with a service
+# container reachable by its name on the job network.
+name: e2e-container
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  in-container:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    container:
+      image: node:22-bookworm-slim
+      env:
+        E2E_CONTAINER_ENV: set-on-container
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - name: steps run inside the job container
+        run: |
+          set -eu
+          test -f /.dockerenv
+          . /etc/os-release
+          echo "os=$PRETTY_NAME node=$(node --version) user=$(id -un)"
+          test "$ID" = debian
+          test "$VERSION_CODENAME" = bookworm
+          case "$(node --version)" in v22.*) ;; *) exit 1 ;; esac
+          test "$E2E_CONTAINER_ENV" = set-on-container
+          test "$GITHUB_WORKSPACE" = /__w/${{ github.event.repository.name }}/${{ github.event.repository.name }}
+
+      - name: install git for checkout
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
+
+      - name: checkout inside the container
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: checkout produced a git work tree
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git log -1 --format='%H %s'
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+
+      - name: service reachable by name on the job network
+        run: |
+          set -eu
+          # node:22 has no redis-cli: speak RESP over a TCP socket.
+          node -e '
+            const s = require("net").connect(6379, "redis", () => s.write("PING\r\n"));
+            s.setTimeout(5000, () => { console.error("timeout"); process.exit(1); });
+            s.on("data", d => { const r = d.toString().trim(); console.log("redis:", r); process.exit(r === "+PONG" ? 0 : 1); });
+            s.on("error", e => { console.error(e.message); process.exit(1); });
+          '
+
+      - name: a JavaScript action runs in the container
+        id: script
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          result-encoding: string
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('/.dockerenv')) throw new Error('not in the job container');
+            return require('os').release() + ' ' + process.version;
+
+      - name: action output
+        run: |
+          echo "github-script ran with: ${{ steps.script.outputs.result }}"
+          test -n "${{ steps.script.outputs.result }}"

@@ -1,0 +1,131 @@
+# Pitlane e2e (e): actions/cache. A job saves a cache, a dependent job restores
+# it by exact key and by restore-keys prefix, and setup-node's `cache: npm`
+# restores the npm cache (a hit from the second run on). Whichever backend
+# serves the cache (GitHub's, or the Pitlane host's when its actions cache is
+# on), the workflow is the same.
+name: e2e-cache
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Unique per run and attempt, so a rerun never restores an older entry.
+  E2E_KEY: e2e-cache-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  save:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    outputs:
+      sum: ${{ steps.make.outputs.sum }}
+    steps:
+      - name: make 64 MiB of cacheable data
+        id: make
+        run: |
+          set -eu
+          mkdir -p e2e-cache-data/sub
+          head -c 64M /dev/urandom > e2e-cache-data/blob.bin
+          echo "${{ github.run_id }}" > e2e-cache-data/sub/run-id
+          sum=$(cat e2e-cache-data/blob.bin e2e-cache-data/sub/run-id | sha256sum | cut -d' ' -f1)
+          echo "sum=$sum" >> "$GITHUB_OUTPUT"
+
+      - name: save
+        id: save
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: e2e-cache-data
+          key: ${{ env.E2E_KEY }}-exact
+
+      - name: save timing
+        run: echo "::notice title=e2e-timing::cache save (64 MiB) done, cache-id=${{ steps.save.outputs.cache-id }}"
+
+  restore:
+    needs: save
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    steps:
+      - name: restore by exact key
+        id: exact
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: e2e-cache-data
+          key: ${{ env.E2E_KEY }}-exact
+          fail-on-cache-miss: true
+
+      - name: exact hit with the same content
+        run: |
+          set -eu
+          echo "cache-hit=${{ steps.exact.outputs.cache-hit }} matched=${{ steps.exact.outputs.cache-matched-key }}"
+          test "${{ steps.exact.outputs.cache-hit }}" = true
+          sum=$(cat e2e-cache-data/blob.bin e2e-cache-data/sub/run-id | sha256sum | cut -d' ' -f1)
+          test "$sum" = "${{ needs.save.outputs.sum }}"
+          rm -rf e2e-cache-data
+
+      - name: restore by restore-keys prefix
+        id: prefix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: e2e-cache-data
+          key: ${{ env.E2E_KEY }}-does-not-exist
+          restore-keys: |
+            ${{ env.E2E_KEY }}-
+          fail-on-cache-miss: true
+
+      - name: prefix match restored the saved entry
+        run: |
+          set -eu
+          echo "cache-hit=${{ steps.prefix.outputs.cache-hit }} matched=${{ steps.prefix.outputs.cache-matched-key }}"
+          # A restore-keys match is not an exact hit.
+          test "${{ steps.prefix.outputs.cache-hit }}" = false
+          test "${{ steps.prefix.outputs.cache-matched-key }}" = "${{ env.E2E_KEY }}-exact"
+          test "$(cat e2e-cache-data/sub/run-id)" = "${{ github.run_id }}"
+
+      - name: a missing key is a miss, not an error
+        id: miss
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: e2e-cache-missing
+          key: e2e-cache-never-saved-${{ github.run_id }}
+
+      - name: miss reported
+        run: |
+          set -eu
+          test "${{ steps.miss.outputs.cache-hit }}" != true
+          test ! -e e2e-cache-missing
+
+  setup-node-npm:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-node with cache npm
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/fixtures/npm/package-lock.json
+
+      - name: npm ci
+        working-directory: e2e/fixtures/npm
+        run: |
+          set -eu
+          echo "setup-node cache-hit=${{ steps.node.outputs.cache-hit }}"
+          start=$(date +%s)
+          npm ci --no-audit --no-fund --prefer-offline
+          took=$(( $(date +%s) - start ))
+          echo "::notice title=e2e-timing::npm ci ${took}s (setup-node cache-hit=${{ steps.node.outputs.cache-hit }})"
+          node -e 'require("express"); require("lodash"); require("zod"); console.log("deps ok")'

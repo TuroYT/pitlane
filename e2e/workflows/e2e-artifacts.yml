@@ -1,0 +1,77 @@
+# Pitlane e2e (f): artifacts across jobs. Two producers upload files (one of
+# them 100 MiB), a consumer downloads one by name and the others by pattern,
+# and checks every byte.
+name: e2e-artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  produce:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        part: [small, large]
+    steps:
+      - name: make files
+        run: |
+          set -eu
+          mkdir -p out/nested/deeper
+          if [ "${{ matrix.part }}" = large ]; then
+            head -c 100M /dev/urandom > out/large.bin
+          else
+            for i in $(seq 1 50); do echo "file $i of run ${{ github.run_id }}" > "out/nested/deeper/f$i.txt"; done
+          fi
+          echo "${{ matrix.part }}" > out/part.txt
+          (cd out && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum) > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" out/SHA256SUMS
+
+      - name: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-part-${{ matrix.part }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
+
+  consume:
+    needs: produce
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    steps:
+      - name: download one artifact by name
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-part-small-${{ github.run_attempt }}
+          path: by-name
+
+      - name: download all parts by pattern
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: e2e-part-*-${{ github.run_attempt }}
+          path: by-pattern
+
+      - name: verify contents
+        run: |
+          set -eu
+          (cd by-name && sha256sum -c --quiet SHA256SUMS)
+          test "$(find by-name/nested/deeper -type f | wc -l)" = 50
+          for part in small large; do
+            dir="by-pattern/e2e-part-$part-${{ github.run_attempt }}"
+            (cd "$dir" && sha256sum -c --quiet SHA256SUMS)
+            test "$(cat "$dir/part.txt")" = "$part"
+          done
+          test "$(stat -c %s "by-pattern/e2e-part-large-${{ github.run_attempt }}/large.bin")" = 104857600
+          du -sh by-name by-pattern

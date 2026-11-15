@@ -1,0 +1,17 @@
+# Two-service stack for the e2e compose scenario.
+services:
+  web:
+    image: nginx:1.29-alpine
+    ports: ["18080:80"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  cache:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
