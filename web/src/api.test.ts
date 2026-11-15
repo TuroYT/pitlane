@@ -166,6 +166,8 @@ describe('formatters', () => {
     vi.setSystemTime(new Date(1_000_000 * 1000))
     expect(ago(0)).toBe('—')
     expect(ago(1_000_000 - 90)).toBe('1m 30s ago')
+    expect(ago(1_000_000 - 30 * 3600)).toBe('30h 0m ago')
+    expect(ago(1_000_000 - 3 * 86400 - 60)).toBe('3 days ago')
     vi.useRealTimers()
   })
 

@@ -63,11 +63,11 @@ const working = computed(() => !!p.value?.phase || !!r.value?.pulling)
 
 const runnerBadge = computed(() => {
   switch (r.value?.status) {
-    case 'current': return { cls: 'ok', text: 'up to date' }
-    case 'outdated': return { cls: 'warn', text: 'update available' }
+    case 'current': return { cls: 'ok', text: 'Up to date' }
+    case 'outdated': return { cls: 'warn', text: 'Update available' }
     case 'expiring': return { cls: 'warn', text: 'GitHub refuses it soon' }
     case 'expired': return { cls: 'error', text: 'GitHub may refuse it' }
-    default: return { cls: '', text: 'unknown' }
+    default: return { cls: '', text: 'Unknown' }
   }
 })
 
@@ -135,6 +135,8 @@ onUnmounted(() => window.clearTimeout(timer))
 </script>
 
 <template>
+  <div>
+  <p v-if="!st && error" class="alert error" role="alert">Could not read the update status: {{ error }}</p>
   <section v-if="st && p && r" class="card stack updates">
     <div class="row-between">
       <h2>Updates</h2>
@@ -142,25 +144,27 @@ onUnmounted(() => window.clearTimeout(timer))
         {{ busy === 'check' ? 'Checking…' : 'Check now' }}
       </button>
     </div>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
-    <h3>Pitlane</h3>
+    <div class="sub-head">
+      <h3>Pitlane</h3>
+      <span v-if="p.updateAvailable" class="badge warn">Update available</span>
+      <span v-else-if="p.latest && p.capability.mode !== 'dev'" class="badge ok">Up to date</span>
+    </div>
     <p>
       Running <code>{{ p.current }}</code>.
       <template v-if="p.latest">
-        Latest release <a :href="p.latestUrl" target="_blank" rel="noopener">{{ p.latest }}</a>
-        <span class="muted small">({{ day(p.latestPublished) }}, release notes)</span>.
+        Latest release: <a :href="p.latestUrl" target="_blank" rel="noopener" title="Release notes on GitHub">{{ p.latest }}</a>
+        <span class="muted"> ({{ day(p.latestPublished) }})</span>.
       </template>
-      <span v-if="p.updateAvailable" class="badge warn">update available</span>
-      <span v-else-if="p.latest && p.capability.mode !== 'dev'" class="badge ok">up to date</span>
     </p>
     <p v-if="p.checkError" class="alert warn">Cannot check for Pitlane releases: {{ p.checkError }}</p>
-    <p v-if="p.phase" class="alert info">Updating: {{ p.phase }}…</p>
+    <p v-if="p.phase" class="alert info" role="status">Updating: {{ p.phase }}…</p>
     <p v-if="p.applyError" class="alert error">Update failed, nothing was replaced: {{ p.applyError }}</p>
     <p v-if="p.lastUpdate" class="muted small">Last update: {{ p.lastUpdate }}</p>
 
     <template v-if="admin && p.capability.canSelfUpdate">
-      <div v-if="p.updateAvailable" class="filters">
+      <div v-if="p.updateAvailable" class="action">
         <button type="button" class="primary" :disabled="!!p.phase || busy === 'apply'"
           @click="act('apply', `Install Pitlane ${p.latest} and restart? Running jobs keep running.`)">
           Update now to {{ p.latest }}
@@ -182,7 +186,9 @@ onUnmounted(() => window.clearTimeout(timer))
     <div v-if="admin && prefs" class="stack">
       <label class="inline">
         <input v-model="prefs.autoUpdate" type="checkbox" :disabled="!p.capability.canSelfUpdate" />
-        Install updates automatically (patch and minor releases of the same major version; while in 0.x only patch releases; never pre-releases; only when no job runs)
+        <span>Install updates automatically
+          <small class="block">Patch and minor releases of the same major version (only patch releases while in 0.x), never
+            pre-releases, and only when no job runs.</small></span>
       </label>
       <div v-if="prefs.autoUpdate" class="grid2">
         <label>
@@ -192,7 +198,7 @@ onUnmounted(() => window.clearTimeout(timer))
         <label>
           Window end (hour)
           <input v-model.number="prefs.window.end" type="number" min="0" max="23" />
-          <small>Same as the start = any time.</small>
+          <small>Same as the start: any time.</small>
         </label>
       </div>
       <p v-if="st.settings.autoUpdate && p.autoStatus" class="muted small">
@@ -200,13 +206,15 @@ onUnmounted(() => window.clearTimeout(timer))
       </p>
     </div>
 
-    <h3>Runner image</h3>
-    <p>
-      <code>{{ r.image }}</code> runs GitHub runner <code>{{ r.version || '?' }}</code>.
-      <template v-if="r.latest">
-        Latest runner <a :href="r.latestUrl" target="_blank" rel="noopener">{{ r.latest }}</a>.
-      </template>
+    <div class="sub-head">
+      <h3>Runner image</h3>
       <span :class="['badge', runnerBadge.cls]">{{ runnerBadge.text }}</span>
+    </div>
+    <p>
+      <code>{{ r.image }}</code> runs GitHub runner <code>{{ r.version || 'unknown' }}</code>.
+      <template v-if="r.latest">
+        Latest runner: <a :href="r.latestUrl" target="_blank" rel="noopener" title="Release notes on GitHub">{{ r.latest }}</a>.
+      </template>
     </p>
     <p v-if="r.status === 'expired' || r.status === 'expiring'" class="alert warn">
       GitHub stops accepting a runner version about 30 days after a newer one is released
@@ -216,26 +224,30 @@ onUnmounted(() => window.clearTimeout(timer))
     <p v-if="r.checkError" class="alert warn">Cannot check for runner releases: {{ r.checkError }}</p>
     <p v-if="r.pullError" class="alert error">Pull failed: {{ r.pullError }}</p>
     <p class="muted small">
-      Digest <code>{{ r.digest || r.imageId || 'unknown' }}</code> · last pulled {{ ago(r.pulledAt || 0) }}
+      Digest <code>{{ r.digest || r.imageId || 'unknown' }}</code> · Last pulled {{ ago(r.pulledAt || 0) }}
     </p>
-    <div class="filters">
+    <div class="action">
       <button type="button" :disabled="r.pulling || busy === 'pull-runner'" @click="act('pull-runner')">
         {{ r.pulling ? 'Pulling…' : 'Pull latest' }}
       </button>
       <small class="muted">New runners use the pulled image; busy runners are never touched.</small>
     </div>
     <label v-if="admin && prefs" class="inline">
-      <input v-model="prefs.autoPull" type="checkbox" /> Pull the runner image automatically every day
+      <input v-model="prefs.autoPull" type="checkbox" /><span>Pull the runner image automatically every day</span>
     </label>
-    <div v-if="admin && prefs" class="filters">
-      <button type="button" class="small" @click="savePrefs">Save update preferences</button>
-      <span v-if="savedPrefs" class="ok-text">Saved</span>
+    <div v-if="admin && prefs" class="filters prefs">
+      <button type="button" @click="savePrefs">Save update preferences</button>
+      <span v-if="savedPrefs" class="ok-text" role="status">Saved</span>
     </div>
   </section>
+  </div>
 </template>
 
 <style scoped>
-.updates { margin-top: 28px; }
-.updates h3 { margin-top: 6px; }
+.sub-head { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--border-muted); }
+.updates > .row-between + .sub-head, .updates > .alert + .sub-head { border-top: 0; padding-top: 0; }
+.action { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.block { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.prefs { padding-top: 16px; border-top: 1px solid var(--border-muted); }
 .updates pre.code { white-space: pre-wrap; word-break: break-all; }
 </style>

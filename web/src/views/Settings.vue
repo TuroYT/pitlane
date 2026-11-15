@@ -13,8 +13,14 @@ const saved = ref(false)
 const error = ref('')
 const metricsToken = ref('')
 
+const loadError = ref('')
 onMounted(async () => {
-  if (isAdmin) s.value = await api<Settings>('/api/settings')
+  if (!isAdmin) return
+  try {
+    s.value = await api<Settings>('/api/settings')
+  } catch (e) {
+    loadError.value = (e as Error).message
+  }
 })
 
 async function save(clearMetricsToken = false) {
@@ -41,15 +47,20 @@ async function save(clearMetricsToken = false) {
 </script>
 
 <template>
+  <p v-if="isAdmin && !s && !loadError" class="muted settings" role="status">Loading settings…</p>
+  <p v-if="loadError" class="alert error settings" role="alert">Could not load the settings: {{ loadError }}</p>
   <form v-if="s" class="stack-lg settings" @submit.prevent="save()">
-    <div class="row-between">
-      <h1>Settings</h1>
-      <div class="filters">
-        <span v-if="saved" class="ok-text">Saved: applied live</span>
-        <button class="primary" :disabled="saving">{{ saving ? 'Saving…' : 'Save' }}</button>
+    <div class="page-head">
+      <div class="row-between">
+        <h1>Settings</h1>
+        <div class="filters">
+          <span v-if="saved" class="ok-text" role="status">Saved and applied</span>
+          <button type="submit" class="primary" :disabled="saving">{{ saving ? 'Saving…' : 'Save changes' }}</button>
+        </div>
       </div>
+      <p class="muted">Changes apply right away unless a setting says otherwise.</p>
     </div>
-    <p v-if="error" class="alert error">{{ error }}</p>
+    <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
     <section class="card stack">
       <h2>Capacity</h2>
@@ -62,18 +73,18 @@ async function save(clearMetricsToken = false) {
         <label>
           Memory limit per job (MB)
           <input v-model.number="s.memoryMb" type="number" min="0" />
-          <small>0 = no limit (fastest).</small>
+          <small>0 means no limit (fastest).</small>
         </label>
         <label>
           CPU weight per job
           <input v-model.number="s.cpuShares" type="number" min="0" />
-          <small>Relative share when the host is saturated (Docker cpu-shares). 0 = default. A lone job always gets every core.</small>
+          <small>Relative share when the host is saturated (Docker cpu-shares); 0 means the default. A lone job always gets every core.</small>
         </label>
       </div>
     </section>
 
     <section class="card stack">
-      <h2>Speed &amp; caches</h2>
+      <h2>Speed and caches</h2>
       <label>
         Cache sharing
         <select v-model="s.cacheScope">
@@ -82,11 +93,11 @@ async function save(clearMetricsToken = false) {
         </select>
       </label>
       <label class="inline">
-        <input v-model="s.mirror" type="checkbox" /> Local Docker Hub mirror (faster pulls, no rate limits)
+        <input v-model="s.mirror" type="checkbox" /><span>Local Docker Hub mirror (faster pulls, no rate limits)</span>
       </label>
       <label class="inline">
-        <input v-model="s.actionsCache" type="checkbox" /> Serve <code>actions/cache</code> from this host
-        (also <code>setup-*</code> actions with <code>cache:</code>)
+        <input v-model="s.actionsCache" type="checkbox" /><span>Serve <code>actions/cache</code> from this host
+          (also <code>setup-*</code> actions with <code>cache:</code>)</span>
       </label>
       <label v-if="s.actionsCache">
         Actions cache size (GB)
@@ -99,7 +110,7 @@ async function save(clearMetricsToken = false) {
         </small>
       </label>
       <label class="inline">
-        <input v-model="s.qemu" type="checkbox" /> Multi-architecture builds (QEMU emulation, applied at next restart)
+        <input v-model="s.qemu" type="checkbox" /><span>Multi-architecture builds (QEMU emulation, applied at the next restart)</span>
       </label>
       <label>
         Docker build cache kept per slot (GB)
@@ -108,7 +119,7 @@ async function save(clearMetricsToken = false) {
       <label>
         Minimum free disk space (GB)
         <input v-model.number="s.minFreeDiskGb" type="number" min="0" />
-        <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the least recently used actions cache entries, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 = never prune.</small>
+        <small>Checked after each job. Below it, Pitlane prunes the build caches, then the images of idle slots, then the least recently used actions cache entries, then the largest unused per-owner cache volumes. Busy slots are never touched. 0 means never prune.</small>
       </label>
     </section>
 
@@ -141,18 +152,20 @@ async function save(clearMetricsToken = false) {
       <label>
         Metrics token
         <input v-model="metricsToken" type="password" autocomplete="new-password"
-          :placeholder="s.metricsTokenSet ? 'set (type a new one to replace it)' : 'not set'" />
+          :placeholder="s.metricsTokenSet ? 'Set (type a new one to replace it)' : 'Not set'" />
         <small>
           When set, <code>/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (at least 16 characters).
           When not set, only signed-in users and clients on this machine can read it.
-          <button v-if="s.metricsTokenSet" type="button" class="ghost small" @click="save(true)">Remove token</button>
         </small>
       </label>
+      <div v-if="s.metricsTokenSet">
+        <button type="button" class="small danger" :disabled="saving" @click="save(true)">Remove metrics token</button>
+      </div>
     </section>
   </form>
-  <template v-if="!isAdmin">
+  <div v-if="!isAdmin" class="stack settings">
     <h1>Settings</h1>
-    <p class="alert info small">Your role is operator: you can check for updates and pull the runner image. Settings are for admins.</p>
-  </template>
+    <p class="alert info">Your role is operator: you can check for updates and pull the runner image. Settings are for admins.</p>
+  </div>
   <Updates v-if="s || !isAdmin" class="settings" :admin="isAdmin" />
 </template>
