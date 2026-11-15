@@ -854,7 +854,9 @@ func storeUsage(u pool.JobUsage) store.JobUsage {
 	c := func(c pool.CgroupUsage) store.ContainerUsage {
 		return store.ContainerUsage{MemPeak: v(c.MemPeak), CPUUsec: v(c.CPUUsec), CPUSomeUsec: v(c.CPUSomeUsec), IOFullUsec: v(c.IOFullUsec), MemFullUsec: v(c.MemFullUsec)}
 	}
-	return store.JobUsage{WallMs: u.Wall.Milliseconds(), Runner: c(u.Runner), Slot: c(u.Slot)}
+	slot := c(u.Slot)
+	slot.AnonPeak = v(u.Slot.AnonPeak) // only the slot's is stored (its peak counts the page cache)
+	return store.JobUsage{WallMs: u.Wall.Milliseconds(), Runner: c(u.Runner), Slot: slot}
 }
 
 // maxArchivedLog bounds the archived log of one runner (its output is

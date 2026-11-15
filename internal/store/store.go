@@ -138,6 +138,11 @@ var migrations = []string{
 		detail  TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX audit_at ON audit(at DESC, id DESC)`,
+	// Highest anonymous memory (memory.stat anon) of a job's slot: its
+	// memory.peak also counts the page cache (image layers, build contexts).
+	`ALTER TABLE jobs ADD COLUMN slot_anon_peak INTEGER`,
+	// Memory history of a job, for the admission's prediction.
+	`CREATE INDEX jobs_by_name ON jobs(owner, repo, workflow_ref, job_name, id DESC)`,
 }
 
 // Open opens (and migrates) the database stored in dataDir.
@@ -557,6 +562,7 @@ type ContainerUsage struct {
 	CPUSomeUsec *int64 `json:"cpuSomeUsec"` // cpu.pressure "some" stall time
 	IOFullUsec  *int64 `json:"ioFullUsec"`  // io.pressure "full" stall time
 	MemFullUsec *int64 `json:"memFullUsec"` // memory.pressure "full" stall time
+	AnonPeak    *int64 `json:"anonPeak"`    // bytes, highest anonymous memory (slot only)
 	// Stall times as a percentage of the wall time. Derived, not stored.
 	CPUPressure *float64 `json:"cpuPressurePct"`
 	IOPressure  *float64 `json:"ioPressurePct"`
@@ -591,10 +597,10 @@ func (u *JobUsage) derive() {
 
 // usageColumns are the stored fields of a JobUsage, in column order.
 const usageColumns = `usage_wall_ms, runner_mem_peak, runner_cpu_usec, runner_cpu_some_usec, runner_io_full_usec, runner_mem_full_usec,
-	slot_mem_peak, slot_cpu_usec, slot_cpu_some_usec, slot_io_full_usec, slot_mem_full_usec`
+	slot_mem_peak, slot_cpu_usec, slot_cpu_some_usec, slot_io_full_usec, slot_mem_full_usec, slot_anon_peak`
 
 // usageScan holds the nullable usage columns of a row.
-type usageScan [11]sql.NullInt64
+type usageScan [12]sql.NullInt64
 
 func (u *usageScan) dest() []any {
 	out := make([]any, len(u))
@@ -617,7 +623,7 @@ func (u *usageScan) usage() *JobUsage {
 	}
 	j := &JobUsage{WallMs: u[0].Int64,
 		Runner: ContainerUsage{MemPeak: v(1), CPUUsec: v(2), CPUSomeUsec: v(3), IOFullUsec: v(4), MemFullUsec: v(5)},
-		Slot:   ContainerUsage{MemPeak: v(6), CPUUsec: v(7), CPUSomeUsec: v(8), IOFullUsec: v(9), MemFullUsec: v(10)}}
+		Slot:   ContainerUsage{MemPeak: v(6), CPUUsec: v(7), CPUSomeUsec: v(8), IOFullUsec: v(9), MemFullUsec: v(10), AnonPeak: v(11)}}
 	j.derive()
 	return j
 }
@@ -633,10 +639,10 @@ func (s *Store) SetJobUsage(ctx context.Context, runner string, u JobUsage) (boo
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET usage_wall_ms = ?,
 		runner_mem_peak = ?, runner_cpu_usec = ?, runner_cpu_some_usec = ?, runner_io_full_usec = ?, runner_mem_full_usec = ?,
-		slot_mem_peak = ?, slot_cpu_usec = ?, slot_cpu_some_usec = ?, slot_io_full_usec = ?, slot_mem_full_usec = ?
+		slot_mem_peak = ?, slot_cpu_usec = ?, slot_cpu_some_usec = ?, slot_io_full_usec = ?, slot_mem_full_usec = ?, slot_anon_peak = ?
 		WHERE id = (SELECT id FROM jobs WHERE runner_name = ? ORDER BY id DESC LIMIT 1)`,
 		u.WallMs, n(u.Runner.MemPeak), n(u.Runner.CPUUsec), n(u.Runner.CPUSomeUsec), n(u.Runner.IOFullUsec), n(u.Runner.MemFullUsec),
-		n(u.Slot.MemPeak), n(u.Slot.CPUUsec), n(u.Slot.CPUSomeUsec), n(u.Slot.IOFullUsec), n(u.Slot.MemFullUsec), runner)
+		n(u.Slot.MemPeak), n(u.Slot.CPUUsec), n(u.Slot.CPUSomeUsec), n(u.Slot.IOFullUsec), n(u.Slot.MemFullUsec), n(u.Slot.AnonPeak), runner)
 	if err != nil {
 		return false, err
 	}
@@ -660,6 +666,43 @@ func (s *Store) JobMemoryPeaks(ctx context.Context, since int64) ([]float64, err
 			return nil, err
 		}
 		out = append(out, float64(v))
+	}
+	return out, rows.Err()
+}
+
+// JobMemory is the memory a finished job needed, as the admission predicts
+// it: the runner's peak plus the slot's anonymous peak (a quarter of the
+// slot's memory.peak for jobs measured before anon was recorded: most of
+// it is page cache).
+const jobMemoryExpr = `COALESCE(runner_mem_peak, 0) + COALESCE(slot_anon_peak, slot_mem_peak / 4, 0)`
+
+// MemoryHistory returns the memory (see jobMemoryExpr) of the last limit
+// measured jobs, newest first, that were not cancelled: of one job (owner,
+// repository, workflow file and job name) when workflow and job are set,
+// of a repository when only owner and repo are, of every job otherwise.
+func (s *Store) MemoryHistory(ctx context.Context, owner, repo, workflow, job string, limit int) ([]int64, error) {
+	where, args := `(runner_mem_peak IS NOT NULL OR slot_mem_peak IS NOT NULL) AND finished_at > 0 AND result != 'canceled'`, []any{}
+	switch {
+	case workflow != "" || job != "":
+		where += ` AND owner = ? AND repo = ? AND workflow_ref = ? AND job_name = ?`
+		args = append(args, owner, repo, workflow, job)
+	case repo != "":
+		where += ` AND owner = ? AND repo = ?`
+		args = append(args, owner, repo)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobMemoryExpr+` FROM jobs WHERE `+where+` ORDER BY id DESC LIMIT ?`, args...) //nolint:gosec // G202: fixed SQL fragments only
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
 	}
 	return out, rows.Err()
 }
