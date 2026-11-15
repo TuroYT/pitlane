@@ -53,7 +53,8 @@ Monday mornings (Europe/Paris), grouped:
 
 - merged automatically once `all green` passes: minor and patch updates of
   GitHub Actions and of the build tooling (`devDependencies` of `web/`, the
-  docs site), and image digest updates;
+  docs site), and image digest updates (except `tonistiigi/binfmt`, used only
+  by the release workflow);
 - left for a maintainer: Go modules, the UI's runtime dependencies, the Go
   tools of the `Makefile` and every major update.
 

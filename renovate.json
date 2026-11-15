@@ -209,6 +209,13 @@
       "automerge": true
     },
     {
+      "description": "binfmt is only used by the release workflow, which pull request CI does not run: a maintainer merges its digest updates",
+      "matchDepNames": [
+        "tonistiigi/binfmt"
+      ],
+      "automerge": false
+    },
+    {
       "description": "Go tools of the Makefile: a new golangci-lint can report new issues, so a maintainer merges it",
       "matchFileNames": [
         "Makefile"
