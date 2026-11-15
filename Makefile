@@ -10,7 +10,9 @@ GOTESTSUM_VERSION ?= v1.13.0
 GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 GOTESTSUM = go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 
-.PHONY: help build web run dev test lint golangci-lint test-race clean
+.DEFAULT_GOAL := build
+
+.PHONY: help build web run dev test check lint golangci-lint test-race clean
 
 help: ## List available Makefile targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "%-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -29,6 +31,13 @@ dev: ## Run the UI dev server (proxying to a Pitlane on :8080)
 
 test: ## Run Go vet and tests
 	go vet ./... && go test ./...
+
+check: ## Run what CI runs on code, in CI's order, stopping at the first failure
+	$(MAKE) --no-print-directory web
+	cd web && pnpm test && pnpm lint
+	$(MAKE) --no-print-directory lint
+	$(MAKE) --no-print-directory test-race
+	$(MAKE) --no-print-directory build
 
 lint: ## What CI's "Go / lint" checks: gofmt, go vet, go.mod tidiness, golangci-lint
 	@test -z "$$(gofmt -l ./cmd ./internal ./web)" || { gofmt -l ./cmd ./internal ./web; echo "run gofmt -w on the files above"; exit 1; }

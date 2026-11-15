@@ -46,6 +46,8 @@ The repository layout:
 | `make run` | `web` + `build`, then runs Pitlane against your local Docker daemon on `127.0.0.1:8080`, data in `./.data`, **login disabled** (`--insecure-no-auth`) |
 | `make dev` | Vite dev server for the UI, proxying `/api` and `/auth` to a Pitlane on `:8080` (or `PITLANE_URL`) |
 | `make test` | `go vet ./...` and `go test ./...` |
+| `make check` | Everything CI runs on code, stopping at the first failure (see [Tests and linters](#tests-and-linters)) |
+| `make help` | Lists the targets |
 | `make clean` | Removes `bin/`, `.data/`, `web/node_modules` and the built UI |
 
 `make run` turns authentication off and starts real privileged containers.
@@ -69,21 +71,28 @@ API field the UI depends on, add it to the mock too.
 ## Tests and linters
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the following.
-Run them before you push:
+Run them before you push. `make check` runs all of them in this order and
+stops at the first failure:
+
+```sh
+make check
+```
+
+The individual steps are:
 
 ```sh
 make web                              # builds web/dist, embedded in the binary
 (cd web && pnpm test && pnpm lint)    # vitest, eslint with --max-warnings 0
 test -z "$(gofmt -l ./cmd ./internal ./web)"
 go vet ./...
-go mod tidy && git diff --exit-code go.mod go.sum
-go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+go mod tidy -diff
+make golangci-lint
 go test -race ./...
 make build
 ```
 
-`go test -race` needs cgo (a C compiler). golangci-lint is pinned to the
-version CI uses; running it through `go run` builds it with your Go toolchain,
+`go test -race` needs cgo (a C compiler). golangci-lint is pinned in the
+`Makefile` (`GOLANGCI_LINT_VERSION`), which CI also uses; running it through `go run` builds it with your Go toolchain,
 so it understands the Go version in `go.mod`. Its configuration is in
 [`.golangci.yml`](.golangci.yml).
 
