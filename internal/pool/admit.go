@@ -263,6 +263,13 @@ func (p *Pool) SetStrictDemand(on bool) {
 	p.strictDemand = on
 }
 
+// StrictSlots returns how many slots are reserved for strict jobs now.
+func (p *Pool) StrictSlots() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.reservedLocked())
+}
+
 // strictSlotsLocked is how many slots are reserved for strict jobs: at most
 // all but one, so non-strict jobs always have a slot. Callers hold p.mu.
 func (p *Pool) strictSlotsLocked(live int) int {
