@@ -116,7 +116,7 @@ const utilChart = computed<ChartConfiguration>(() => {
         </p>
       </div>
       <div class="seg" role="group" aria-label="Time range">
-        <button v-for="r in ranges" :key="r.id" :class="{ active: range === r.id }" :aria-pressed="range === r.id" @click="pick(r.id)">
+        <button v-for="r in ranges" :key="r.id" type="button" :class="{ active: range === r.id }" :aria-pressed="range === r.id" @click="pick(r.id)">
           {{ r.label }}
         </button>
       </div>

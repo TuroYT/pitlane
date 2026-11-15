@@ -75,6 +75,9 @@ function slotIdle(owner: string): { label: string; title: string } {
     title: `Docker images, layers and build cache of ${owner}'s last jobs are kept here, so the next ${owner} job starts warm. A job of another owner gets this slot rebuilt (wiped) first.`,
   }
 }
+const slotLabel: Record<string, string> = {
+  starting: 'Starting', ready: 'Ready', busy: 'Busy', cleaning: 'Cleaning', error: 'Error', retiring: 'Retiring',
+}
 function pct(used: number, total: number) {
   return total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0
 }
@@ -84,12 +87,13 @@ function level(p: number) {
 </script>
 
 <template>
-  <div v-if="!snap" class="muted">Connecting…</div>
+  <p v-if="!snap" class="muted" role="status">Connecting to Pitlane…</p>
   <div v-else class="stack-lg">
     <div class="stack">
       <p v-for="t in problems" :key="t.id" class="alert error">
         <strong>{{ t.kind === 'repo' ? `${t.owner}/${t.repo}` : t.owner }}</strong>:
         {{ t.status === 'no-credentials' ? 'no GitHub credentials. Finish the setup or install the App on this account.' : t.error }}
+        <RouterLink to="/targets">Repositories</RouterLink>
       </p>
       <p v-if="!enabled.length" class="alert info">
         No repository uses Pitlane yet. <RouterLink to="/targets">Enable a repository</RouterLink>, then use
@@ -111,7 +115,7 @@ function level(p: number) {
         </div>
         <div class="counter">
           <div class="counter-label">Median job duration, 24 h</div>
-          <div class="counter-value">{{ day.run != null ? duration(day.run) : '—' }} <span v-if="day.count" class="of">{{ day.count }} jobs</span></div>
+          <div class="counter-value">{{ day.run != null ? duration(day.run) : '—' }} <span v-if="day.count" class="of">{{ day.count }} {{ day.count === 1 ? 'job' : 'jobs' }}</span></div>
         </div>
       </section>
     </div>
@@ -122,7 +126,7 @@ function level(p: number) {
         <RouterLink to="/jobs" class="small">All jobs</RouterLink>
       </div>
       <div class="box running">
-        <p v-if="!active.length" class="box-row muted small">No job is running. Idle slots keep their caches warm for the next one.</p>
+        <p v-if="!active.length" class="box-row muted">No job is running. Idle slots keep their caches warm for the next one.</p>
         <div v-for="j in active" :key="j.id" class="running-row">
           <JobStatus :job="j" />
           <div style="min-width: 0">
@@ -146,12 +150,12 @@ function level(p: number) {
           <p class="muted small">Each slot runs one job at a time and keeps its Docker cache warm between jobs.</p>
         </div>
       </div>
-      <div class="slots">
-        <div v-for="s in snap.slots" :key="s.index" class="slot" :class="s.status">
+      <div class="slots" role="list" aria-label="Slots">
+        <div v-for="s in snap.slots" :key="s.index" class="slot" :class="s.status" role="listitem">
           <div class="slot-head">
-            <span class="dot" :class="{ ready: 'ok', busy: 'busy', error: 'error' }[s.status as string] ?? ''" />
+            <span class="dot" :class="{ ready: 'ok', busy: 'busy', error: 'error' }[s.status as string] ?? ''" aria-hidden="true" />
             <span class="slot-name">#{{ s.index }}</span>
-            <span class="slot-state">{{ s.status }}</span>
+            <span class="slot-state">{{ slotLabel[s.status] ?? s.status }}</span>
           </div>
           <div v-if="s.status === 'busy'" class="slot-body">
             <template v-if="slotJob(s.runner)">
@@ -163,7 +167,7 @@ function level(p: number) {
             <template v-else>
               <div class="ellipsis">{{ s.owner }}</div>
               <div class="muted">{{ duration(now - s.since) }}
-                <RouterLink v-if="s.runner" :to="`/logs/${s.runner}`">logs</RouterLink></div>
+                <RouterLink v-if="s.runner" :to="`/logs/${s.runner}`">Logs</RouterLink></div>
             </template>
           </div>
           <div v-else-if="s.status === 'error'" class="slot-body error-text">{{ s.error }}</div>
@@ -191,19 +195,19 @@ function level(p: number) {
         <h2>Host</h2>
         <span class="muted small">Updated {{ ago(snap.time) }}</span>
       </div>
-      <div class="box box-body host">
+      <div class="box box-body host" aria-label="Host resources">
         <div>
           <div class="meter-head"><strong>CPU</strong><span class="muted num">{{ snap.host.cpuPercent.toFixed(0) }}% of {{ snap.host.cpus }} CPUs</span></div>
-          <div class="bar"><div :class="level(snap.host.cpuPercent)" :style="{ width: pct(snap.host.cpuPercent, 100) + '%' }" /></div>
+          <div class="bar" aria-hidden="true"><div :class="level(snap.host.cpuPercent)" :style="{ width: pct(snap.host.cpuPercent, 100) + '%' }" /></div>
         </div>
         <div>
           <div class="meter-head"><strong>Memory</strong><span class="muted num">{{ bytes(snap.host.memTotal - snap.host.memAvailable) }} of {{ bytes(snap.host.memTotal) }}</span></div>
-          <div class="bar"><div :class="level(pct(snap.host.memTotal - snap.host.memAvailable, snap.host.memTotal))"
+          <div class="bar" aria-hidden="true"><div :class="level(pct(snap.host.memTotal - snap.host.memAvailable, snap.host.memTotal))"
             :style="{ width: pct(snap.host.memTotal - snap.host.memAvailable, snap.host.memTotal) + '%' }" /></div>
         </div>
         <div>
           <div class="meter-head"><strong>Docker disk</strong><span class="muted num">{{ bytes(snap.host.diskFree) }} free of {{ bytes(snap.host.diskTotal) }}</span></div>
-          <div class="bar"><div :class="level(pct(snap.host.diskTotal - snap.host.diskFree, snap.host.diskTotal))"
+          <div class="bar" aria-hidden="true"><div :class="level(pct(snap.host.diskTotal - snap.host.diskFree, snap.host.diskTotal))"
             :style="{ width: pct(snap.host.diskTotal - snap.host.diskFree, snap.host.diskTotal) + '%' }" /></div>
         </div>
       </div>
