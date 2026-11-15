@@ -6,6 +6,24 @@
     "helpers:pinGitHubActionDigests",
     ":semanticCommits"
   ],
+  "timezone": "Europe/Paris",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "platformAutomerge": true,
+  "automergeType": "pr",
+  "vulnerabilityAlerts": {
+    "description": "Security fixes are proposed as soon as they are published, outside the weekly schedule, and never wait in a group",
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null,
+    "groupName": null,
+    "labels": [
+      "security"
+    ]
+  },
+  "osvVulnerabilityAlerts": true,
   "minimumReleaseAge": "3 days",
   "postUpdateOptions": [
     "gomodTidy"
@@ -45,6 +63,16 @@
         "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-]+))?\\nARG [A-Z0-9_]+_VERSION=(?<currentValue>\\S+)"
       ],
       "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver-coerced{{/if}}"
+    },
+    {
+      "description": "Go tools run with `go run` at a version pinned in the Makefile, annotated with a \"# renovate:\" comment",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Makefile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\n[A-Z0-9_]+_VERSION \\?= (?<currentValue>\\S+)"
+      ]
     }
   ],
   "packageRules": [
@@ -77,35 +105,80 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "Pitlane's own images are released from this repository",
+      "description": "Pitlane's own images are released from this repository: proposed right after a release, outside the weekly schedule",
       "matchDepNames": [
         "ghcr.io/turoyt/pitlane",
         "ghcr.io/turoyt/pitlane-runner"
       ],
       "groupName": "pitlane release images",
-      "minimumReleaseAge": null
+      "minimumReleaseAge": null,
+      "schedule": [
+        "at any time"
+      ]
     },
     {
+      "description": "Actions are pinned by digest: minor, patch and digest updates go in one weekly PR, merged once CI is green",
       "matchManagers": [
         "github-actions"
       ],
-      "groupName": "github actions",
       "matchUpdateTypes": [
         "minor",
         "patch",
         "digest",
         "pinDigest"
-      ]
+      ],
+      "groupName": "github actions",
+      "automerge": true
     },
     {
+      "description": "Runtime dependencies of the UI (shipped in the binary): grouped, merged by a maintainer",
       "matchManagers": [
         "npm"
+      ],
+      "matchFileNames": [
+        "web/**"
+      ],
+      "matchDepTypes": [
+        "dependencies"
       ],
       "matchUpdateTypes": [
         "minor",
         "patch"
       ],
       "groupName": "web dependencies (non-major)"
+    },
+    {
+      "description": "Build and test tooling of the UI: grouped, merged once CI is green",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchFileNames": [
+        "web/**"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "web dev dependencies (non-major)",
+      "automerge": true
+    },
+    {
+      "description": "The docs site only has build dependencies: grouped, merged once CI is green",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchFileNames": [
+        "site/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "docs site dependencies (non-major)",
+      "automerge": true
     },
     {
       "matchManagers": [
@@ -123,6 +196,34 @@
         "site/**"
       ],
       "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Image digests (same tag, rebuilt upstream): merged once CI is green",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Go tools of the Makefile: a new golangci-lint can report new issues, so a maintainer merges it",
+      "matchFileNames": [
+        "Makefile"
+      ],
+      "groupName": "go tools"
+    },
+    {
+      "description": "vue-tsc 3.x does not support TypeScript 7 (ERR_PACKAGE_PATH_NOT_EXPORTED on ./lib/tsc): wait until it does.",
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
     }
   ]
 }
