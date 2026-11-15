@@ -33,7 +33,27 @@
 | CPU | 4 vCPU | the whole host when it's the only job |
 
 Slots are chosen by **affinity**: a free slot that last ran the same repository,
-then the same owner, then any free slot.
+then the same owner, then an empty one. With the `owner` cache scope, a slot that
+served another owner is rebuilt empty first (its Docker layers and build cache
+are lost), so when every free slot needs a rebuild Pitlane takes the one that
+costs least:
+
+1. a slot whose cache no one can use (unknown owner after a restart without
+   state, left by a strict job);
+2. a slot whose owner keeps at least one other warm slot (ready or busy): an
+   owner's last warm slot goes last;
+3. the least recently used (the time of each slot's last job is kept in
+   `slots.json`; a slot without one counts as the oldest), then the lowest
+   index.
+
+Strict jobs (public repositories) take an empty slot first, then follow the
+same order. When the only choice is to wipe a warm slot while another slot is
+being cleaned after a strict job, the strict job waits for that slot, for at
+most 20 seconds: the cleanup is the same rebuild the warm slot would need, and
+it is already under way, so the job does not start later than it would have.
+Each rebuild before a job is logged (`rebuilding slot before its job`, with the
+previous owner and why) and counted in `pitlane_slot_wipes_total{reason}`
+(`owner_change`, `strict`, `unknown_owner`).
 
 ## Caches
 

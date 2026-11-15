@@ -113,6 +113,10 @@ type SlotState struct {
 	Runner   string `json:"runner"`
 	Error    string `json:"error,omitempty"`
 	Since    int64  `json:"since"`
+	// LastUsed is when the slot was last released after a job (unix
+	// seconds, 0 = never or unknown): the least recently used warm slot is
+	// the one sacrificed when a wipe cannot be avoided.
+	LastUsed int64 `json:"lastUsed,omitempty"`
 }
 
 type slot struct {
@@ -122,6 +126,9 @@ type slot struct {
 	// dirty marks a slot that may still hold another owner's data (a wipe or
 	// rebuild failed). It is never handed out; the retry loop rebuilds it.
 	dirty bool
+	// wiping marks a slot leased with a wipe still to do: its owner is still
+	// the previous one, but its cache no longer counts as that owner's.
+	wiping bool
 }
 
 // persistedSlot is what survives a Pitlane restart. It lives in Pitlane's
@@ -130,6 +137,7 @@ type persistedSlot struct {
 	Owner     string `json:"owner"`
 	TargetID  int64  `json:"targetId"`
 	Externals string `json:"externals"` // runner image ID copied into the externals volume
+	LastUsed  int64  `json:"lastUsed,omitempty"`
 }
 
 // Pool owns the slots.
@@ -147,6 +155,10 @@ type Pool struct {
 	binfmt    map[string]string // binfmt_misc entries registered by Pitlane (name -> content)
 	qemuWant  bool              // QEMU should be (re)registered as soon as no job runs
 	qemuBusy  bool              // registration in progress: no slot is handed out
+
+	strictWaitSince time.Time        // a strict job has been waiting for a clean slot since then
+	wipes           map[string]int64 // slot wipes before a job, by reason
+	now             func() time.Time // nil: time.Now (tests set a clock)
 
 	pruneMu sync.Mutex   // one disk reclaim at a time
 	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
@@ -312,7 +324,7 @@ func (p *Pool) saveLocked() {
 		out[i] = st
 	}
 	for i, s := range p.slots {
-		out[i] = persistedSlot{Owner: s.Owner, TargetID: s.TargetID, Externals: p.externals[i]}
+		out[i] = persistedSlot{Owner: s.Owner, TargetID: s.TargetID, Externals: p.externals[i], LastUsed: s.LastUsed}
 	}
 	pruneRetired(out, p.cfg.Slots, p.slots)
 	p.restored = out
@@ -374,6 +386,14 @@ func (p *Pool) Config() Config {
 
 // Released is signalled whenever a slot becomes free.
 func (p *Pool) Released() <-chan struct{} { return p.released }
+
+// clock returns the current time.
+func (p *Pool) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
 
 func (p *Pool) signal() {
 	select {
