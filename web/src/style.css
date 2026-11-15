@@ -364,7 +364,7 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .job-header h1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* ------------------------------------------------------------ targets */
-.account { margin-top: 12px; }
+.account + .account { margin-top: 12px; }
 .repo-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0 16px; }
 .repo-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-muted); }
 
@@ -396,3 +396,5 @@ pre.logs {
   .table-wrap .table { min-width: 560px; }
 }
 .chart-empty.short { height: 96px; }
+.clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 320px; }
+.repo-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
