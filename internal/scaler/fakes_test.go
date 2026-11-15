@@ -38,6 +38,7 @@ type fakePool struct {
 	signal    chan struct{}
 	nextID    int
 	freeDisks int
+	onRemove  func(id string) // called by Remove, outside mu
 }
 
 func newFakePool(free int) *fakePool {
@@ -139,8 +140,12 @@ func (f *fakePool) Logs(_ context.Context, _ string, _ bool, w io.Writer) error 
 
 func (f *fakePool) Remove(_ context.Context, id string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
+	hook := f.onRemove
+	f.mu.Unlock()
+	if hook != nil {
+		hook(id)
+	}
 }
 
 func (f *fakePool) StopRunner(_ context.Context, id string, _ time.Duration) error {

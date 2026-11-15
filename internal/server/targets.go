@@ -40,9 +40,7 @@ func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
-	pem, _ := s.store.GetSecret("app_pem")
-	appID, _ := strconv.ParseInt(s.store.Get("app_id", "0"), 10, 64)
-	client, err := gh.NewAppClient(appID, pem)
+	client, err := s.appClient()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
