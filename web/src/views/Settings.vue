@@ -2,6 +2,10 @@
 import { onMounted, ref } from 'vue'
 import { api, cacheSummary, post, type Settings } from '../api'
 import Updates from '../components/Updates.vue'
+import { can } from '../session'
+
+// Operators only see the updates (check, pull the runner image).
+const isAdmin = can('admin')
 
 const s = ref<Settings | null>(null)
 const saving = ref(false)
@@ -10,7 +14,7 @@ const error = ref('')
 const metricsToken = ref('')
 
 onMounted(async () => {
-  s.value = await api<Settings>('/api/settings')
+  if (isAdmin) s.value = await api<Settings>('/api/settings')
 })
 
 async function save(clearMetricsToken = false) {
@@ -124,11 +128,7 @@ async function save(clearMetricsToken = false) {
 
     <section class="card stack">
       <h2>Access</h2>
-      <label>
-        Allowed GitHub users
-        <input v-model="s.allowedUsers" placeholder="alice, bob" />
-        <small>Comma-separated GitHub logins that can sign in to this Pitlane.</small>
-      </label>
+      <p class="small muted">Who can sign in, and with which role, is set in <RouterLink to="/users">Users</RouterLink>.</p>
       <label>
         Public URL
         <input v-model="s.baseUrl" />
@@ -150,5 +150,9 @@ async function save(clearMetricsToken = false) {
       </label>
     </section>
   </form>
-  <Updates v-if="s" class="settings" />
+  <template v-if="!isAdmin">
+    <h1>Settings</h1>
+    <p class="alert info small">Your role is operator: you can check for updates and pull the runner image. Settings are for admins.</p>
+  </template>
+  <Updates v-if="s || !isAdmin" class="settings" :admin="isAdmin" />
 </template>

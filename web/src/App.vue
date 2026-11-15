@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, post, connectLive, disconnectLive, live, onUnauthorized, type Status } from './api'
-import { status } from './session'
+import { api, post, connectLive, disconnectLive, live, onUnauthorized, roleHelp, type Role, type Status } from './api'
+import { can, status } from './session'
 import BrandMark from './components/BrandMark.vue'
 import Icon from './components/Icon.vue'
 
@@ -19,9 +19,14 @@ async function refresh() {
     if (path !== '/login' && path !== '/setup') await router.replace('/login')
   } else {
     connectLive()
-    if (path === '/login') await router.replace('/')
+    if (path === '/login' || !allowed(route.meta.role)) await router.replace('/')
   }
   ready.value = true
+}
+
+// Pages the role cannot use (the API refuses them anyway) lead home.
+function allowed(role: unknown) {
+  return !role || can(role as Role)
 }
 
 // The session is gone (expired, user removed): back to the login page.
@@ -37,6 +42,7 @@ onMounted(async () => {
 })
 watch(() => route.path, (p) => {
   if (ready.value && p !== '/setup' && p !== '/login' && !status.value?.signedIn) refresh()
+  else if (ready.value && status.value?.signedIn && !allowed(route.meta.role)) void router.replace('/')
 })
 
 async function logout() {
@@ -47,12 +53,16 @@ async function logout() {
   await refresh()
 }
 
-const nav = [
+const allNav: { to: string; label: string; icon: string; role?: Role }[] = [
   { to: '/', label: 'Dashboard', icon: 'dashboard' },
   { to: '/targets', label: 'Repositories', icon: 'repo' },
   { to: '/jobs', label: 'Jobs', icon: 'jobs' },
-  { to: '/settings', label: 'Settings', icon: 'settings' },
+  { to: '/settings', label: 'Settings', icon: 'settings', role: 'operator' },
+  { to: '/users', label: 'Users', icon: 'users', role: 'admin' },
+  { to: '/audit', label: 'Audit log', icon: 'audit', role: 'admin' },
 ]
+const nav = computed(() => allNav.filter((n) => !n.role || can(n.role)))
+const role = computed(() => status.value?.role || '')
 </script>
 
 <template>
@@ -67,6 +77,7 @@ const nav = [
             <span class="dot" :class="live.connected ? 'ok' : 'off'" />{{ live.connected ? 'Live' : 'Reconnecting…' }}
           </span>
           <span class="login muted">@{{ status?.user }}</span>
+          <span v-if="role" class="badge muted" :title="roleHelp[role]">{{ role }}</span>
           <button class="small" @click="logout">Sign out</button>
         </div>
       </div>

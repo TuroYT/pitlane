@@ -22,6 +22,8 @@ const paths: Record<string, string> = {
   external: '<path d="M9.25 2.25h4.5v4.5M13.5 2.5 7.5 8.5M11.75 9.5v3.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1H6.5"/>',
   logs: '<rect x="1.75" y="2.25" width="12.5" height="11.5" rx="1.5"/><path d="m4.5 6 2 2-2 2M8.5 10.5h3"/>',
   event: '<path d="M8.75 1.75 3.5 9h4l-.75 5.25L12 7H8z"/>',
+  users: '<circle cx="6" cy="5.25" r="2.5"/><path d="M1.75 13.25a4.25 4.25 0 0 1 8.5 0M10.75 3.1a2.5 2.5 0 0 1 0 4.3M12 9.6a4.25 4.25 0 0 1 2.25 3.65"/>',
+  audit: '<path d="M4.25 1.75h5.5l3 3v9.5h-8.5z"/><path d="M9.75 1.75v3h3M6.5 8h3.5M6.5 10.75h3.5"/>',
   slot: '<rect x="2.25" y="3.25" width="11.5" height="9.5" rx="1.5"/><path d="M5 6.25h6M5 9.25h3.5"/>',
 }
 
