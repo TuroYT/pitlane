@@ -197,9 +197,10 @@ type Orphan struct {
 	TargetID int64
 	Owner    string // GitHub owner of the target
 	Strict   bool   // strict isolation (also for containers without the label)
-	// Untrusted is set when the target label is missing or invalid: the
-	// container belongs to no known target and its slot is released as
-	// strict (rebuilt). Slot is -1 when the slot label is missing or invalid.
+	// Untrusted is set when the target or owner label is missing or
+	// invalid: the container belongs to no known target, or its slot's data
+	// to no known owner, and its slot is released as strict (rebuilt). Slot
+	// is -1 when the slot label is missing or invalid.
 	Untrusted bool
 	Running   bool
 	Created   time.Time
@@ -234,15 +235,16 @@ func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
 // adoptContainer marks the slot of a runner container left by a previous
 // run as busy and returns it. A strict runner's slot gets the strict owner
 // back (the label carries the target's real owner): nobody else may get the
-// slot without a rebuild. A container whose target label is missing or
-// invalid is untrusted and its slot strict the same way.
+// slot without a rebuild. A container whose target or owner label is missing
+// or invalid is untrusted and its slot strict the same way: a slot with no
+// owner would otherwise look empty and go to any owner without a wipe.
 func (p *Pool) adoptContainer(id string, labels map[string]string, state string, created int64) Orphan {
 	slotIdx, err := strconv.Atoi(labels[LabelSlot])
 	if err != nil || slotIdx < 0 {
 		slotIdx = -1
 	}
 	tid, err := strconv.ParseInt(labels[LabelTarget], 10, 64)
-	untrusted := err != nil || tid <= 0
+	untrusted := err != nil || tid <= 0 || labels[LabelOwner] == ""
 	if untrusted {
 		tid = 0
 	}
