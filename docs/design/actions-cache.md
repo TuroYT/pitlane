@@ -194,8 +194,10 @@ already recommends the slot's local build cache instead.
   Each owner may use a share of it (default 50 %, at least one byte):
   reservations over the owner's remaining share are refused, and a commit
   that puts the owner over its share evicts its own least recently used
-  entries (never the one just saved) before the global LRU runs, so one
-  owner's jobs cannot push out another owner's entries. Plus a hook in the low-disk pruning (`internal/pool/disk.go`): after idle
+  entries (never the one just saved) before the global LRU runs. One owner
+  thus cannot grow past its share at the others' expense; when several
+  owners within their shares fill the cache together, the global LRU still
+  evicts across owners. Plus a hook in the low-disk pruning (`internal/pool/disk.go`): after idle
   slots' build caches and images, before per-owner cache volumes.
 
 ### Isolation and authentication

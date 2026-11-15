@@ -208,10 +208,12 @@ type Pool struct {
 
 	cache     CacheBroker // actions cache server, nil when not serving
 	cachePort int
-	selfOnce  sync.Once
-	self      *selfInfo  // container Pitlane runs in (nil on the host)
-	fwdMu     sync.Mutex // cache forwarder creation
-	shimExe   string     // binary installed as the Node shim; "" = the running Pitlane
+	// cacheLimitsMu serializes applyCacheLimits.
+	cacheLimitsMu sync.Mutex
+	selfOnce      sync.Once
+	self          *selfInfo  // container Pitlane runs in (nil on the host)
+	fwdMu         sync.Mutex // cache forwarder creation
+	shimExe       string     // binary installed as the Node shim; "" = the running Pitlane
 
 	sops slotOps // nil: Docker (tests set a fake)
 

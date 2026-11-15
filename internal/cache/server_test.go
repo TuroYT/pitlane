@@ -333,8 +333,7 @@ func TestRevokeDropsUploads(t *testing.T) {
 
 func TestUploadChecks(t *testing.T) {
 	s, ts := newServer(t, "")
-	s.SetOwnerShare(100) // the global limit only (see TestOwnerShare)
-	s.SetLimit(100)
+	s.SetLimits(100, 100) // the global limit only (see TestOwnerShare)
 	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
 	if code := c.save("big", "v", make([]byte, 101)); code != http.StatusBadRequest {
 		t.Fatalf("over the limit: %d", code)
@@ -375,7 +374,7 @@ func TestUploadChecks(t *testing.T) {
 func TestEvictionLRU(t *testing.T) {
 	dir := t.TempDir()
 	s, ts := newServer(t, dir)
-	s.SetOwnerShare(100) // one owner: the global LRU only (see TestOwnerShare)
+	s.SetLimits(0, 100) // one owner: the global LRU only (see TestOwnerShare)
 	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
 	for _, k := range []string{"a", "b", "c"} {
 		if c.save(k, "v", make([]byte, 40)) != http.StatusNoContent {
@@ -527,7 +526,7 @@ func TestOwnerShare(t *testing.T) {
 
 	// Lowering the share evicts each owner down to it, least recently
 	// used first.
-	s.SetOwnerShare(25)
+	s.SetLimits(100, 25)
 	if got, _ := other.restore("v", "o2"); got != "o2" {
 		t.Fatal("o2 evicted")
 	}
@@ -553,5 +552,22 @@ func TestOwnerLimit(t *testing.T) {
 		if got := s.ownerLimitLocked(); got != tc.want {
 			t.Errorf("%d bytes at %d%%: %d, want %d", tc.limit, tc.pct, got, tc.want)
 		}
+	}
+}
+
+// Changing the size and the share together evicts only for the final
+// combination.
+func TestSetLimitsAtOnce(t *testing.T) {
+	s, ts := newServer(t, "")
+	s.SetLimits(100, 100)
+	c := newClient(t, s, ts, "pitlane-a", Identity{Owner: "acme"}, "acme/api")
+	for _, k := range []string{"a", "b"} {
+		if code := c.save(k, "v", make([]byte, 40)); code != http.StatusNoContent {
+			t.Fatalf("save %s: %d", k, code)
+		}
+	}
+	s.SetLimits(200, 50) // 100 bytes per owner: both entries fit
+	if st := s.Stats(); st.Entries != 2 || st.Evictions != 0 {
+		t.Fatalf("stats: %+v", st)
 	}
 }

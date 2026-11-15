@@ -43,9 +43,7 @@ func (b *fakeBroker) Revoke(runner string) {
 	b.revoked = append(b.revoked, runner)
 }
 
-func (b *fakeBroker) SetLimit(n int64) { b.limit = n }
-
-func (b *fakeBroker) SetOwnerShare(percent int) { b.ownerPct = percent }
+func (b *fakeBroker) SetLimits(n int64, ownerPercent int) { b.limit, b.ownerPct = n, ownerPercent }
 
 func (b *fakeBroker) Dir() string { return "/cache" }
 

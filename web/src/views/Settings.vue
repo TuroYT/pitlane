@@ -152,7 +152,7 @@ async function save(clearMetricsToken = false) {
         <input v-model.number="s.actionsCacheOwnerPct" type="number" min="1" max="100" />
         <small>
           The most one user or organization may store, uploads in progress included. Beyond it, its own least recently
-          used entries go first, so one owner cannot push out the others' caches. 100 turns the share off.
+          used entries go first, so one owner cannot grow past its share at the others' expense. 100 turns the share off.
         </small>
       </label>
       <label class="inline">

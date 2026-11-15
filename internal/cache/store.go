@@ -189,6 +189,9 @@ func (s *Server) evictOwnerLocked(owner string, limit int64, keep int64) {
 			stored += e.Size
 		}
 	}
+	if stored <= limit {
+		return
+	}
 	for _, e := range s.lruLocked() {
 		if stored <= limit {
 			return
@@ -243,12 +246,13 @@ func (s *Server) SetLimit(bytes int64) {
 	s.enforceLimitsLocked(0)
 }
 
-// SetOwnerShare sets the share of the limit one owner may use, in percent
-// (1 to 100), and evicts down to it.
-func (s *Server) SetOwnerShare(percent int) {
+// SetLimits sets the maximum stored bytes (0 = no limit) and the share of
+// it one owner may use, in percent (1 to 100), then evicts down to both at
+// once (no eviction for an intermediate combination).
+func (s *Server) SetLimits(bytes int64, ownerPercent int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ownerPct = min(100, max(1, percent))
+	s.limit, s.ownerPct = bytes, min(100, max(1, ownerPercent))
 	s.enforceLimitsLocked(0)
 }
 
