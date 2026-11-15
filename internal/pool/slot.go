@@ -127,13 +127,7 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 			s.retire = false
 			continue
 		}
-		st, known := p.restored[i]
-		if !known {
-			// Its volumes may hold data from an owner we do not know about:
-			// fail closed, the first job wipes it.
-			st.Owner = UnknownOwner
-		}
-		p.slots[i] = &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID}}
+		p.slots[i] = p.restoredSlotLocked(i)
 		toStart = append(toStart, i)
 	}
 	var toRemove []int
@@ -175,6 +169,19 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// restoredSlotLocked builds a new slot from its persisted state. Callers
+// hold p.mu.
+func (p *Pool) restoredSlotLocked(i int) *slot {
+	st, known := p.restored[i]
+	if !known {
+		// Its volumes may hold data from an owner we do not know about: fail
+		// closed, the first job wipes it (and it counts as least recently
+		// used).
+		st = persistedSlot{Owner: UnknownOwner}
+	}
+	return &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID, LastUsed: st.LastUsed}}
 }
 
 func slotName(i int) string    { return fmt.Sprintf("pitlane-slot-%d", i) }

@@ -25,60 +25,47 @@ type Lease struct {
 	Strict   bool   // strict isolation: fresh caches, slot wiped before and after
 	Runner   string // set by the scaler once the runner name is known
 	wipe     bool   // the slot last served another owner: Prepare wipes it
+
+	prevOwner string // owner of a slot to wipe, for the log and metrics
+	prevKeeps int    // other warm slots that owner keeps
+	prevUsed  int64  // when the wiped slot was last released
 }
 
 // Acquire reserves a free slot, preferring one that already ran jobs for the
-// same target, then the same owner (warmest cache). It returns false when
-// every slot is busy.
+// same target, then the same owner (warmest cache); when a wipe cannot be
+// avoided it takes the slot whose cache loss costs least (see chooseLocked).
+// It returns false when every slot is busy, or while a strict job waits for
+// a slot being cleaned after another strict job.
 func (p *Pool) Acquire(ctx context.Context, owner string, targetID int64, strict bool) (Lease, bool) {
 	if strict {
 		owner = StrictOwner
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.qemuBusy {
-		p.mu.Unlock()
 		return Lease{}, false
 	}
-	var best *slot
-	score := -1
-	for _, s := range p.slots {
-		if s.Status != "ready" || s.retire || s.dirty {
-			continue
+	c, deferred := p.chooseLocked(owner, targetID, strict)
+	if c.s == nil {
+		if deferred {
+			p.log.Debug("strict job waits for a slot being cleaned rather than wipe a warm one")
 		}
-		sc := 0
-		switch {
-		case strict && s.Owner == "":
-			sc = 3 // already clean: no wipe needed
-		case strict:
-			sc = 0
-		case s.TargetID == targetID:
-			sc = 3
-		case s.Owner == owner:
-			sc = 2
-		case s.Owner == "":
-			sc = 1
-		}
-		if sc > score || (sc == score && s.Index < best.Index) {
-			best, score = s, sc
-		}
-	}
-	if best == nil {
-		p.mu.Unlock()
 		return Lease{}, false
 	}
-	// The shared scope lets owners share caches, but a slot left by a strict
-	// job, or whose last owner is unknown (it may have been a strict job), is
-	// always wiped.
-	sticky := best.Owner == StrictOwner || best.Owner == UnknownOwner
-	needWipe := (p.cfg.CacheScope == "owner" || strict || sticky) && best.Owner != "" && (best.Owner != owner || strict)
+	if strict {
+		p.strictWaitSince = time.Time{}
+	}
+	best := c.s
+	l := Lease{Slot: best.Index, Owner: owner, TargetID: targetID, Strict: strict, wipe: c.wipe}
 	best.Status, best.Since = "busy", time.Now().Unix()
-	if !needWipe && (best.Owner != owner || best.TargetID != targetID) {
+	if c.wipe {
+		best.wiping = true
+		l.prevOwner, l.prevKeeps, l.prevUsed = best.Owner, c.keeps, best.LastUsed
+	} else if best.Owner != owner || best.TargetID != targetID {
 		best.Owner, best.TargetID = owner, targetID
 		p.saveLocked()
 	}
-	idx := best.Index
-	p.mu.Unlock()
-	return Lease{Slot: idx, Owner: owner, TargetID: targetID, Strict: strict, wipe: needWipe}, true
+	return l, true
 }
 
 // ErrSlotRebuilding means Prepare failed to wipe the slot; it is left dirty
@@ -90,7 +77,7 @@ var ErrSlotRebuilding = errors.New("slot wipe failed, slot is being rebuilt")
 func (p *Pool) wipeFailed(i int, err error) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
-		s.dirty = true
+		s.dirty, s.wiping = true, false
 	}
 	p.mu.Unlock()
 	p.setStatus(i, "error", "wipe failed, slot will be rebuilt: "+err.Error())
@@ -105,7 +92,23 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 		// emptied the previous job's workspace (failed cleanup, Pitlane
 		// stopped between the job's end and its release). The previous
 		// owner's caches are useless to the new one anyway.
-		p.log.Info("slot changes owner, rebuilding it", "slot", l.Slot, "owner", l.Owner)
+		reason := wipeReason(l.prevOwner, l.Strict)
+		args := []any{"slot", l.Slot, "previous_owner", l.prevOwner, "owner", l.Owner, "strict", l.Strict, "reason", reason}
+		if !worthless(l.prevOwner) {
+			// A warm cache is lost: say why this slot was the cheapest.
+			idle := "never"
+			if l.prevUsed > 0 {
+				idle = time.Since(time.Unix(l.prevUsed, 0)).Round(time.Second).String()
+			}
+			args = append(args, "previous_owner_other_slots", l.prevKeeps, "idle_for", idle)
+		}
+		p.log.Info("rebuilding slot before its job", args...)
+		p.mu.Lock()
+		if p.wipes == nil {
+			p.wipes = map[string]int64{}
+		}
+		p.wipes[reason]++
+		p.mu.Unlock()
 		if err := p.ops().wipe(ctx, l.Slot); err != nil {
 			// Never hand out a slot that may still hold another owner's data.
 			p.log.Error("slot wipe failed, it will be rebuilt", "slot", l.Slot, "error", err)
@@ -114,7 +117,7 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 		}
 		p.mu.Lock()
 		if s, ok := p.slots[l.Slot]; ok {
-			s.Owner, s.TargetID = l.Owner, l.TargetID
+			s.Owner, s.TargetID, s.wiping = l.Owner, l.TargetID, false
 		}
 		delete(p.externals, l.Slot) // re-copied from the image below
 		p.saveLocked()
@@ -164,7 +167,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	}
 	p.mu.Lock()
 	if s, ok := p.slots[l.Slot]; ok {
-		s.Owner, s.TargetID = "", 0
+		s.Owner, s.TargetID, s.LastUsed = "", 0, p.clock().Unix()
 	}
 	delete(p.externals, l.Slot) // the privileged job could have altered it
 	p.saveLocked()
@@ -266,5 +269,17 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 			return
 		}
 	}
+	p.markUsed(l.Slot)
 	p.setStatus(l.Slot, "ready", "")
+}
+
+// markUsed records (and persists) that a slot just finished a job: the least
+// recently used slot is the first sacrificed when a wipe is unavoidable.
+func (p *Pool) markUsed(i int) {
+	p.mu.Lock()
+	if s, ok := p.slots[i]; ok {
+		s.LastUsed = p.clock().Unix()
+		p.saveLocked()
+	}
+	p.mu.Unlock()
 }
