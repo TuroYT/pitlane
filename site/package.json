@@ -1,0 +1,19 @@
+{
+  "name": "pitlane-docs",
+  "private": true,
+  "type": "module",
+  "description": "Pitlane documentation site, built from ../docs with VitePress.",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4",
+    "vue": "3.5.44"
+  }
+}

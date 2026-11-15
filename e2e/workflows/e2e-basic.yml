@@ -1,0 +1,154 @@
+# Pitlane e2e (a): a plain job, env and outputs, and real JavaScript actions
+# with hyphenated inputs. A runner that loses `INPUT_FETCH-DEPTH`-style
+# variables (as a POSIX sh shim in front of node does) silently falls back to
+# each input's default; every assertion below would catch that.
+name: e2e-basic
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  E2E_WORKFLOW_VAR: from-workflow
+  E2E_OVERRIDE: workflow
+
+jobs:
+  basic:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    env:
+      E2E_JOB_VAR: from-job
+      E2E_OVERRIDE: job
+    outputs:
+      greeting: ${{ steps.out.outputs.greeting }}
+      node: ${{ steps.node.outputs.version }}
+    steps:
+      - name: Runner info
+        run: |
+          echo "runner=$RUNNER_NAME slot=${PITLANE_SLOT:-?} os=$RUNNER_OS arch=$RUNNER_ARCH cpus=$(nproc)"
+          echo "workspace=$GITHUB_WORKSPACE"
+
+      - name: checkout with fetch-depth 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: fetch-depth was honoured
+        run: |
+          set -eu
+          count=$(git rev-list --count HEAD)
+          shallow=$(git rev-parse --is-shallow-repository)
+          echo "commits=$count shallow=$shallow"
+          # The default (fetch-depth: 1) gives 1 commit.
+          test "$count" = 2
+          test "$shallow" = true
+          test "$(git config --get-all http.https://github.com/.extraheader || true)" = ""
+
+      - name: env precedence
+        env:
+          E2E_OVERRIDE: step
+        run: |
+          set -eu
+          test "$E2E_WORKFLOW_VAR" = from-workflow
+          test "$E2E_JOB_VAR" = from-job
+          test "$E2E_OVERRIDE" = step
+          test "$GITHUB_REPOSITORY" = "${{ github.repository }}"
+          test -n "$GITHUB_RUN_ID"
+          test "$RUNNER_OS" = Linux
+
+      - name: write GITHUB_ENV, GITHUB_PATH and outputs
+        id: out
+        run: |
+          set -eu
+          echo "E2E_FROM_ENV_FILE=hello env" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/e2e-bin"
+          printf '#!/bin/sh\necho e2e-tool-ok\n' > "$RUNNER_TEMP/e2e-bin/e2e-tool"
+          chmod +x "$RUNNER_TEMP/e2e-bin/e2e-tool"
+          echo "$RUNNER_TEMP/e2e-bin" >> "$GITHUB_PATH"
+          echo "greeting=hello output" >> "$GITHUB_OUTPUT"
+          {
+            echo "multi<<E2E_EOF"
+            printf 'line one\nline two\n'
+            echo "E2E_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "### e2e-basic" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: read them back
+        env:
+          MULTI: ${{ steps.out.outputs.multi }}
+        run: |
+          set -eu
+          test "$E2E_FROM_ENV_FILE" = "hello env"
+          test "$(e2e-tool)" = e2e-tool-ok
+          test "${{ steps.out.outputs.greeting }}" = "hello output"
+          test "$(printf '%s' "$MULTI" | wc -l)" = 1
+          test "$(printf '%s' "$MULTI" | tail -n1)" = "line two"
+
+      - name: setup-node with an exact node-version
+        id: setup
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.11.0
+
+      - name: node-version was honoured
+        id: node
+        run: |
+          set -eu
+          echo "node=$(node --version) (setup-node output: ${{ steps.setup.outputs.node-version }})"
+          # The runner image ships another Node version: a dropped input
+          # would leave that one first on PATH.
+          test "$(node --version)" = v22.11.0
+          test "${{ steps.setup.outputs.node-version }}" = v22.11.0
+          echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
+
+      - name: prepare a directory with hidden files
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/hidden/.config"
+          echo visible > "$RUNNER_TEMP/hidden/visible.txt"
+          echo secret-ish > "$RUNNER_TEMP/hidden/.dotfile"
+          echo nested > "$RUNNER_TEMP/hidden/.config/app.conf"
+
+      - name: upload-artifact with include-hidden-files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-hidden-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hidden
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  check:
+    needs: basic
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 10
+    steps:
+      - name: job outputs crossed jobs
+        run: |
+          set -eu
+          test "${{ needs.basic.outputs.greeting }}" = "hello output"
+          test "${{ needs.basic.outputs.node }}" = v22.11.0
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-hidden-${{ github.run_attempt }}
+          path: hidden
+
+      - name: hidden files were uploaded
+        run: |
+          set -eu
+          find hidden -type f | sort
+          test -f hidden/visible.txt
+          # Without include-hidden-files: true these two are left out.
+          test "$(cat hidden/.dotfile)" = secret-ish
+          test "$(cat hidden/.config/app.conf)" = nested

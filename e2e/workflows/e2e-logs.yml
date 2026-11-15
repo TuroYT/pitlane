@@ -1,0 +1,66 @@
+# Pitlane e2e (h): a job that writes a large log (about 20 MB in 200,000
+# lines), and a failing step with continue-on-error. The job must still
+# succeed, with the failure visible in the step's outcome.
+name: e2e-logs
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  logs:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    steps:
+      - name: large log
+        run: |
+          set -eu
+          start=$(date +%s)
+          pad=$(printf '%080d' 0 | tr 0 x)
+          for i in $(seq 1 200000); do printf 'log line %06d %s\n' "$i" "$pad"; done
+          echo "::notice title=e2e-timing::200k log lines written in $(( $(date +%s) - start ))s"
+
+      - name: log groups and masking
+        run: |
+          echo "::group::a collapsed group"
+          seq 1 1000
+          echo "::endgroup::"
+          value="e2e-mask-${{ github.run_id }}"
+          echo "::add-mask::$value"
+          echo "this value must show as *** in the log: $value"
+
+      - name: failing step that is allowed to fail
+        id: allowed
+        continue-on-error: true
+        run: |
+          echo "about to fail on purpose"
+          exit 3
+
+      - name: the failure was recorded and ignored
+        run: |
+          set -eu
+          echo "outcome=${{ steps.allowed.outcome }} conclusion=${{ steps.allowed.conclusion }}"
+          test "${{ steps.allowed.outcome }}" = failure
+          test "${{ steps.allowed.conclusion }}" = success
+
+      - name: skipped when nothing failed
+        id: skipped
+        if: failure()
+        run: exit 1
+
+      - name: always() steps run
+        if: always()
+        run: |
+          set -eu
+          test "${{ steps.skipped.outcome }}" = skipped
+          echo "job status: ${{ job.status }}"
+          test "${{ job.status }}" = success

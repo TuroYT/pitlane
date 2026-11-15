@@ -1,0 +1,50 @@
+# Pitlane e2e (i): a linux/arm64 image built on an amd64 runner through QEMU.
+# setup-qemu-action registers binfmt handlers from a privileged container in
+# the slot's Docker daemon; setup-buildx-action creates a docker-container
+# builder for the cross-platform build.
+name: e2e-multiarch
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  arm64:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: build linux/arm64
+        run: |
+          set -eu
+          start=$(date +%s)
+          docker buildx build --progress=plain --platform linux/arm64 --load -t pitlane-e2e:arm64 e2e/fixtures/docker
+          echo "::notice title=e2e-timing::arm64 build under QEMU: $(( $(date +%s) - start ))s"
+
+      - name: the image is arm64 and runs under emulation
+        run: |
+          set -eu
+          test "$(docker image inspect -f '{{.Architecture}}' pitlane-e2e:arm64)" = arm64
+          out=$(docker run --rm --platform linux/arm64 pitlane-e2e:arm64)
+          echo "$out"
+          echo "$out" | grep -qx 'arch=aarch64'

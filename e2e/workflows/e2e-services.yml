@@ -1,0 +1,76 @@
+# Pitlane e2e (b): service containers. Postgres and Redis start in the slot's
+# Docker daemon, wait for their health checks, and are reached on localhost
+# through the published ports, like on a GitHub-hosted runner.
+name: e2e-services
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: runs-on label of the Pitlane instance under test
+        default: pitlane
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  services:
+    runs-on: ${{ inputs.label || 'pitlane' }}
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: e2e
+          POSTGRES_PASSWORD: e2e
+          POSTGRES_DB: e2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U e2e -d e2e"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - name: services are healthy
+        run: |
+          set -eu
+          docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
+          for id in ${{ job.services.postgres.id }} ${{ job.services.redis.id }}; do
+            status=$(docker inspect -f '{{.Name}} {{.State.Health.Status}}' "$id")
+            echo "$status"
+            test "${status##* }" = healthy
+          done
+
+      - name: postgres round trip
+        env:
+          PGPASSWORD: e2e
+        run: |
+          set -eu
+          psql() { command psql -h localhost -p ${{ job.services.postgres.ports['5432'] }} -U e2e -d e2e -v ON_ERROR_STOP=1 -At "$@"; }
+          psql -c 'create table t (id serial primary key, v text)'
+          psql -c "insert into t (v) select 'row ' || g from generate_series(1, 1000) g"
+          test "$(psql -c 'select count(*) from t')" = 1000
+          psql -c 'select version()'
+
+      - name: redis round trip
+        run: |
+          set -eu
+          r() { redis-cli -h localhost -p ${{ job.services.redis.ports['6379'] }} "$@"; }
+          test "$(r ping)" = PONG
+          r set e2e:key "value-${{ github.run_id }}"
+          test "$(r get e2e:key)" = "value-${{ github.run_id }}"
+          test "$(r incrby e2e:counter 41)" -ge 41
+
+      - name: a step container on the job network
+        run: |
+          set -eu
+          # Containers started by steps join the host network of the slot,
+          # which is where the published service ports live.
+          docker run --rm --network host redis:7-alpine redis-cli -h localhost ping | grep -qx PONG

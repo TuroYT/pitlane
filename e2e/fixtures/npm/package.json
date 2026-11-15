@@ -1,0 +1,11 @@
+{
+  "name": "pitlane-e2e-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependencies for the Pitlane e2e cache scenario.",
+  "dependencies": {
+    "express": "4.21.2",
+    "lodash": "4.17.21",
+    "zod": "3.24.1"
+  }
+}
