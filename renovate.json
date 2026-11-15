@@ -123,6 +123,16 @@
         "site/**"
       ],
       "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "vue-tsc 3.x does not support TypeScript 7 (ERR_PACKAGE_PATH_NOT_EXPORTED on ./lib/tsc): wait until it does.",
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
     }
   ]
 }
