@@ -54,13 +54,19 @@ export interface RunnerState {
   jobName: string
   repo: string
   startedAt: number
+  /** Memory reserved for its job (bytes). */
+  predicted: number
 }
+
+/** Why a target's jobs wait. */
+export type WaitReason = 'slot' | 'memory' | 'strict_slot'
 
 export interface TargetState extends Target {
   status: string
   error?: string
   desired: number
   waiting: number
+  waitReason?: WaitReason
   runners: RunnerState[]
 }
 
@@ -72,6 +78,24 @@ export interface Slot {
   runner: string
   error?: string
   since: number
+  /** Reserved for strict jobs. */
+  strictOnly?: boolean
+  /** Memory reserved for the running job and what it uses now (bytes). */
+  predicted?: number
+  actual?: number
+}
+
+/** Memory admission: jobs start only when their predicted memory fits. */
+export interface MemoryState {
+  enabled: boolean
+  total: number
+  reserve: number
+  budget: number
+  predicted: number
+  actual: number
+  committed: number
+  waitingTarget?: number
+  waitingBytes?: number
 }
 
 export interface Host {
@@ -87,6 +111,7 @@ export interface Snapshot {
   targets: TargetState[]
   slots: Slot[]
   host: Host
+  memory?: MemoryState
   time: number
 }
 
@@ -167,6 +192,12 @@ export interface Settings {
   actionsCacheGb: number
   // Read-only; missing when the cache listener is not running.
   actionsCacheStats?: ActionsCacheStats
+  memoryAdmission: boolean
+  memoryReserveMb: number
+  /** -1: one slot while a strict target is enabled. */
+  strictSlots: number
+  // Read-only: slots reserved for strict jobs right now.
+  strictSlotsActive: number
 }
 
 export interface ActionsCacheStats {
@@ -349,6 +380,25 @@ export function bytes(n: number): string {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
   return `${(n / 1024 ** i).toFixed(i >= 3 ? 1 : 0)} ${u[i]}`
+}
+
+export const waitLabel: Record<WaitReason, string> = {
+  slot: 'waiting for a slot',
+  memory: 'waiting for memory',
+  strict_slot: 'waiting for a strict slot',
+}
+
+export const waitTitle: Record<WaitReason, string> = {
+  slot: 'Every slot is busy.',
+  memory: 'A slot is free, but the memory predicted for this job does not fit next to the running jobs. It starts when one of them finishes.',
+  strict_slot: 'Strict jobs only use the slots reserved for them, or an empty slot, so they never wipe a warm cache. One will be free shortly.',
+}
+
+/** Why a job that has not started yet waits ('' when unknown or not waiting). */
+export function jobWait(j: { targetId: number; startedAt: number; finishedAt: number }): WaitReason | '' {
+  if (j.startedAt || j.finishedAt) return ''
+  const t = live.snap?.targets.find((x) => x.id === j.targetId)
+  return t && t.waiting > 0 ? (t.waitReason ?? 'slot') : ''
 }
 
 export function targetName(t: { kind: string; owner: string; repo?: string }) {

@@ -38,7 +38,12 @@ type fakePool struct {
 	signal    chan struct{}
 	nextID    int
 	freeDisks int
-	onRemove  func(id string) // called by Remove, outside mu
+	// memory admission: budget 0 = off; reserved by leased slot
+	budget       int64
+	reserved     map[int]int64
+	requests     []pool.Request
+	strictDemand bool
+	onRemove     func(id string) // called by Remove, outside mu
 }
 
 func newFakePool(free int) *fakePool {
@@ -65,19 +70,49 @@ func (f *fakePool) Released() <-chan struct{} { return f.signal }
 
 func (f *fakePool) MeasureJob(context.Context, string, int) *pool.Meter { return nil }
 
-func (f *fakePool) Acquire(_ context.Context, owner string, targetID int64, strict bool) (pool.Lease, bool) {
+func (f *fakePool) Admit(_ context.Context, r pool.Request) (pool.Lease, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests = append(f.requests, r)
 	if f.free <= 0 {
-		return pool.Lease{}, false
+		return pool.Lease{}, pool.WaitSlot
+	}
+	if f.budget > 0 {
+		used := int64(0)
+		for _, v := range f.reserved {
+			used += v
+		}
+		if len(f.reserved) > 0 && used+r.Predicted > f.budget {
+			return pool.Lease{}, pool.WaitMemory
+		}
 	}
 	f.free--
-	if strict {
+	owner := r.Owner
+	if r.Strict {
 		owner = pool.StrictOwner
 	}
-	l := pool.Lease{Slot: len(f.acquired), Owner: owner, TargetID: targetID, Strict: strict}
+	l := pool.Lease{Slot: len(f.acquired), Owner: owner, TargetID: r.TargetID, Strict: r.Strict, Predicted: r.Predicted}
 	f.acquired = append(f.acquired, l)
-	return l, true
+	if f.reserved == nil {
+		f.reserved = map[int]int64{}
+	}
+	f.reserved[l.Slot] = r.Predicted
+	return l, ""
+}
+
+func (f *fakePool) SetPrediction(slot int, bytes int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reserved == nil {
+		f.reserved = map[int]int64{}
+	}
+	f.reserved[slot] = bytes
+}
+
+func (f *fakePool) SetStrictDemand(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.strictDemand = on
 }
 
 func (f *fakePool) Prepare(_ context.Context, l pool.Lease) error {
@@ -91,6 +126,7 @@ func (f *fakePool) Release(_ context.Context, l pool.Lease) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.released = append(f.released, l)
+	delete(f.reserved, l.Slot)
 	f.free++
 }
 

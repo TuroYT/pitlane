@@ -4,6 +4,8 @@
 - Check the label: `runs-on: pitlane` must match the label shown in **Repositories**.
 - Check the target status in **Repositories**. `error` shows the GitHub error, often that the App is not installed on that repository.
 - All slots busy? The dashboard shows jobs waiting for a slot. Raise **Parallel jobs**.
+- `waiting for memory`: a slot is free but the job's predicted memory does not fit next to the running jobs (see [Scheduling](how-it-works.md#scheduling)). It starts when one of them finishes. Add RAM, lower the **Memory reserve**, or turn memory admission off if the predictions are too high (the dashboard shows each slot's prediction next to its real use).
+- `waiting for a strict slot`: a strict job (public repository) waits for a slot reserved for strict jobs or an empty one instead of wiping a warm cache. Raise **Reserved slots for strict jobs**, or set it to 0 to let strict jobs take any slot.
 
 **A slot is in `error`.**
 Usually privileged containers are not allowed. On Proxmox, the LXC needs

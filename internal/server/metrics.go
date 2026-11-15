@@ -105,6 +105,7 @@ type metricsData struct {
 	ActionsCache *cache.Stats
 	// SlotWipes counts slot rebuilds before a job since start, by reason.
 	SlotWipes map[string]int64
+	Memory    pool.MemoryState
 }
 
 const metricsWindow = 24 * time.Hour
@@ -117,7 +118,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes()}
+	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes(), Memory: s.pool.Memory()}
 	err := s.pool.Ping(ctx)
 	d.DockerUp = err == nil
 	if s.mgr != nil {
@@ -254,10 +255,29 @@ func writeMetrics(w io.Writer, d metricsData) {
 		p.sample("pitlane_runners", []string{"target", name, "label", t.ScaleSetName, "state", "busy"}, float64(busy))
 		p.sample("pitlane_runners", []string{"target", name, "label", t.ScaleSetName, "state", "idle"}, float64(len(t.Runners)-busy))
 	}
-	p.head("pitlane_jobs_waiting", "gauge", "Jobs assigned by GitHub that wait for a free slot, per target.")
+	p.head("pitlane_jobs_waiting", "gauge", "Jobs assigned by GitHub that wait, per target and reason (slot, memory, strict_slot).")
 	for _, t := range d.Targets {
-		p.sample("pitlane_jobs_waiting", []string{"target", t.FullName(), "label", t.ScaleSetName}, float64(t.Waiting))
+		reason := t.WaitReason
+		if reason == "" {
+			reason = pool.WaitSlot
+		}
+		for _, r := range pool.WaitReasons {
+			n := 0
+			if r == reason {
+				n = t.Waiting
+			}
+			p.sample("pitlane_jobs_waiting", []string{"target", t.FullName(), "label", t.ScaleSetName, "reason", r}, float64(n))
+		}
 	}
+
+	p.head("pitlane_memory_budget_bytes", "gauge", "Memory jobs may use: host memory minus the reserve (0 when unknown).")
+	p.sample("pitlane_memory_budget_bytes", nil, float64(d.Memory.Budget))
+	p.head("pitlane_memory_predicted_bytes", "gauge", "Memory reserved for the running jobs by prediction.")
+	p.sample("pitlane_memory_predicted_bytes", nil, float64(d.Memory.Predicted))
+	p.head("pitlane_memory_committed_bytes", "gauge", "Memory the admission counts for the running jobs: per job the larger of its prediction and its use.")
+	p.sample("pitlane_memory_committed_bytes", nil, float64(d.Memory.Committed))
+	p.head("pitlane_memory_admission_enabled", "gauge", "1 when jobs are admitted by predicted memory.")
+	p.sample("pitlane_memory_admission_enabled", nil, boolFloat(d.Memory.Enabled))
 
 	p.head("pitlane_jobs_completed", "gauge", "Finished jobs in the job history by result (history retention applies).")
 	results := make([]string, 0, len(d.Results))

@@ -77,11 +77,14 @@ func (p *Pool) strictCleaningLocked() bool {
 }
 
 // affinity ranks a slot that needs no wipe, lower first: same target, same
-// owner, empty, then (shared scope) another owner's.
-func affinity(s *slot, owner string, targetID int64, strict bool) int {
+// owner, empty, then (shared scope) another owner's. A strict job only gets
+// empty slots here, its reserved ones first.
+func affinity(s *slot, owner string, targetID int64, strict, reserved bool) int {
 	switch {
+	case strict && reserved:
+		return 0
 	case strict:
-		return 0 // only an empty slot needs no wipe for a strict job
+		return 1 // overflow to an empty slot outside the reserved ones
 	case s.Owner == owner && s.TargetID == targetID:
 		return 0
 	case s.Owner == owner:
@@ -90,6 +93,22 @@ func affinity(s *slot, owner string, targetID int64, strict bool) int {
 		return 2
 	}
 	return 3
+}
+
+// warmer reports whether a slot that needs no wipe should be preferred to
+// the current best one of the same affinity. Among the slots of its own
+// target, a heavy job (predicted at least HeavyJobBytes) takes the most
+// recently used one, whose cache is the warmest, and a light one the least
+// recently used, leaving the warm ones to heavy jobs; a job without
+// prediction, like any other tie, takes the lowest index.
+func warmer(s, best *slot, aff int, predicted int64) bool {
+	if aff == 0 && predicted > 0 && s.LastUsed != best.LastUsed {
+		if predicted >= HeavyJobBytes {
+			return s.LastUsed > best.LastUsed
+		}
+		return s.LastUsed < best.LastUsed
+	}
+	return s.Index < best.Index
 }
 
 // sacrifice ranks a slot to wipe, lower first: a cache no one can use, then
@@ -116,20 +135,38 @@ func sacrifice(s *slot, keeps int) (tier int, lastUsed int64) {
 //     other warm slot, then any; least recently used first, then lowest
 //     index.
 //
-// Strict jobs wait (nil, deferred) rather than wipe a warm slot while a slot
-// is being rebuilt after a strict job, for at most strictWait. Callers hold
-// p.mu.
-func (p *Pool) chooseLocked(owner string, targetID int64, strict bool) (c choice, deferred bool) {
+// With slots reserved for strict jobs (StrictSlots), non-strict jobs never
+// get them, and strict jobs get them first, then overflow only to a slot
+// with no cache to lose (empty, unknown owner, left by a strict job): they
+// never wipe a warm slot outside the reserved ones and wait instead
+// (WaitStrictSlot).
+//
+// Without reserved slots, strict jobs wait (WaitStrictSlot) rather than wipe
+// a warm slot while a slot is being rebuilt after a strict job, for at most
+// strictWait. It returns the reason when no slot can be handed out. Callers
+// hold p.mu.
+func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
+	owner, targetID, strict := r.Owner, r.TargetID, r.Strict
+	reserved := p.reservedLocked()
 	var clean, dirty *slot
 	bestAff, bestTier, bestKeeps := 0, 0, 0
 	var bestUsed int64
+	skipped := false // a free slot a strict job may not wipe
 	for _, s := range p.slots {
 		if s.Status != "ready" || s.retire || s.dirty {
 			continue
 		}
+		res := reserved[s.Index]
+		if res && !strict {
+			continue
+		}
+		if strict && len(reserved) > 0 && !res && s.Owner != "" && !worthless(s.Owner) {
+			skipped = true
+			continue
+		}
 		if !p.needsWipe(s, owner, strict) {
-			a := affinity(s, owner, targetID, strict)
-			if clean == nil || a < bestAff || (a == bestAff && s.Index < clean.Index) {
+			a := affinity(s, owner, targetID, strict, res)
+			if clean == nil || a < bestAff || (a == bestAff && warmer(s, clean, a, r.Predicted)) {
 				clean, bestAff = s, a
 			}
 			continue
@@ -142,20 +179,22 @@ func (p *Pool) chooseLocked(owner string, targetID int64, strict bool) (c choice
 	}
 	switch {
 	case clean != nil:
-		return choice{s: clean}, false
+		return choice{s: clean}, ""
+	case dirty == nil && skipped:
+		return choice{}, WaitStrictSlot
 	case dirty == nil:
-		return choice{}, false
+		return choice{}, WaitSlot
 	}
-	if strict && !worthless(dirty.Owner) && p.strictCleaningLocked() {
+	if strict && len(reserved) == 0 && !worthless(dirty.Owner) && p.strictCleaningLocked() {
 		now := p.clock()
 		if p.strictWaitSince.IsZero() {
 			p.strictWaitSince = now
 		}
 		if now.Sub(p.strictWaitSince) < strictWait {
-			return choice{}, true
+			return choice{}, WaitStrictSlot
 		}
 	}
-	return choice{s: dirty, wipe: true, keeps: bestKeeps}, false
+	return choice{s: dirty, wipe: true, keeps: bestKeeps}, ""
 }
 
 // wipeReason is the metric label of a wipe before a job.

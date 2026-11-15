@@ -36,15 +36,19 @@ type CgroupUsage struct {
 	CPUSomeUsec int64 // time some tasks waited for a CPU (cpu.pressure "some")
 	IOFullUsec  int64 // time all tasks were stalled on I/O (io.pressure "full")
 	MemFullUsec int64 // time all tasks were stalled on memory (memory.pressure "full")
+	// AnonPeak is the highest anonymous memory sampled (memory.stat
+	// "anon"): what the container really needed, without the page cache
+	// that inflates a slot's memory.peak (image layers, build contexts).
+	AnonPeak int64
 }
 
 // Known reports whether anything was measured.
 func (u CgroupUsage) Known() bool {
-	return u.MemPeak >= 0 || u.CPUUsec >= 0 || u.CPUSomeUsec >= 0 || u.IOFullUsec >= 0 || u.MemFullUsec >= 0
+	return u.MemPeak >= 0 || u.CPUUsec >= 0 || u.CPUSomeUsec >= 0 || u.IOFullUsec >= 0 || u.MemFullUsec >= 0 || u.AnonPeak >= 0
 }
 
 func unknownUsage() CgroupUsage {
-	return CgroupUsage{MemPeak: -1, CPUUsec: -1, CPUSomeUsec: -1, IOFullUsec: -1, MemFullUsec: -1}
+	return CgroupUsage{MemPeak: -1, CPUUsec: -1, CPUSomeUsec: -1, IOFullUsec: -1, MemFullUsec: -1, AnonPeak: -1}
 }
 
 // JobUsage is what a job used: its runner, its slot, and how long it ran.
@@ -124,6 +128,7 @@ type cgSample struct {
 	cpuSomeUsec int64
 	ioFullUsec  int64
 	memFullUsec int64
+	anon        int64 // memory.stat "anon"
 }
 
 func readInt(file string) int64 {
@@ -186,11 +191,12 @@ func readSample(dir string) cgSample {
 		cpuSomeUsec: pressureTotal(filepath.Join(dir, "cpu.pressure"), "some"),
 		ioFullUsec:  pressureTotal(filepath.Join(dir, "io.pressure"), "full"),
 		memFullUsec: pressureTotal(filepath.Join(dir, "memory.pressure"), "full"),
+		anon:        keyedValue(filepath.Join(dir, "memory.stat"), "anon"),
 	}
 }
 
 func (s cgSample) known() bool {
-	return s.memCurrent >= 0 || s.cpuUsec >= 0 || s.cpuSomeUsec >= 0 || s.ioFullUsec >= 0 || s.memFullUsec >= 0
+	return s.memCurrent >= 0 || s.cpuUsec >= 0 || s.cpuSomeUsec >= 0 || s.ioFullUsec >= 0 || s.memFullUsec >= 0 || s.anon >= 0
 }
 
 // ------------------------------------------------------------------ tracker
@@ -202,6 +208,7 @@ type cgTracker struct {
 	last  cgSample // last successful reading
 	seen  bool     // at least one successful reading
 	max   int64    // highest memory.current seen
+	anon  int64    // highest memory.stat anon seen
 	peak  *os.File // memory.peak, when it tells the job's peak
 	peakV int64    // highest value read from peak (-1: none)
 	fresh bool     // created for the job (a runner), not a long-lived slot
@@ -215,7 +222,7 @@ type cgTracker struct {
 // through the same open file. On older kernels the write fails and the peak
 // is the highest memory.current sampled during the job.
 func newTracker(dir string, fresh bool) *cgTracker {
-	t := &cgTracker{dir: dir, max: -1, peakV: -1, fresh: fresh}
+	t := &cgTracker{dir: dir, max: -1, anon: -1, peakV: -1, fresh: fresh}
 	file := filepath.Join(dir, "memory.peak")
 	if fresh {
 		if f, err := os.Open(file); err == nil { //nolint:gosec // G304: a file of a cgroup Pitlane located
@@ -249,7 +256,7 @@ func (t *cgTracker) record(s cgSample) {
 			v   int64
 		}{
 			{&t.last.memCurrent, s.memCurrent}, {&t.last.cpuUsec, s.cpuUsec}, {&t.last.cpuSomeUsec, s.cpuSomeUsec},
-			{&t.last.ioFullUsec, s.ioFullUsec}, {&t.last.memFullUsec, s.memFullUsec},
+			{&t.last.ioFullUsec, s.ioFullUsec}, {&t.last.memFullUsec, s.memFullUsec}, {&t.last.anon, s.anon},
 		} {
 			if f.v >= 0 {
 				*f.dst = f.v
@@ -257,6 +264,7 @@ func (t *cgTracker) record(s cgSample) {
 		}
 	}
 	t.max = max(t.max, s.memCurrent)
+	t.anon = max(t.anon, s.anon)
 	if t.peak != nil {
 		buf := make([]byte, 32)
 		n, err := t.peak.ReadAt(buf, 0)
@@ -282,7 +290,7 @@ func (t *cgTracker) rebase() {
 	}
 	t.base, t.last, t.seen = s, s, true
 	if !t.fresh {
-		t.max, t.peakV = s.memCurrent, -1
+		t.max, t.anon, t.peakV = s.memCurrent, s.anon, -1
 		if t.peak != nil {
 			if _, err := t.peak.WriteAt([]byte("reset\n"), 0); err != nil {
 				_ = t.peak.Close()
@@ -313,6 +321,7 @@ func (t *cgTracker) usage() CgroupUsage {
 		return max(0, last-base)
 	}
 	u.MemPeak = max(t.peakV, t.max)
+	u.AnonPeak = t.anon
 	u.CPUUsec = delta(t.last.cpuUsec, t.base.cpuUsec)
 	u.CPUSomeUsec = delta(t.last.cpuSomeUsec, t.base.cpuSomeUsec)
 	u.IOFullUsec = delta(t.last.ioFullUsec, t.base.ioFullUsec)
@@ -388,6 +397,29 @@ func (m *Meter) Begin() {
 	}
 }
 
+// Current returns what the job uses now (bytes, 0 when unknown or nil):
+// the runner's memory.current plus the slot's anonymous memory (its
+// memory.current when anon is unknown), as of the last sample.
+func (m *Meter) Current() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	if m.runner != nil && m.runner.seen {
+		n += max(0, m.runner.last.memCurrent)
+	}
+	if m.slot != nil && m.slot.seen {
+		v := m.slot.last.anon
+		if v < 0 {
+			v = m.slot.last.memCurrent
+		}
+		n += max(0, v)
+	}
+	return n
+}
+
 func (m *Meter) sample() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -450,6 +482,15 @@ func (p *Pool) MeasureJob(ctx context.Context, runnerID string, slot int) *Meter
 		return fs.find(info.ID, pid)
 	}
 	m := newMeter(dir(runnerID), dir(slotName(slot)), UsageSampleInterval)
+	if m != nil {
+		// Admission counts what the job uses when it exceeds its prediction.
+		p.mu.Lock()
+		if p.meters == nil {
+			p.meters = map[int]*Meter{}
+		}
+		p.meters[slot] = m
+		p.mu.Unlock()
+	}
 	if m == nil {
 		p.cgroupWarn.Do(func() {
 			p.log.Info("container cgroups not readable (not cgroup v2, or Pitlane cannot see the host's /sys/fs/cgroup): per-job resource usage is not recorded")

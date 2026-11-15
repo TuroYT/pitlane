@@ -78,7 +78,23 @@ type Config struct {
 	// for non-strict jobs; ActionsCacheGB bounds what it stores.
 	ActionsCache   bool
 	ActionsCacheGB int
+	// MemoryAdmission admits a job only when the predicted memory of the
+	// running jobs plus its own fits the host's memory minus
+	// MemoryReserveMB (see admit.go).
+	MemoryAdmission bool
+	MemoryReserveMB int64
+	// StrictSlots is how many slots only strict jobs use (AutoStrictSlots:
+	// one while a strict target is enabled, else none).
+	StrictSlots int
 }
+
+// AutoStrictSlots lets the pool reserve one slot for strict jobs while a
+// strict target is enabled (SetStrictDemand), none otherwise.
+const AutoStrictSlots = -1
+
+// DefaultMemoryReserveMB is the memory kept for the host (system, Docker,
+// Pitlane, page cache) when admitting jobs.
+const DefaultMemoryReserveMB = 2048
 
 func (c *Config) defaults() {
 	if c.Slots <= 0 {
@@ -102,6 +118,12 @@ func (c *Config) defaults() {
 	if c.ActionsCacheGB <= 0 {
 		c.ActionsCacheGB = 20
 	}
+	if c.MemoryReserveMB < 0 {
+		c.MemoryReserveMB = DefaultMemoryReserveMB
+	}
+	if c.StrictSlots < AutoStrictSlots {
+		c.StrictSlots = AutoStrictSlots
+	}
 }
 
 // SlotState is a read-only snapshot of a slot.
@@ -117,6 +139,13 @@ type SlotState struct {
 	// seconds, 0 = never or unknown): the least recently used warm slot is
 	// the one sacrificed when a wipe cannot be avoided.
 	LastUsed int64 `json:"lastUsed,omitempty"`
+	// StrictOnly marks a slot reserved for strict jobs.
+	StrictOnly bool `json:"strictOnly,omitempty"`
+	// Predicted is the memory reserved for the slot's job (bytes, 0 when
+	// the slot is free), Actual what its runner and slot use now (runner
+	// memory.current plus the slot's anonymous memory, 0 when unknown).
+	Predicted int64 `json:"predicted,omitempty"`
+	Actual    int64 `json:"actual,omitempty"`
 }
 
 type slot struct {
@@ -157,6 +186,11 @@ type Pool struct {
 	qemuBusy  bool              // registration in progress: no slot is handed out
 
 	strictWaitSince time.Time        // a strict job has been waiting for a clean slot since then
+	strictDemand    bool             // a strict target is enabled (AutoStrictSlots)
+	reserved        map[int]int64    // slot -> memory reserved for its job (bytes)
+	meters          map[int]*Meter   // slot -> measurement of its running job
+	memHead         *memWaiter       // oldest request refused for memory
+	memTotal        func() int64     // nil: hostMemory (tests set a value)
 	wipes           map[string]int64 // slot wipes before a job, by reason
 	now             func() time.Time // nil: time.Now (tests set a clock)
 

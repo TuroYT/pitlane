@@ -470,11 +470,16 @@ func (p *Pool) Slots() []SlotState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]SlotState, 0, len(p.slots))
+	reserved := p.reservedLocked()
 	for i := 0; i < len(p.slots)+8; i++ {
 		if s, ok := p.slots[i]; ok {
 			st := s.SlotState
 			if s.retire {
 				st.Status = "retiring"
+			}
+			st.StrictOnly = reserved[i]
+			if res, ok := p.reserved[i]; ok {
+				st.Predicted, st.Actual = res, p.meters[i].Current()
 			}
 			out = append(out, st)
 		}

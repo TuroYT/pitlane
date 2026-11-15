@@ -14,8 +14,8 @@ func TestRecordUsage(t *testing.T) {
 	usageRetry = 10 * time.Millisecond
 	t.Cleanup(func() { usageRetry = 15 * time.Second })
 	u := pool.JobUsage{Wall: 4 * time.Second,
-		Runner: pool.CgroupUsage{MemPeak: 100, CPUUsec: 2_000_000, CPUSomeUsec: 400_000, IOFullUsec: -1, MemFullUsec: 0},
-		Slot:   pool.CgroupUsage{MemPeak: -1, CPUUsec: -1, CPUSomeUsec: -1, IOFullUsec: -1, MemFullUsec: -1}}
+		Runner: pool.CgroupUsage{MemPeak: 100, CPUUsec: 2_000_000, CPUSomeUsec: 400_000, IOFullUsec: -1, MemFullUsec: 0, AnonPeak: -1},
+		Slot:   pool.CgroupUsage{MemPeak: -1, CPUUsec: -1, CPUSomeUsec: -1, IOFullUsec: -1, MemFullUsec: -1, AnonPeak: -1}}
 
 	// Unknown usage is never written.
 	h.m.recordUsage("pitlane-x", pool.JobUsage{Runner: u.Slot, Slot: u.Slot})
