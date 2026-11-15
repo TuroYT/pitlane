@@ -362,6 +362,10 @@ func TestSignInWithOrgAndTeamRules(t *testing.T) {
 	if sess, _ := st.Session(c.Value); len(sess.Memberships) != 2 {
 		t.Fatalf("memberships %+v", sess)
 	}
+	// Memberships are only checked at sign-in: such a session is short.
+	if c.MaxAge != int(ruleSessionTTL/time.Second) {
+		t.Fatalf("rule session cookie max age %d", c.MaxAge)
+	}
 	if w := send(h, "GET", "/api/users", "", c); w.Code != http.StatusOK {
 		t.Fatalf("dave admin: %d", w.Code)
 	}

@@ -55,6 +55,15 @@ func (s *Server) setSetupToken(tok string) {
 // ------------------------------------------------------------------- auth
 
 const (
+	// sessionTTL is how long a sign-in lasts.
+	sessionTTL = 30 * 24 * time.Hour
+	// ruleSessionTTL is how long a sign-in granted by an organization or
+	// team rule lasts: its membership is only checked at sign-in, so someone
+	// who left the organization keeps access at most this long.
+	ruleSessionTTL = 12 * time.Hour
+)
+
+const (
 	sessionCookie = "pitlane_session"
 	setupCookie   = "pitlane_setup"
 	stateCookie   = "pitlane_state"
@@ -311,12 +320,16 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := randomHex(32)
+	ttl := sessionTTL
+	if len(memberships) > 0 {
+		ttl = ruleSessionTTL
+	}
 	s.log.Info("signed in", "login", login, "role", role, "rules", strings.Join(memberships, ","))
-	if err := s.store.CreateSession(token, login, 30*24*time.Hour, memberships...); err != nil {
+	if err := s.store.CreateSession(token, login, ttl, memberships...); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.setCookie(w, r, sessionCookie, token, 30*24*3600)
+	s.setCookie(w, r, sessionCookie, token, int(ttl/time.Second))
 	s.setCookie(w, r, stateCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
