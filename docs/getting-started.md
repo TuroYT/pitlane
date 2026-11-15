@@ -49,7 +49,8 @@ The App only gets the permissions needed to manage runners:
 
 Click **Install the App on GitHub**, choose the account(s) and repositories, then
 **Sign in with GitHub**. The first person to sign in becomes the administrator.
-Add more people in **Settings → Allowed GitHub users**.
+Add more people in **Users**, as admins, operators or viewers, by GitHub login or
+by organization or team (see [Users and roles](configuration.md#users-and-roles)).
 
 ## 4. Enable repositories
 

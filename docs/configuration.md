@@ -1,6 +1,7 @@
 # Configuration
 
-Most settings live in the web UI (**Settings**) and apply live, without a restart.
+Most settings live in the web UI (**Settings**, admins only) and apply live, without a restart.
+Who can sign in is set in **Users** (see [Users and roles](#users-and-roles)).
 
 ## UI settings
 
@@ -17,7 +18,6 @@ Most settings live in the web UI (**Settings**) and apply live, without a restar
 | Minimum free disk space | 20 GB | Checked after each job on the filesystem of `/var/lib/docker` (or the data directory). Below it, Pitlane prunes, until enough is free: the build cache of idle slots, then their images, then the least recently used actions cache entries, then the largest per-owner cache volumes (`pitlane-cache-*`, `pitlane-toolcache-*`) no container uses. Busy slots are never touched; what was freed is logged. `0` disables it. |
 | Runner image | `ghcr.io/turoyt/pitlane-runner:v<version>` | The runner image released with this Pitlane version: GitHub's official runner image plus build-essential, zip, jq… ([Dockerfile](../images/runner/Dockerfile)). It follows Pitlane upgrades, including when the settings page saved it; to stay on one image, give a digest (`name:tag@sha256:…`). Any image based on `ghcr.io/actions/actions-runner` works. |
 | Docker-in-Docker image | `docker:28-dind@sha256:…` | Pinned by digest ([images.go](../internal/pool/images.go)). |
-| Allowed GitHub users | first admin | Comma-separated logins. |
 | Job history | 30 days | Job records and runner logs. |
 
 ## Per repository / organization
@@ -54,6 +54,62 @@ whenever the repository list is shown:
   Pitlane, enable that repository as its own target (always strict) rather than
   opening the runner group.
 
+## Users and roles
+
+Sign-in is GitHub OAuth through Pitlane's GitHub App. Who may sign in, and what
+they may do, is set by admins in **Users**:
+
+| Role | Can |
+| --- | --- |
+| `viewer` | Read the dashboard, jobs, runner and job logs, job links, the comparison with GitHub-hosted runners and `/metrics`. Changes nothing, sees no settings, users, audit log or secret. |
+| `operator` | Everything a viewer can, plus enable or disable a repository or organization, see the update status, check for updates and pull the runner image. No other target setting, no settings, users, update install or update preferences. |
+| `admin` | Everything: targets, settings, users and rules, updates, the audit log, recreating the GitHub App. |
+
+The server checks the role on every API call (a viewer gets HTTP 403, not just a
+hidden button), reading it again each time: demoting someone takes effect on
+their next request, and removing a user ends their sessions.
+
+- **Users**: a GitHub login and a role. A user listed here gets that role,
+  whatever the rules below say. There is always at least one admin: removing or
+  demoting the last one is refused (HTTP 409).
+- **Organization and team rules**: "members of organization `acme` are viewers",
+  "members of team `acme/platform` are admins" (the team's slug). Someone who
+  is not a listed user signs in with the highest role of the rules they match.
+  Pitlane checks the memberships at sign-in only, with the user's own token
+  (GitHub App user access tokens have no OAuth scopes: they get the App's
+  permissions, limited to what the user can see):
+  - organization membership: `GET /user/memberships/orgs/{org}`, which needs the
+    App's **Members** organization permission (read-only) and the App installed
+    in that organization; otherwise Pitlane falls back to the **public**
+    membership (`GET /orgs/{org}/public_members/{login}`, no permission needed).
+    A member who keeps their membership private is then not recognized;
+  - team membership: `GET /orgs/{org}/teams/{team}/memberships/{login}`, which
+    always needs the **Members** permission and the App installed there.
+
+  The App Pitlane creates does not ask for **Members**. To use private
+  memberships or team rules, add it in the App's settings on GitHub
+  (**Permissions & events → Organization permissions → Members: Read-only**),
+  then accept the new permission on the organization's installation. A check
+  GitHub refuses or cannot answer grants nothing (Pitlane logs a warning), so
+  sign-in falls back to the other rules.
+
+  A session granted by a rule lasts **12 hours** (a listed user's lasts 30
+  days): someone who leaves the organization or team keeps access at most that
+  long, then signs in again and is checked again. Removing or demoting a rule
+  applies to its sessions at once.
+
+**Upgrading** from a version with the *Allowed GitHub users* setting: every
+login of that list becomes an admin, so nobody loses access. Pitlane keeps
+writing the admins' logins to that setting, so going back to an older version
+lets the admins in, and nobody else.
+
+**Audit log** (admins): who changed what and when, latest first: targets
+(created, changed fields with old and new values, removed), settings (changed
+values; the metrics token only as "changed" or "removed"), users and rules,
+update checks, installs, pulls and preferences, the GitHub App creation. Kept as
+long as the job history (**Job history** setting). Admin actions are also
+written to Pitlane's log.
+
 ## Automatic maintenance
 
 - **Orphan runners.** A runner container that dies before deregistering (out of memory, host reboot) leaves an offline runner on GitHub. Pitlane records the ID of every runner it registers and, at start and every 10 minutes, removes those that GitHub reports offline and not busy, that have no Pitlane container and that were registered more than 15 minutes ago. Online, busy or unknown runners are never removed. It needs the REST runner list (`administration` permission of the GitHub App, or `repo` / `admin:org` for a token); runners registered by Pitlane versions before this feature are not tracked.
@@ -61,7 +117,7 @@ whenever the repository list is shown:
 
 ## Updates
 
-**Settings → Updates** (signed-in users only; the actions are CSRF-protected like every other change). The same data is served by `GET /api/updates`; actions are `POST /api/updates/check`, `POST /api/updates/apply`, `POST /api/updates/pull-runner` and `PUT /api/updates/settings`.
+**Settings → Updates** (admins; operators see the status and can check and pull the runner image; the actions are CSRF-protected like every other change). The same data is served by `GET /api/updates`; actions are `POST /api/updates/check`, `POST /api/updates/apply`, `POST /api/updates/pull-runner` and `PUT /api/updates/settings`.
 
 **Pitlane.** Every 6 hours (and on **Check now**) Pitlane asks the GitHub API, without a token, for the releases of `TuroYT/pitlane`, and shows the latest stable release next to the running version, with a link to its release notes. If the repository is private or unreachable, the check fails with a message and nothing else changes.
 
@@ -108,7 +164,7 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | `pitlane_actions_cache_requests_total` | counter | `result` (hit, miss, save), since start |
 | `pitlane_actions_cache_evictions_total` | counter | entries evicted (size limit, low disk) since start |
 
-Access to `/metrics`: when a **metrics token** is set (Settings → Access), only `Authorization: Bearer <token>` is accepted. Without a token, signed-in users and clients connecting from the loopback address can read it. Requests carrying `X-Forwarded-For`, `X-Real-IP` or `Forwarded` never count as loopback, so a reverse proxy on the same host does not open it to everyone. With `--insecure-no-auth`, `/metrics` is open like the rest of the UI unless a token is set.
+Access to `/metrics`: when a **metrics token** is set (Settings → Access), only `Authorization: Bearer <token>` is accepted. Without a token, signed-in users (any role) and clients connecting from the loopback address can read it. Requests carrying `X-Forwarded-For`, `X-Real-IP` or `Forwarded` never count as loopback, so a reverse proxy on the same host does not open it to everyone. With `--insecure-no-auth`, `/metrics` is open like the rest of the UI unless a token is set.
 
 ```yaml
 scrape_configs:
