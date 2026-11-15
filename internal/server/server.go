@@ -69,7 +69,7 @@ type Server struct {
 	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, string, error)
 	// member replaces isMember (membership checks on GitHub) in tests.
 	member func(ctx context.Context, userToken, login, org, team string) (bool, error)
-	jobIDs sync.Map // runner name -> GitHub job ID (see handleGitHubJob)
+	jobIDs jobIDCache // runner job -> GitHub job ID (see handleGitHubJob)
 	mu     sync.Mutex
 	states map[string]time.Time // OAuth / manifest states
 }

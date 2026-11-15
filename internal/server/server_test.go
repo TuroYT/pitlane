@@ -92,7 +92,8 @@ func TestGitHubJobRedirect(t *testing.T) {
 	s := New(Config{}, st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j1", RunID: 123, Owner: "acme", Repo: "api", RunnerName: "pitlane-a", Slot: -1})
 	_ = st.UpsertJob(store.Job{TargetID: 99, JobID: "j2", RunID: 124, Owner: "acme", Repo: "api", RunnerName: "pitlane-b", Slot: -1})
-	s.jobIDs.Store("pitlane-b", int64(555))
+	s.jobIDs.put(jobKey{"pitlane-b", 124}, 555)
+	s.jobIDs.put(jobKey{"pitlane-a", 999}, 777) // another run: never used for run 123
 
 	get := func(name string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", "/api/runners/"+name+"/github", nil)
