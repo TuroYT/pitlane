@@ -742,7 +742,7 @@ func (s *Store) UpsertJob(j Job) error {
 			job_name = CASE WHEN excluded.job_name != '' THEN excluded.job_name ELSE job_name END,
 			runner_name = CASE WHEN excluded.runner_name != '' THEN excluded.runner_name ELSE runner_name END,
 			slot = CASE WHEN excluded.slot >= 0 THEN excluded.slot ELSE slot END,
-			queued_at = CASE WHEN excluded.queued_at != 0 THEN excluded.queued_at ELSE queued_at END,
+			queued_at = CASE WHEN excluded.queued_at = 0 THEN queued_at WHEN queued_at = 0 THEN excluded.queued_at ELSE MIN(queued_at, excluded.queued_at) END,
 			started_at = CASE WHEN excluded.started_at != 0 THEN excluded.started_at ELSE started_at END,
 			finished_at = CASE WHEN excluded.finished_at != 0 THEN excluded.finished_at ELSE finished_at END,
 			result = CASE WHEN excluded.result != '' THEN excluded.result ELSE result END`,
@@ -895,7 +895,11 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 
 // PruneJobs deletes jobs older than the given age.
 func (s *Store) PruneJobs(olderThan time.Duration) error {
-	_, err := s.db.Exec(`DELETE FROM jobs WHERE queued_at < ?`, time.Now().Add(-olderThan).Unix())
+	// A job's latest known date decides; a job without any date is kept
+	// (queued_at alone was 0 when GitHub sent no queue time, which deleted
+	// the whole recent history on every pass).
+	_, err := s.db.Exec(`DELETE FROM jobs WHERE MAX(queued_at, started_at, finished_at) > 0
+		AND MAX(queued_at, started_at, finished_at) < ?`, time.Now().Add(-olderThan).Unix())
 	return err
 }
 
