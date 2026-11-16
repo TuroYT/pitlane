@@ -131,8 +131,11 @@ func TestLeaseOwnerChangeMatrix(t *testing.T) {
 				if c, tl := strictVolumes("pitlane-x"); len(ops.removed) != 2 || ops.removed[0] != c || ops.removed[1] != tl {
 					t.Fatalf("throwaway caches removed: %v", ops.removed)
 				}
-				if _, ok := p.externals[0]; ok {
-					t.Fatal("externals must be copied again after a strict job")
+				// Copied again from the image once the slot is wiped, before
+				// it is handed out.
+				wipes := ops.wipes
+				if last := ops.copiedAfter[len(ops.copiedAfter)-1]; last != wipes || p.externals[0] != externalsKey("sha256:runner") {
+					t.Fatalf("externals after a strict job: copied after %d of %d wipes, recorded %q", last, wipes, p.externals[0])
 				}
 				return
 			}

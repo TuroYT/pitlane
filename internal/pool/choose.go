@@ -66,10 +66,13 @@ func (p *Pool) othersWarmLocked(s *slot) int {
 }
 
 // strictCleaningLocked reports whether a slot is being rebuilt after a strict
-// job: it comes back clean shortly. Callers hold p.mu.
+// job: it comes back clean shortly. Once its volumes are gone it no longer
+// has an owner (its daemon restarts, its externals are copied), so a slot in
+// cleanup without an owner counts too: it comes back empty either way (the
+// other case is an idle empty slot pruned for disk space). Callers hold p.mu.
 func (p *Pool) strictCleaningLocked() bool {
 	for _, s := range p.slots {
-		if s.Owner == StrictOwner && s.Status == "cleaning" && !s.dirty && !s.retire {
+		if (s.Owner == StrictOwner || s.Owner == "") && s.Status == "cleaning" && !s.dirty && !s.retire {
 			return true
 		}
 	}

@@ -175,6 +175,20 @@ func TestAcquireStrictWaitsForCleanSlot(t *testing.T) {
 	}
 }
 
+// Halfway through a strict cleanup the slot has lost its owner (volumes
+// gone, daemon restarting, externals being copied): it still holds a strict
+// job back from wiping a warm slot.
+func TestAcquireStrictWaitsForOwnerlessCleanup(t *testing.T) {
+	p := choosePool("owner", []ts{
+		{0, "ready", "priv", 1, 100, false},
+		{1, "cleaning", "", 0, 0, false},
+	})
+	p.now = func() time.Time { return time.Unix(1_000_000, 0) }
+	if l, ok := p.Acquire(context.Background(), "pub", 9, true); ok {
+		t.Fatalf("strict job wiped a warm slot while a clean one is coming: %+v", l)
+	}
+}
+
 // Without a strict cleanup in progress, or when a worthless slot is free, a
 // strict job never waits.
 func TestAcquireStrictNoNeedlessWait(t *testing.T) {

@@ -152,6 +152,13 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 		p.signal()
 		return
 	}
+	// Copy the externals now, before the slot is handed out: the next job
+	// would otherwise wait for this copy in Prepare (seconds, up to minutes
+	// when several slots copy at once). Nothing ran in the slot since its
+	// wipe, so this copy is as trustworthy as one made in Prepare.
+	if err := p.ensureExternals(ctx, l.Slot, p.Config().RunnerImage); err != nil {
+		p.log.Warn("cannot copy the runner externals after a strict job, the next job copies them", "slot", l.Slot, "error", err)
+	}
 	p.setStatus(l.Slot, "ready", "")
 }
 
