@@ -374,7 +374,7 @@ func JobCreatedAt(ctx context.Context, token, owner, repo string, runID int64, r
 				CreatedAt  time.Time `json:"created_at"`
 			} `json:"jobs"`
 		}
-		u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=%d&page=%d", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID, jobsPerPage, page)
+		u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=%d&page=%d", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID, jobsPerPage, page)
 		if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
 			return time.Time{}, err
 		}
