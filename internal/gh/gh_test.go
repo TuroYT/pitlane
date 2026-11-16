@@ -28,6 +28,22 @@ func fakeAPI(t *testing.T, routes map[string]string) {
 	t.Cleanup(func() { apiBase = old })
 }
 
+func TestJobCreatedAt(t *testing.T) {
+	fakeAPI(t, map[string]string{
+		"/repos/acme/app/actions/runs/7/jobs": `{"jobs":[
+			{"runner_name":"other","created_at":"2026-01-02T10:00:00Z"},
+			{"runner_name":"pitlane-a","created_at":"2026-01-02T10:00:05Z"}]}`,
+	})
+	ctx := context.Background()
+	at, err := JobCreatedAt(ctx, "tok", "acme", "app", 7, "pitlane-a")
+	if err != nil || at.UTC().Format("15:04:05") != "10:00:05" {
+		t.Fatalf("got %v %v", at, err)
+	}
+	if _, err := JobCreatedAt(ctx, "tok", "acme", "app", 7, "nobody"); err == nil {
+		t.Fatal("expected an error for an unknown runner")
+	}
+}
+
 func TestRepoPrivate(t *testing.T) {
 	fakeAPI(t, map[string]string{
 		"/repos/acme/pub":  `{"private":false,"visibility":"public"}`,

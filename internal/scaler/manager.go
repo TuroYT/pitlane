@@ -49,6 +49,9 @@ type Manager struct {
 	// StrictReason asks GitHub why a target must run strict ("" when it
 	// need not). Nil disables the periodic check.
 	StrictReason func(ctx context.Context, t store.Target) (string, error)
+	// JobQueuedAt asks the REST API when a job was queued, for jobs whose
+	// messages carry no queue time. Nil disables the lookup.
+	JobQueuedAt func(ctx context.Context, t store.Target, owner, repo string, runID int64, runner string) (time.Time, error)
 
 	store *store.Store
 	pool  Pool
@@ -1119,6 +1122,39 @@ func (s *scaler) logTimestamps(msg *scaleset.RunnerScaleSetMessage) {
 	}
 }
 
+// queueLookupRetry is how long to wait before asking GitHub again for a job
+// it does not list with its runner yet.
+var queueLookupRetry = 3 * time.Second
+
+// fetchQueueTime records the queue time of a job that started without one.
+// A warm runner can take a job that never produced a JobAvailable message,
+// and GitHub does not always put queueTime in JobStarted; the REST API knows
+// when the job was created. On failure the assignment time recorded earlier
+// stays, which is only an upper bound.
+func (s *scaler) fetchQueueTime(job store.Job) {
+	lookup := s.t.m.JobQueuedAt
+	if lookup == nil || job.RunID == 0 || job.RunnerName == "" {
+		return
+	}
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(queueLookupRetry)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		var at time.Time
+		at, err = lookup(ctx, s.t.cfg(), job.Owner, job.Repo, job.RunID, job.RunnerName)
+		cancel()
+		if err == nil {
+			if q := unix(at); q != 0 {
+				s.upsertJob(store.Job{TargetID: job.TargetID, JobID: job.JobID, Slot: -1, QueuedAt: q})
+			}
+			return
+		}
+	}
+	s.t.log.Debug("queue time lookup failed", "job", job.JobID, "error", err)
+}
+
 func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
 	if msg == nil {
 		s.t.reconcile()
@@ -1193,6 +1229,9 @@ func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			s.t.m.pool.SetPrediction(refine, pj.predicted)
 		}
 		s.upsertJob(job)
+		if j.QueueTime.IsZero() {
+			go s.fetchQueueTime(job)
+		}
 	}
 	for _, j := range msg.JobCompletedMessages {
 		job := s.job(j.JobMessageBase)

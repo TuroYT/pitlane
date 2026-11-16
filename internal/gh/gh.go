@@ -356,6 +356,27 @@ func RunJobID(ctx context.Context, token, owner, repo string, runID int64, runne
 	return jobID, nil
 }
 
+// JobCreatedAt returns when GitHub queued the job a runner ran in a workflow
+// run (the job's created_at, the start of its wait for a runner).
+func JobCreatedAt(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (time.Time, error) {
+	var jobs struct {
+		Jobs []struct {
+			RunnerName string    `json:"runner_name"`
+			CreatedAt  time.Time `json:"created_at"`
+		} `json:"jobs"`
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID)
+	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
+		return time.Time{}, err
+	}
+	for _, j := range jobs.Jobs {
+		if j.RunnerName == runnerName && !j.CreatedAt.IsZero() {
+			return j.CreatedAt, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
+}
+
 // JobLog downloads the log of the job a given runner ran in a workflow run.
 // token is an installation token or a personal access token.
 func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (io.ReadCloser, error) {

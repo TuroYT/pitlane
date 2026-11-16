@@ -366,6 +366,16 @@ func (s *Server) GitHubRunners(ctx context.Context, t store.Target) ([]gh.Runner
 	return gh.ListRunners(ctx, tok, t.Owner, repo)
 }
 
+// JobQueuedAt asks GitHub when a job was queued (the scaler uses it when the
+// job messages carry no queue time).
+func (s *Server) JobQueuedAt(ctx context.Context, t store.Target, owner, repo string, runID int64, runner string) (time.Time, error) {
+	tok, err := s.token(ctx, t)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return gh.JobCreatedAt(ctx, tok, owner, repo, runID, runner)
+}
+
 // handleCompare compares the median duration of each successful job on
 // Pitlane with the same job on GitHub-hosted runners (from the Actions
 // history of every enabled repository). Cached for 15 minutes.
