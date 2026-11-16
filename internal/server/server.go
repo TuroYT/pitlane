@@ -59,6 +59,8 @@ type Server struct {
 	log   *slog.Logger
 	web   fs.FS
 	hub   *hub
+	// started is when the server was created (pitlane_start_time_seconds).
+	started time.Time
 
 	setupToken string
 	compare    compareCache
@@ -76,7 +78,7 @@ type Server struct {
 
 // New creates the server. web is the built UI (may be nil).
 func New(cfg Config, st *store.Store, p *pool.Pool, log *slog.Logger, web fs.FS) *Server {
-	s := &Server{cfg: cfg, store: st, pool: p, log: log, web: web, hub: newHub(), states: map[string]time.Time{}}
+	s := &Server{cfg: cfg, store: st, pool: p, log: log, web: web, hub: newHub(), started: time.Now(), states: map[string]time.Time{}}
 	return s
 }
 
