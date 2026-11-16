@@ -22,11 +22,12 @@ type fakeSlotOps struct {
 	wipeErr error
 	removed []string
 	// externals and pnpm store
-	image     string
-	copies    int
-	copyErr   error
-	merges    []string
-	recreates int
+	image       string
+	copies      int
+	copiedAfter []int // wipes done when each copy ran
+	copyErr     error
+	merges      []string
+	recreates   int
 }
 
 func (f *fakeSlotOps) removeVolume(_ context.Context, name string) error {
@@ -72,6 +73,7 @@ func (f *fakeSlotOps) copyExternals(context.Context, int, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.copies++
+	f.copiedAfter = append(f.copiedAfter, f.wipes)
 	return f.copyErr
 }
 
@@ -160,8 +162,22 @@ func TestReleaseStrictRebuildsFromHost(t *testing.T) {
 	if s := p.slots[0]; ops.wipes != 1 || len(ops.scripts) != 0 || s.Owner != "" || s.Status != "ready" || s.dirty {
 		t.Fatalf("strict release: wipes=%d scripts=%q state=%+v dirty=%v", ops.wipes, ops.scripts, s.SlotState, s.dirty)
 	}
-	if _, ok := p.externals[0]; ok {
-		t.Fatal("externals must be copied again after a strict job")
+	if ops.copies != 1 || len(ops.copiedAfter) != 1 || ops.copiedAfter[0] != 1 {
+		t.Fatalf("externals must be copied again once the slot is wiped: copies=%d after wipes %v", ops.copies, ops.copiedAfter)
+	}
+	if want := externalsKey("sha256:runner"); p.externals[0] != want {
+		t.Fatalf("externals recorded %q, want %q", p.externals[0], want)
+	}
+	// The next job finds them ready: no copy on its clock.
+	l, ok := p.Acquire(context.Background(), "acme", 1, false)
+	if !ok || l.wipe {
+		t.Fatalf("lease %+v ok=%v", l, ok)
+	}
+	if err := p.Prepare(context.Background(), l); err != nil {
+		t.Fatal(err)
+	}
+	if ops.copies != 1 {
+		t.Fatalf("the next job copied the externals again: copies=%d", ops.copies)
 	}
 
 	ops.wipeErr = errors.New("daemon gone")
@@ -169,6 +185,29 @@ func TestReleaseStrictRebuildsFromHost(t *testing.T) {
 	p.Release(context.Background(), Lease{Slot: 0, Owner: StrictOwner, Strict: true})
 	if s := p.slots[0]; !s.dirty || s.Status != "error" || s.Owner != StrictOwner {
 		t.Fatalf("failed strict wipe must leave the slot dirty, got %+v dirty=%v", s.SlotState, s.dirty)
+	}
+}
+
+// A failed copy after a strict job does not take the slot out of service:
+// the next job copies the externals in Prepare, as before.
+func TestReleaseStrictExternalsCopyFailure(t *testing.T) {
+	ops := &fakeSlotOps{copyErr: errors.New("disk full")}
+	p := newTestPool("owner", SlotState{Index: 0, Status: "busy", Owner: StrictOwner})
+	p.sops = ops
+	p.Release(context.Background(), Lease{Slot: 0, Owner: StrictOwner, Strict: true})
+	if s := p.slots[0]; s.Status != "ready" || s.dirty || ops.copies != 1 {
+		t.Fatalf("state %+v dirty=%v copies=%d", s.SlotState, s.dirty, ops.copies)
+	}
+	if _, ok := p.externals[0]; ok {
+		t.Fatal("a failed copy must not be recorded")
+	}
+	ops.copyErr = nil
+	l, ok := p.Acquire(context.Background(), "acme", 1, false)
+	if !ok {
+		t.Fatal("slot not handed out")
+	}
+	if err := p.Prepare(context.Background(), l); err != nil || ops.copies != 2 {
+		t.Fatalf("Prepare: err=%v copies=%d", err, ops.copies)
 	}
 }
 
