@@ -28,6 +28,65 @@ func fakeAPI(t *testing.T, routes map[string]string) {
 	t.Cleanup(func() { apiBase = old })
 }
 
+func TestJobCreatedAt(t *testing.T) {
+	fakeAPI(t, map[string]string{
+		"/repos/acme/app/actions/runs/7/jobs": `{"jobs":[
+			{"runner_name":"other","created_at":"2026-01-02T10:00:00Z"},
+			{"runner_name":"pitlane-a","created_at":"2026-01-02T10:00:05Z"}]}`,
+	})
+	ctx := context.Background()
+	at, err := JobCreatedAt(ctx, "tok", "acme", "app", 7, "pitlane-a")
+	if err != nil || at.UTC().Format("15:04:05") != "10:00:05" {
+		t.Fatalf("got %v %v", at, err)
+	}
+	if _, err := JobCreatedAt(ctx, "tok", "acme", "app", 7, "nobody"); err == nil {
+		t.Fatal("expected an error for an unknown runner")
+	}
+}
+
+// A run with more than 100 jobs lists them over several pages: the runner's
+// job can be on the second one.
+func TestJobCreatedAtPaginates(t *testing.T) {
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.Query().Get("page"))
+		var b strings.Builder
+		b.WriteString(`{"jobs":[`)
+		switch r.URL.Query().Get("page") {
+		case "1":
+			for i := 0; i < jobsPerPage; i++ {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				b.WriteString(`{"runner_name":"other","created_at":"2026-01-02T10:00:00Z"}`)
+			}
+		case "2":
+			b.WriteString(`{"runner_name":"pitlane-a","created_at":"2026-01-02T10:00:09Z"}`)
+		}
+		b.WriteString(`]}`)
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	t.Cleanup(srv.Close)
+	old := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = old })
+
+	at, err := JobCreatedAt(context.Background(), "tok", "acme", "app", 7, "pitlane-a")
+	if err != nil || at.UTC().Format("15:04:05") != "10:00:09" {
+		t.Fatalf("got %v %v", at, err)
+	}
+	if len(pages) != 2 {
+		t.Errorf("requested pages %v, want 2 pages", pages)
+	}
+	pages = nil
+	if _, err := JobCreatedAt(context.Background(), "tok", "acme", "app", 7, "nobody"); err == nil {
+		t.Error("expected an error for an unknown runner")
+	}
+	if len(pages) != 2 {
+		t.Errorf("an unknown runner read pages %v, want to stop on the short page 2", pages)
+	}
+}
+
 func TestRepoPrivate(t *testing.T) {
 	fakeAPI(t, map[string]string{
 		"/repos/acme/pub":  `{"private":false,"visibility":"public"}`,

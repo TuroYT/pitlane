@@ -241,6 +241,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 	mgr.Version = version
 	mgr.ListRunners = srv.GitHubRunners
 	mgr.StrictReason = srv.StrictReason
+	mgr.JobQueuedAt = srv.JobQueuedAt
 	srv.SetManager(mgr)
 
 	var restart atomic.Bool

@@ -167,7 +167,7 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | `pitlane_memory_admission_enabled` | gauge | 1 when memory admission is on |
 | `pitlane_jobs_completed` | gauge | `result`: finished jobs in the job history (shrinks when history is pruned) |
 | `pitlane_job_duration_seconds` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of jobs finished in the last 24 h |
-| `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h |
+| `pitlane_job_wait_seconds` | summary | same, queue time of jobs started in the last 24 h (when GitHub's messages carry none, Pitlane reads the job's `created_at` from the REST API) |
 | `pitlane_job_memory_peak_bytes` | summary | quantiles 0.5/0.9/0.99, `_sum`, `_count` of the peak memory (runner + slot) of the measured jobs finished in the last 7 days (see [resource usage per job](how-it-works.md#resource-usage-per-job)) |
 | `pitlane_disk_free_bytes`, `pitlane_disk_total_bytes` | gauge | filesystem of `/var/lib/docker` (or the data directory) |
 | `pitlane_actions_cache_bytes`, `pitlane_actions_cache_entries` | gauge | what the actions cache stores |
