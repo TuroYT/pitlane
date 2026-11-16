@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TuroYT/pitlane/internal/cache"
 	"github.com/TuroYT/pitlane/internal/pool"
@@ -72,9 +73,10 @@ func TestMetricsAuth(t *testing.T) {
 func TestWriteMetrics(t *testing.T) {
 	var b strings.Builder
 	writeMetrics(&b, metricsData{
-		Version:  "v1",
-		DockerUp: true,
-		Slots:    []pool.SlotState{{Status: "ready"}, {Status: "busy"}, {Status: "busy"}},
+		Version:   "v1",
+		StartTime: time.Unix(1700000000, 0),
+		DockerUp:  true,
+		Slots:     []pool.SlotState{{Status: "ready"}, {Status: "busy"}, {Status: "busy"}},
 		Targets: []scaler.TargetState{{
 			Target:     store.Target{Kind: "repo", Owner: "acme", Repo: `we"ird`, ScaleSetName: "pitlane"},
 			Waiting:    2,
@@ -92,6 +94,8 @@ func TestWriteMetrics(t *testing.T) {
 	out := b.String()
 	for _, want := range []string{
 		`pitlane_info{version="v1"} 1`,
+		"# TYPE pitlane_start_time_seconds gauge",
+		"pitlane_start_time_seconds 1700000000",
 		"pitlane_docker_up 1",
 		`pitlane_slots{status="busy"} 2`,
 		`pitlane_slots{status="error"} 0`,
@@ -142,5 +146,13 @@ func TestQuantile(t *testing.T) {
 	}
 	if !math.IsNaN(quantile(nil, 0.5)) {
 		t.Fatal("empty must be NaN")
+	}
+}
+
+func TestWriteMetricsNoStartTime(t *testing.T) {
+	var b strings.Builder
+	writeMetrics(&b, metricsData{})
+	if strings.Contains(b.String(), "pitlane_start_time_seconds") {
+		t.Fatal("start time reported although unknown")
 	}
 }

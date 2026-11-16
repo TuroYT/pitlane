@@ -91,6 +91,7 @@ func (s *Server) metricsAllowed(r *http.Request) bool {
 // metricsData is everything /metrics reports.
 type metricsData struct {
 	Version   string
+	StartTime time.Time // zero when unknown
 	DockerUp  bool
 	Slots     []pool.SlotState
 	Targets   []scaler.TargetState
@@ -118,7 +119,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	d := metricsData{Version: s.cfg.Version, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes(), Memory: s.pool.Memory()}
+	d := metricsData{Version: s.cfg.Version, StartTime: s.started, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes(), Memory: s.pool.Memory()}
 	err := s.pool.Ping(ctx)
 	d.DockerUp = err == nil
 	if s.mgr != nil {
@@ -218,6 +219,10 @@ func writeMetrics(w io.Writer, d metricsData) {
 	p := promWriter{w}
 	p.head("pitlane_info", "gauge", "Pitlane version.")
 	p.sample("pitlane_info", []string{"version", d.Version}, 1)
+	if !d.StartTime.IsZero() {
+		p.head("pitlane_start_time_seconds", "gauge", "Start time of the Pitlane process, in seconds since the Unix epoch.")
+		p.sample("pitlane_start_time_seconds", nil, float64(d.StartTime.Unix()))
+	}
 	p.head("pitlane_docker_up", "gauge", "1 if the Docker daemon answers.")
 	p.sample("pitlane_docker_up", nil, boolFloat(d.DockerUp))
 

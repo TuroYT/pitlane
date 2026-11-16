@@ -155,6 +155,7 @@ The expected repository and workflow are fixed at build time and cannot be chang
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `pitlane_info` | gauge | `version` |
+| `pitlane_start_time_seconds` | gauge | start time of the process (Unix seconds); `time() - pitlane_start_time_seconds` is the uptime, and the value changes on every restart |
 | `pitlane_docker_up` | gauge | |
 | `pitlane_slots` | gauge | `status` (starting, ready, busy, cleaning, error, retiring) |
 | `pitlane_slot_wipes_total` | counter | `reason` (`owner_change`, `strict`, `unknown_owner`): slots rebuilt empty before a job since start |
