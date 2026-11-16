@@ -43,7 +43,7 @@ RUN apt-get update \
 # talk to every older server (Ubuntu's client is too old for recent services).
 RUN set -eux; \
     install -d /usr/share/postgresql-common/pgdg; \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
     echo "${PGDG_KEY_SHA256}  /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" | sha256sum -c -; \
     echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; apt-get install -y --no-install-recommends postgresql-client; rm -rf /var/lib/apt/lists/*; \
@@ -54,8 +54,8 @@ RUN set -eux; \
     arch="$(case "${TARGETARCH:-amd64}" in arm64) echo arm64 ;; *) echo x64 ;; esac)"; \
     file="node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
     tmp="$(mktemp -d)"; cd "$tmp"; \
-    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
-    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
     sum="$(awk -v f="$file" '$2 == f { print $1 }' SHASUMS256.txt)"; \
     echo "$sum" | grep -Eqx '[0-9a-f]{64}'; \
     echo "${sum}  ${file}" | sha256sum -c -; \
@@ -66,7 +66,7 @@ RUN set -eux; \
 
 # GitHub CLI.
 RUN set -eux; \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg; \
     echo "${GH_CLI_KEY_SHA256}  /usr/share/keyrings/githubcli-archive-keyring.gpg" | sha256sum -c -; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update; apt-get install -y --no-install-recommends gh; rm -rf /var/lib/apt/lists/*
@@ -77,16 +77,16 @@ RUN set -eux; \
     yarch="$(case "${TARGETARCH:-amd64}" in arm64) echo arm64 ;; *) echo amd64 ;; esac)"; \
     tmp="$(mktemp -d)"; cd "$tmp"; \
     compose="docker-compose-linux-${carch}"; \
-    curl -fsSLO "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/${compose}"; \
-    curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/checksums.txt" -o compose.sums; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/${compose}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/checksums.txt" -o compose.sums; \
     sum="$(awk -v f="*${compose}" '$2 == f { print $1 }' compose.sums)"; \
     echo "$sum" | grep -Eqx '[0-9a-f]{64}'; \
     echo "${sum}  ${compose}" | sha256sum -c -; \
     install -D -m 0755 "$compose" /usr/local/lib/docker/cli-plugins/docker-compose; \
     yq="yq_linux_${yarch}"; \
-    curl -fsSLO "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq}"; \
-    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" -o yq.sums; \
-    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" -o yq.order; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" -o yq.sums; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" -o yq.order; \
     col="$(grep -nx 'SHA-256' yq.order | cut -d: -f1)"; \
     sum="$(awk -v f="$yq" -v c="$((col + 1))" '$1 == f { print $c }' yq.sums)"; \
     echo "$sum" | grep -Eqx '[0-9a-f]{64}'; \
