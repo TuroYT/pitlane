@@ -33,7 +33,6 @@ jobs:
     outputs:
       # Every other job runs where this one did.
       runner: ${{ steps.runner.outputs.runner }}
-      hosted: ${{ steps.runner.outputs.hosted }}
       # Pushes to main run every job but the docs build (docs.yml builds and
       # publishes the site).
       go: ${{ github.event_name != 'pull_request' || steps.filter.outputs.go == 'true' }}
@@ -43,10 +42,7 @@ jobs:
       - id: runner
         env:
           RUNNER: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || vars.PITLANE_RUNNER || 'ubuntu-latest' }}
-        run: |
-          echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
-          [ "$RUNNER" = ubuntu-latest ] && hosted=true || hosted=false
-          echo "hosted=$hosted" >> "$GITHUB_OUTPUT"
+        run: echo "runner=$RUNNER" >> "$GITHUB_OUTPUT"
       - id: filter
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -106,7 +102,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           go: true
-          hosted-cache: ${{ needs.changes.outputs.hosted }}
+          go-cache: lint
       - id: gofmt
         name: gofmt
         run: |
@@ -175,7 +171,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           go: true
-          hosted-cache: ${{ needs.changes.outputs.hosted }}
+          go-cache: test
       - name: go test -race
         # gotestsum folds the output of each package into a log group and
         # repeats the failures at the end.
@@ -198,7 +194,7 @@ jobs:
         with:
           go: true
           node-package: web
-          hosted-cache: ${{ needs.changes.outputs.hosted }}
+          go-cache: build
       - name: Build the UI
         run: pnpm build
         working-directory: web
@@ -228,7 +224,6 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           node-package: web
-          hosted-cache: ${{ needs.changes.outputs.hosted }}
       # vue-tsc and ESLint errors are annotated by setup-node's problem
       # matchers; the github-actions reporter of Vitest annotates failing
       # tests and writes the test summary.
@@ -274,7 +269,6 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           node-package: site
-          hosted-cache: ${{ needs.changes.outputs.hosted }}
       - name: VitePress build (fails on dead links)
         run: pnpm build
         working-directory: site

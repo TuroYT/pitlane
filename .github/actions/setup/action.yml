@@ -1,19 +1,21 @@
 name: Set up the toolchains
 description: >-
   Go (from go.mod) and/or Node.js 22 with pnpm and the dependencies of one
-  package, the way every CI job needs them. On Pitlane the caches stay on the
-  slot's disk, so the hosted cache (upload and download) is only used on
-  GitHub-hosted runners.
+  package, the way every CI job needs them. Go modules, the Go build cache
+  and the pnpm store go through the actions cache: Pitlane runs this public
+  repository's jobs strict, with nothing kept on the slot between jobs.
 inputs:
   go:
     description: Set up Go from go.mod.
     default: "false"
+  go-cache:
+    description: >-
+      Name of the job's Go cache (lint, test, build): each job compiles with
+      its own flags, so each keeps its own build cache.
+    default: ""
   node-package:
     description: Directory of a pnpm package (web or site) to install; empty for none.
     default: ""
-  hosted-cache:
-    description: Use the GitHub Actions cache for Go modules and the pnpm store.
-    default: "false"
 runs:
   using: composite
   steps:
@@ -21,7 +23,28 @@ runs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version-file: go.mod
-        cache: ${{ inputs.hosted-cache == 'true' }}
+        # One cache per job below: setup-go's own key is the same for all.
+        cache: false
+
+    - if: inputs.go == 'true'
+      id: go-env
+      shell: bash
+      run: |
+        echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+        echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+    # Keyed on go.mod and go.sum: a pull request restores the cache saved on
+    # main; after a dependency update the previous one is restored, then
+    # saved under the new key.
+    - if: inputs.go == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ steps.go-env.outputs.gocache }}
+          ${{ steps.go-env.outputs.gomodcache }}
+          ~/.cache/golangci-lint
+        key: go-${{ runner.os }}-${{ runner.arch }}-${{ inputs.go-cache }}-${{ hashFiles('go.mod', 'go.sum') }}
+        restore-keys: go-${{ runner.os }}-${{ runner.arch }}-${{ inputs.go-cache }}-
 
     - if: inputs.node-package != ''
       uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -35,7 +58,7 @@ runs:
       with:
         node-version: 22
         package-manager-cache: false
-        cache: ${{ inputs.hosted-cache == 'true' && 'pnpm' || '' }}
+        cache: pnpm
         cache-dependency-path: ${{ inputs.node-package }}/pnpm-lock.yaml
 
     - if: inputs.node-package != ''
