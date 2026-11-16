@@ -356,22 +356,35 @@ func RunJobID(ctx context.Context, token, owner, repo string, runID int64, runne
 	return jobID, nil
 }
 
+// jobsPerPage is the page size of the jobs listing, the most GitHub allows.
+const jobsPerPage = 100
+
+// maxJobPages bounds how many pages JobCreatedAt reads (1000 jobs), so a
+// huge run cannot turn one lookup into dozens of requests.
+const maxJobPages = 10
+
 // JobCreatedAt returns when GitHub queued the job a runner ran in a workflow
-// run (the job's created_at, the start of its wait for a runner).
+// run (the job's created_at, the start of its wait for a runner). It reads
+// the run's jobs page by page until it finds the runner's job.
 func JobCreatedAt(ctx context.Context, token, owner, repo string, runID int64, runnerName string) (time.Time, error) {
-	var jobs struct {
-		Jobs []struct {
-			RunnerName string    `json:"runner_name"`
-			CreatedAt  time.Time `json:"created_at"`
-		} `json:"jobs"`
-	}
-	u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=100", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID)
-	if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
-		return time.Time{}, err
-	}
-	for _, j := range jobs.Jobs {
-		if j.RunnerName == runnerName && !j.CreatedAt.IsZero() {
-			return j.CreatedAt, nil
+	for page := 1; page <= maxJobPages; page++ {
+		var jobs struct {
+			Jobs []struct {
+				RunnerName string    `json:"runner_name"`
+				CreatedAt  time.Time `json:"created_at"`
+			} `json:"jobs"`
+		}
+		u := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=%d&page=%d", apiBase, url.PathEscape(owner), url.PathEscape(repo), runID, jobsPerPage, page)
+		if err := do(ctx, http.MethodGet, u, "Bearer "+token, nil, &jobs); err != nil {
+			return time.Time{}, err
+		}
+		for _, j := range jobs.Jobs {
+			if j.RunnerName == runnerName && !j.CreatedAt.IsZero() {
+				return j.CreatedAt, nil
+			}
+		}
+		if len(jobs.Jobs) < jobsPerPage {
+			break
 		}
 	}
 	return time.Time{}, fmt.Errorf("job of runner %s not found in run %d", runnerName, runID)
