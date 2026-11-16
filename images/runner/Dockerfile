@@ -54,8 +54,8 @@ RUN set -eux; \
     arch="$(case "${TARGETARCH:-amd64}" in arm64) echo arm64 ;; *) echo x64 ;; esac)"; \
     file="node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
     tmp="$(mktemp -d)"; cd "$tmp"; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -O "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -O "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
     sum="$(awk -v f="$file" '$2 == f { print $1 }' SHASUMS256.txt)"; \
     echo "$sum" | grep -Eqx '[0-9a-f]{64}'; \
     echo "${sum}  ${file}" | sha256sum -c -; \
@@ -77,14 +77,14 @@ RUN set -eux; \
     yarch="$(case "${TARGETARCH:-amd64}" in arm64) echo arm64 ;; *) echo amd64 ;; esac)"; \
     tmp="$(mktemp -d)"; cd "$tmp"; \
     compose="docker-compose-linux-${carch}"; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/${compose}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -O "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/${compose}"; \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/checksums.txt" -o compose.sums; \
     sum="$(awk -v f="*${compose}" '$2 == f { print $1 }' compose.sums)"; \
     echo "$sum" | grep -Eqx '[0-9a-f]{64}'; \
     echo "${sum}  ${compose}" | sha256sum -c -; \
     install -D -m 0755 "$compose" /usr/local/lib/docker/cli-plugins/docker-compose; \
     yq="yq_linux_${yarch}"; \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errorsO "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq}"; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -O "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq}"; \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" -o yq.sums; \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" -o yq.order; \
     col="$(grep -nx 'SHA-256' yq.order | cut -d: -f1)"; \
