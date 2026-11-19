@@ -37,6 +37,13 @@ jobs:
     runs-on: pitlane
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dashboard-dark.png">
+  <img src="docs/assets/dashboard-light.png" width="880" alt="Pitlane dashboard: running jobs with their repository, workflow, branch or pull request and links to GitHub, the warm slots, and charts of jobs, slot utilization, queue wait and job duration">
+</picture>
+
+<sub>Screenshot with demo data.</sub>
+
 ## Quick start
 
 On a Linux host with systemd (Docker is installed if missing):
@@ -145,13 +152,6 @@ Pitlane fits when you have one Linux host, run code you trust, and want caches t
 survive between jobs without Kubernetes or a cloud account.
 
 ## The dashboard
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dashboard-dark.png">
-  <img src="docs/assets/dashboard-light.png" width="880" alt="Pitlane dashboard: running jobs with their repository, workflow, branch or pull request and links to GitHub, the warm slots, and charts of jobs, slot utilization, queue wait and job duration">
-</picture>
-
-<sub>Screenshot with demo data.</sub>
 
 Every running or finished job shows where it came from: repository, workflow file,
 branch, tag or pull request, and the event that triggered it, each linked to GitHub,
