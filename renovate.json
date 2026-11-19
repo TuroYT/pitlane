@@ -117,6 +117,19 @@
       ]
     },
     {
+      "description": "devRunnerTag holds a bare tag that images.go joins to the repository: there is no digest to write, so a pinDigest update on it can only fail",
+      "matchFileNames": [
+        "internal/pool/images.go"
+      ],
+      "matchDepNames": [
+        "ghcr.io/turoyt/pitlane-runner"
+      ],
+      "matchUpdateTypes": [
+        "pinDigest"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Actions are pinned by digest: minor, patch and digest updates go in one weekly PR, merged once CI is green",
       "matchManagers": [
         "github-actions"
