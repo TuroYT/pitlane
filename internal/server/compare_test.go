@@ -24,10 +24,14 @@ func TestCompareRows(t *testing.T) {
 		}},
 		{Repo: "acme/api", Jobs: []gh.JobRun{
 			{Workflow: "ci", Name: "build", RunnerName: "GitHub Actions 3", Seconds: 60},
+			{Workflow: "aa", Name: "a", RunnerName: "pitlane-1", Seconds: 1},
+			{Workflow: "a", Name: "ab", RunnerName: "pitlane-1", Seconds: 2},
 		}},
 		{}, // a repository GitHub did not answer for
 	})
 	want := []compareRow{
+		{Repo: "acme/api", Workflow: "a", Job: "ab", PitlaneMedian: 2, PitlaneCount: 1}, // workflow first, not "a"+"ab"
+		{Repo: "acme/api", Workflow: "aa", Job: "a", PitlaneMedian: 1, PitlaneCount: 1},
 		{Repo: "acme/api", Workflow: "ci", Job: "build", HostedMedian: 60, HostedCount: 1},
 		{Repo: "acme/web", Workflow: "ci", Job: "test", HostedMedian: 90, HostedCount: 1, PitlaneMedian: 20, PitlaneCount: 3},
 	}
@@ -52,9 +56,9 @@ func TestMedianLeavesInputAlone(t *testing.T) {
 func TestCompareCache(t *testing.T) {
 	var c compareCache
 	calls := 0
-	compute := func() ([]compareRow, error) {
+	compute := func() ([]compareRow, bool, error) {
 		calls++
-		return []compareRow{{Repo: "acme/web"}}, nil
+		return []compareRow{{Repo: "acme/web"}}, true, nil
 	}
 	for range 2 {
 		if _, err := c.get(false, compute); err != nil {
@@ -72,11 +76,18 @@ func TestCompareCache(t *testing.T) {
 		t.Fatalf("stale rows served: %d calls", calls)
 	}
 	boom := errors.New("boom")
-	if _, err := c.get(true, func() ([]compareRow, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := c.get(true, func() ([]compareRow, bool, error) { return nil, false, boom }); !errors.Is(err, boom) {
 		t.Fatalf("error lost: %v", err)
 	}
 	if rows, _ := c.get(false, compute); calls != 3 || len(rows) != 1 {
 		t.Fatalf("failed compute dropped the cache: %d calls, %v", calls, rows)
+	}
+	partial := func() ([]compareRow, bool, error) { return []compareRow{{Repo: "partial"}}, false, nil }
+	if rows, _ := c.get(true, partial); len(rows) != 1 || rows[0].Repo != "partial" {
+		t.Fatalf("partial rows not answered: %v", rows)
+	}
+	if rows, _ := c.get(false, compute); calls != 3 || rows[0].Repo != "acme/web" {
+		t.Fatalf("partial rows cached: %d calls, %v", calls, rows)
 	}
 }
 

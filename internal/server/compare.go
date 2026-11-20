@@ -49,14 +49,17 @@ type repoJobs struct {
 // skips the cache.
 func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	refresh := r.URL.Query().Get("refresh") == "1"
-	rows, err := s.compare.get(refresh, func() ([]compareRow, error) {
+	rows, err := s.compare.get(refresh, func() ([]compareRow, bool, error) {
 		targets, err := s.store.Targets()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), compareTimeout)
 		defer cancel()
-		return compareRows(s.recentRepoJobs(ctx, targets)), nil
+		rows := compareRows(s.recentRepoJobs(ctx, targets))
+		// Past the deadline or with the client gone, some repositories may
+		// be missing: answer what was read, but do not cache it.
+		return rows, ctx.Err() == nil, nil
 	})
 	if err != nil {
 		s.internalErr(w, r, http.StatusInternalServerError, "targets_list", "cannot list the targets", err)
@@ -102,7 +105,7 @@ func (s *Server) recentJobs(ctx context.Context, t store.Target) ([]gh.JobRun, e
 // median duration of each group on GitHub-hosted runners and on Pitlane.
 // Jobs that ran elsewhere (other self-hosted or larger runners) are left
 // out, and so is a group with none on either side. Rows are sorted by
-// repository, then by workflow and job name.
+// repository, then by workflow, then by job name.
 func compareRows(repos []repoJobs) []compareRow {
 	type key struct{ repo, workflow, job string }
 	type durations struct{ hosted, pitlane []float64 }
@@ -132,7 +135,7 @@ func compareRows(repos []repoJobs) []compareRow {
 			HostedMedian: median(d.hosted), HostedCount: len(d.hosted), PitlaneMedian: median(d.pitlane), PitlaneCount: len(d.pitlane)})
 	}
 	slices.SortFunc(rows, func(a, b compareRow) int {
-		return cmp.Or(cmp.Compare(a.Repo, b.Repo), cmp.Compare(a.Workflow+a.Job, b.Workflow+b.Job))
+		return cmp.Or(cmp.Compare(a.Repo, b.Repo), cmp.Compare(a.Workflow, b.Workflow), cmp.Compare(a.Job, b.Job))
 	})
 	return rows
 }
@@ -156,17 +159,20 @@ type compareCache struct {
 }
 
 // get returns the cached rows while they are fresh and refresh is false,
-// else the rows compute returns, cached when compute succeeds.
-func (c *compareCache) get(refresh bool, compute func() ([]compareRow, error)) ([]compareRow, error) {
+// else the rows compute returns, cached when compute succeeds and says they
+// are complete (keep).
+func (c *compareCache) get(refresh bool, compute func() (rows []compareRow, keep bool, err error)) ([]compareRow, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !refresh && c.rows != nil && time.Since(c.at) < compareTTL {
 		return c.rows, nil
 	}
-	rows, err := compute()
+	rows, keep, err := compute()
 	if err != nil {
 		return nil, err
 	}
-	c.rows, c.at = rows, time.Now()
+	if keep {
+		c.rows, c.at = rows, time.Now()
+	}
 	return rows, nil
 }
