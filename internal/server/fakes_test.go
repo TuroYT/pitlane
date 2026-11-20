@@ -65,9 +65,31 @@ func (f *fakePool) Configure(_ context.Context, cfg pool.Config) error {
 
 func (f *fakePool) StrictSlots() int { return f.strictSlots }
 
-func (f *fakePool) Memory() pool.MemoryState { return f.mem }
+func (f *fakePool) Memory() pool.MemoryState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mem
+}
 
-func (f *fakePool) Slots() []pool.SlotState { return f.slots }
+func (f *fakePool) Slots() []pool.SlotState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.slots
+}
+
+// setMem and setSlots change what the pool reports while the server may be
+// reading it (an event stream).
+func (f *fakePool) setMem(m pool.MemoryState) {
+	f.mu.Lock()
+	f.mem = m
+	f.mu.Unlock()
+}
+
+func (f *fakePool) setSlots(s []pool.SlotState) {
+	f.mu.Lock()
+	f.slots = s
+	f.mu.Unlock()
+}
 
 func (f *fakePool) SlotWipes() map[string]int64 { return f.wipes }
 

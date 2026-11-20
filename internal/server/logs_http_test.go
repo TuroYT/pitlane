@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
@@ -92,7 +93,7 @@ func TestJobMemoryEndpoint(t *testing.T) {
 	t.Parallel()
 	_, st, fp, h := apiServer(t)
 	fp.cfg.MemoryMB = 1024
-	fp.mem.Total, fp.mem.Budget = 16<<30, 14<<30
+	fp.setMem(pool.MemoryState{Total: 16 << 30, Budget: 14 << 30})
 	now := time.Now().Unix()
 	for i, peak := range []int64{2 << 30, 3 << 30} {
 		runner := "pitlane-" + strconv.Itoa(i)

@@ -30,8 +30,8 @@ type stateBody struct {
 func TestStateEndpoint(t *testing.T) {
 	t.Parallel()
 	_, st, fp, h := apiServer(t)
-	fp.slots = []pool.SlotState{{Index: 0, Status: "busy", Runner: "pitlane-a"}}
-	fp.mem = pool.MemoryState{Enabled: true, Budget: 123}
+	fp.setSlots([]pool.SlotState{{Index: 0, Status: "busy", Runner: "pitlane-a"}})
+	fp.setMem(pool.MemoryState{Enabled: true, Budget: 123})
 	if _, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestEventsStream(t *testing.T) {
 		t.Fatalf("initial snapshot %+v", ev)
 	}
 	// A change is pushed.
-	fp.mem = pool.MemoryState{Budget: 7}
+	fp.setMem(pool.MemoryState{Budget: 7})
 	if _, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1}); err != nil {
 		t.Fatal(err)
 	}

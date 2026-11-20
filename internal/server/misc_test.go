@@ -67,9 +67,14 @@ func TestHostStats(t *testing.T) {
 	}
 	// A second sample less than a second later keeps the first answer, a later
 	// one is a percentage again.
-	before := cpu.sample()
-	if again := cpu.sample(); again != before {
-		t.Errorf("sampled again within %v: %v then %v", cpuSampleInterval, before, again)
+	cpu.sample()
+	// Pretend the last sample is recent (in the future, so the test does not
+	// depend on how fast it runs): the percentage is kept.
+	cpu.mu.Lock()
+	cpu.percent, cpu.lastWall = 42, time.Now().Add(time.Hour)
+	cpu.mu.Unlock()
+	if again := cpu.sample(); again != 42 {
+		t.Errorf("sampled again within %v: got %v, want the previous 42", cpuSampleInterval, again)
 	}
 	cpu.mu.Lock()
 	cpu.lastWall = time.Now().Add(-2 * time.Second)
