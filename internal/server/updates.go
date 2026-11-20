@@ -9,7 +9,7 @@ import (
 )
 
 // maxUpdatesAudit bounds the request body of an update mutation kept for the
-// audit log.
+// audit log. A longer body is still forwarded whole, without audit detail.
 const maxUpdatesAudit = 4096
 
 // handleUpdates serves the update API (internal/update) and records its
@@ -34,7 +34,11 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		if json.Valid(b) && len(b) > 2 {
 			detail = string(b)
 		}
-		r.Body = io.NopCloser(bytes.NewReader(b))
+		// Forward the whole body: the bytes read, then the rest.
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(b), r.Body), r.Body}
 	}
 	sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 	s.upd.ServeHTTP(sw, r)
