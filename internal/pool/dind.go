@@ -37,7 +37,7 @@ func (p *Pool) ensureSlot(ctx context.Context, i int) error {
 			return err
 		}
 	case err != nil:
-		return err
+		return fmt.Errorf("inspect dind: %w", err)
 	case info.Config.Labels[LabelSpec] != slotSpecVersion:
 		return p.upgradeDind(ctx, i)
 	case info.State != nil && info.State.Running:
@@ -124,7 +124,7 @@ func (p *Pool) upgradeDind(ctx context.Context, i int) error {
 	}
 	p.log.Info("recreating slot with the current definition", "slot", i)
 	if err := p.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
-		return err
+		return fmt.Errorf("remove outdated dind: %w", err)
 	}
 	return p.ensureSlot(ctx, i)
 }

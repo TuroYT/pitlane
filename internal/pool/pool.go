@@ -6,9 +6,7 @@ package pool
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -34,6 +32,7 @@ const (
 	LabelRepo = "dev.pitlane.repo"
 
 	mirrorName    = "pitlane-mirror"
+	mirrorVolume  = "pitlane-mirror-data"
 	mirrorNetwork = "pitlane-mirror"
 	runnerUID     = "1001:1001"
 	workDir       = "/home/runner/_work"
@@ -151,21 +150,7 @@ func New(cfg Config, log *slog.Logger) (*Pool, error) {
 	}
 	p := &Pool{cli: cli, log: log, cfg: cfg, slots: map[int]*slot{}, chowned: map[string]bool{}, externals: map[int]string{},
 		restored: map[int]persistedSlot{}, released: make(chan struct{}, 1)}
-	if b, err := os.ReadFile(cfg.StateFile); err == nil {
-		if err := json.Unmarshal(b, &p.restored); err != nil {
-			// Fail closed: every slot restores with an unknown owner.
-			log.Error("slot state unreadable, every slot will be wiped before its first job", "file", cfg.StateFile, "error", err)
-			p.restored = map[int]persistedSlot{}
-		}
-		if pruneRetired(p.restored, cfg.Slots, p.slots) > 0 {
-			p.saveLocked()
-		}
-		for i, st := range p.restored {
-			if st.Externals != "" {
-				p.externals[i] = st.Externals
-			}
-		}
-	}
+	p.loadState()
 	return p, nil
 }
 

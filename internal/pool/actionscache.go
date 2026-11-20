@@ -124,11 +124,11 @@ func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
 	}
 	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), cacheForwarder, nil)
 	if err != nil && !alreadyConnected(err) {
-		return "", err
+		return "", fmt.Errorf("connect the actions cache forwarder to %s: %w", slotNetwork(slot), err)
 	}
 	info, err := p.cli.ContainerInspect(ctx, cacheForwarder)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("inspect the actions cache forwarder: %w", err)
 	}
 	if info.NetworkSettings != nil {
 		if n := info.NetworkSettings.Networks[slotNetwork(slot)]; n != nil && n.IPAddress != "" {
@@ -235,7 +235,7 @@ func (p *Pool) ensureForwarder(ctx context.Context, self selfInfo, port int) err
 func (p *Pool) slotGateway(ctx context.Context, slot int) (string, error) {
 	n, err := p.cli.NetworkInspect(ctx, slotNetwork(slot), network.InspectOptions{})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("inspect network %s: %w", slotNetwork(slot), err)
 	}
 	var v6 string
 	for _, c := range n.IPAM.Config {

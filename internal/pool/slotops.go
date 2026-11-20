@@ -70,7 +70,7 @@ func (d dockerSlotOps) recreate(ctx context.Context, slot int) error {
 func (d dockerSlotOps) imageID(ctx context.Context, ref string) (string, error) {
 	info, err := d.p.cli.ImageInspect(ctx, ref)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("inspect image %s: %w", ref, err)
 	}
 	return info.ID, nil
 }
@@ -85,14 +85,14 @@ func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) err
 		Labels: map[string]string{LabelManaged: "true", LabelRole: "init"},
 	}, &container.HostConfig{Mounts: []mount.Mount{{Type: mount.TypeVolume, Source: slotExternals(i), Target: "/x"}}}, nil, nil, "")
 	if err != nil {
-		return err
+		return fmt.Errorf("copy runner externals into slot %d: %w", i, err)
 	}
 	defer p.Remove(context.WithoutCancel(ctx), c.ID)
 	if err := p.stageShim(ctx, c.ID); err != nil {
 		p.log.Warn("cannot install the Node shim: this slot's jobs use GitHub's actions cache", "slot", i, "error", err)
 	}
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
-		return err
+		return fmt.Errorf("copy runner externals into slot %d: %w", i, err)
 	}
 	if code := p.Wait(ctx, c.ID); code != 0 {
 		return fmt.Errorf("copy runner externals into slot %d: exit code %d", i, code)

@@ -304,7 +304,7 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 	p.forgetStore(i)
 	err := p.cli.ContainerRemove(ctx, slotName(i), container.RemoveOptions{Force: true})
 	if err != nil && !cerrdefs.IsNotFound(err) {
-		return err
+		return fmt.Errorf("remove dind: %w", err)
 	}
 	if err := p.DropSlotCache(ctx, i); err != nil {
 		// Keep the previous owner: the slot will be wiped again before any

@@ -28,10 +28,13 @@ func (p *Pool) EnsureImage(ctx context.Context, ref string, force bool) error {
 		return fmt.Errorf("pull %s: %w", ref, err)
 	}
 	defer rc.Close()
-	_, err = io.Copy(io.Discard, rc)
-	return err
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		return fmt.Errorf("pull %s: %w", ref, err)
+	}
+	return nil
 }
 
+// ensureMirror runs the pull-through Docker Hub mirror when cfg enables it.
 func (p *Pool) ensureMirror(ctx context.Context, cfg Config) error {
 	if !cfg.Mirror {
 		return nil
@@ -47,7 +50,7 @@ func (p *Pool) ensureMirror(ctx context.Context, cfg Config) error {
 	if err := p.EnsureImage(ctx, img, false); err != nil {
 		return err
 	}
-	if err := p.ensureVolume(ctx, "pitlane-mirror-data"); err != nil {
+	if err := p.ensureVolume(ctx, mirrorVolume); err != nil {
 		return err
 	}
 	_, err := p.cli.ContainerCreate(ctx, &container.Config{
@@ -56,12 +59,15 @@ func (p *Pool) ensureMirror(ctx context.Context, cfg Config) error {
 		Labels: map[string]string{LabelManaged: "true", LabelRole: "mirror"},
 	}, &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-		Mounts:        []mount.Mount{{Type: mount.TypeVolume, Source: "pitlane-mirror-data", Target: "/var/lib/registry"}},
+		Mounts:        []mount.Mount{{Type: mount.TypeVolume, Source: mirrorVolume, Target: "/var/lib/registry"}},
 	}, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{mirrorNetwork: {Aliases: []string{mirrorName}}}}, nil, mirrorName)
 	if err != nil {
-		return err
+		return fmt.Errorf("create the registry mirror: %w", err)
 	}
-	return p.cli.ContainerStart(ctx, mirrorName, container.StartOptions{})
+	if err := p.cli.ContainerStart(ctx, mirrorName, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start the registry mirror: %w", err)
+	}
+	return nil
 }
 
 func (p *Pool) ensureNetwork(ctx context.Context, name string, internal bool) error {
@@ -106,7 +112,7 @@ func (p *Pool) ensureVolume(ctx context.Context, name string) error {
 		return fmt.Errorf("prepare volume %s: %w", name, err)
 	}
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
-		return err
+		return fmt.Errorf("prepare volume %s: %w", name, err)
 	}
 	p.Wait(ctx, c.ID)
 	p.mu.Lock()

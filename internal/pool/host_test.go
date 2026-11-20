@@ -65,7 +65,8 @@ func TestMemoryProbeCaches(t *testing.T) {
 	now := time.Unix(1000, 0)
 	reads := 0
 	m := &memoryProbe{read: func() int64 { reads++; return int64(reads) }, now: func() time.Time { return now }}
-	if m.total() != 1 || m.total() != 1 {
+	first, second := m.total(), m.total()
+	if first != 1 || second != 1 {
 		t.Fatal("a reading must be reused")
 	}
 	now = now.Add(hostMemoryTTL)

@@ -15,6 +15,28 @@ type persistedSlot struct {
 	LastUsed  int64  `json:"lastUsed,omitempty"`
 }
 
+// loadState restores the persisted slot ownership, before the pool is
+// shared. An unreadable file restores nothing (fail closed): every slot then
+// has an unknown owner and is wiped before its first job.
+func (p *Pool) loadState() {
+	b, err := os.ReadFile(p.cfg.StateFile)
+	if err != nil {
+		return
+	}
+	if err := json.Unmarshal(b, &p.restored); err != nil {
+		p.log.Error("slot state unreadable, every slot will be wiped before its first job", "file", p.cfg.StateFile, "error", err)
+		p.restored = map[int]persistedSlot{}
+	}
+	if pruneRetired(p.restored, p.cfg.Slots, p.slots) > 0 {
+		p.saveLocked()
+	}
+	for i, st := range p.restored {
+		if st.Externals != "" {
+			p.externals[i] = st.Externals
+		}
+	}
+}
+
 // pruneRetired drops the persisted state of slots beyond the configured
 // count that no longer exist (left by a former, higher slot count) and
 // returns how many were dropped. Forgetting a slot is fail closed: if it
@@ -47,7 +69,7 @@ func (p *Pool) saveLocked() {
 	}
 	pruneRetired(out, p.cfg.Slots, p.slots)
 	p.restored = out
-	if err := writeState(p.cfg.StateFile, out); err != nil {
+	if err := writeJSONFile(p.cfg.StateFile, out); err != nil {
 		// Fail closed: a stale file could restore an owner that no longer
 		// matches the slot's data, and skip its wipe. Without a file every
 		// slot restores with an unknown owner and is wiped.
@@ -57,9 +79,6 @@ func (p *Pool) saveLocked() {
 		}
 	}
 }
-
-// writeState atomically replaces the state file.
-func writeState(file string, state map[int]persistedSlot) error { return writeJSONFile(file, state) }
 
 // writeJSONFile atomically replaces a 0600 JSON file.
 func writeJSONFile(file string, v any) error {

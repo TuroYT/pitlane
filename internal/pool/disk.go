@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -272,12 +273,12 @@ func (d dockerDiskOps) execSlot(ctx context.Context, slot int, script string) er
 func (d dockerDiskOps) volumes(ctx context.Context) ([]volInfo, error) {
 	du, err := d.p.cli.DiskUsage(ctx, types.DiskUsageOptions{Types: []types.DiskUsageObject{types.VolumeObject}})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("volume disk usage: %w", err)
 	}
 	// Any container referencing a volume counts, running or not.
 	list, err := d.p.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	used := map[string]bool{}
 	for _, c := range list {

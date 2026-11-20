@@ -144,11 +144,11 @@ func (d dockerSlotOps) mergeStore(ctx context.Context, slot int, vol string) (me
 	}
 	canon, err := p.cli.VolumeInspect(ctx, vol)
 	if err != nil {
-		return mergeStats{}, err
+		return mergeStats{}, fmt.Errorf("inspect volume %s: %w", vol, err)
 	}
 	work, err := p.cli.VolumeInspect(ctx, slotWork(slot))
 	if err != nil {
-		return mergeStats{}, err
+		return mergeStats{}, fmt.Errorf("inspect volume %s: %w", slotWork(slot), err)
 	}
 	var a, b syscall.Stat_t
 	if syscall.Stat(canon.Mountpoint, &a) != nil || syscall.Stat(work.Mountpoint, &b) != nil {
