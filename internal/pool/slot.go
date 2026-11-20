@@ -138,12 +138,8 @@ func (p *Pool) takeFailed() (failed, dirty []int) {
 // settings apply to the next runners.
 func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	cfg.defaults()
+	cfg.RunnerImage = p.keepRunnerFallback(ctx, cfg.RunnerImage)
 	p.mu.Lock()
-	// defaults() sends a Pitlane runner image back to the current default:
-	// keep the fallback Start chose when that default could not be pulled.
-	if fb := p.runnerFallback; fb.from != "" && cfg.RunnerImage == fb.from {
-		cfg.RunnerImage = fb.to
-	}
 	old := p.cfg
 	p.cfg = cfg
 	toStart, toRemove := p.resizeLocked(cfg.Slots)
@@ -159,6 +155,28 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// keepRunnerFallback returns the runner image Configure applies for want.
+// defaults() sends a Pitlane runner image back to the current default: while
+// that default is still not on the host, the fallback Start chose stays. Once
+// it is there (nothing is pulled here), the fallback is dropped.
+func (p *Pool) keepRunnerFallback(ctx context.Context, want string) string {
+	p.mu.Lock()
+	fb := p.runnerFallback
+	p.mu.Unlock()
+	if fb.from == "" || want != fb.from {
+		return want
+	}
+	if _, err := p.ops().imageID(ctx, fb.from); err != nil {
+		return fb.to
+	}
+	p.mu.Lock()
+	if p.runnerFallback == fb {
+		p.runnerFallback.from, p.runnerFallback.to = "", ""
+	}
+	p.mu.Unlock()
+	return want
 }
 
 // resizeLocked adds the slots missing below n (from their persisted state)
