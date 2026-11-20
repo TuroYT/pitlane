@@ -67,7 +67,7 @@ bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download
 
 Then:
 
-1. Open the printed URL and enter the setup token (`sudo pitlane setup-token`, or `docker compose exec pitlane /pitlane setup-token` with Compose; details in [Getting started](docs/getting-started.md)).
+1. Open the printed URL and enter the setup token (`sudo pitlane setup-token`, `docker compose exec pitlane /pitlane setup-token` with Compose, or `pct exec <CTID> -- pitlane setup-token` on the Proxmox host; details in [Getting started](docs/getting-started.md)).
 2. Click **Create GitHub App**, then install the App on your account or organization.
 3. Sign in with GitHub, go to **Repositories** and click **Enable**.
 4. In your workflows:
