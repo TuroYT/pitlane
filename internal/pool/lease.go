@@ -71,7 +71,7 @@ func (p *Pool) Prepare(ctx context.Context, l Lease) error {
 			// A warm cache is lost: say why this slot was the cheapest.
 			idle := "never"
 			if l.prevUsed > 0 {
-				idle = time.Since(time.Unix(l.prevUsed, 0)).Round(time.Second).String()
+				idle = p.clock().Sub(time.Unix(l.prevUsed, 0)).Round(time.Second).String()
 			}
 			args = append(args, "previous_owner_other_slots", l.prevKeeps, "idle_for", idle)
 		}

@@ -177,7 +177,7 @@ func (p *Pool) restoredSlotLocked(i int) *slot {
 		// used).
 		st = persistedSlot{Owner: UnknownOwner}
 	}
-	return &slot{SlotState: SlotState{Index: i, Status: statusStarting, Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID, LastUsed: st.LastUsed}}
+	return &slot{SlotState: SlotState{Index: i, Status: statusStarting, Since: p.clock().Unix(), Owner: st.Owner, TargetID: st.TargetID, LastUsed: st.LastUsed}}
 }
 
 func slotName(i int) string    { return fmt.Sprintf("pitlane-slot-%d", i) }
@@ -197,7 +197,7 @@ func slotExternals(i int) string { return fmt.Sprintf("pitlane-slot-%d-externals
 func (p *Pool) setStatus(i int, status, errMsg string) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
-		s.Status, s.Error, s.Since = status, errMsg, time.Now().Unix()
+		s.Status, s.Error, s.Since = status, errMsg, p.clock().Unix()
 		if status == statusReady {
 			s.Runner = ""
 		}

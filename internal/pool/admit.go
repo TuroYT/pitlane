@@ -98,7 +98,7 @@ func (p *Pool) Admit(ctx context.Context, r Request) (Lease, string) {
 	}
 	best := c.s
 	l := Lease{Slot: best.Index, Owner: r.Owner, TargetID: r.TargetID, Strict: r.Strict, wipe: c.wipe, Predicted: r.Predicted}
-	best.Status, best.Since = statusBusy, time.Now().Unix()
+	best.Status, best.Since = statusBusy, p.clock().Unix()
 	if p.reserved == nil {
 		p.reserved = map[int]int64{}
 	}
