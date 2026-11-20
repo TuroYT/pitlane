@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,22 +30,19 @@ func (r AccessRule) Subject() string {
 	return strings.ToLower(r.Org + "/" + r.Team)
 }
 
+const ruleCols = `id, org, team, role, created_at, created_by`
+
+// scanRule reads the ruleCols of a row.
+func scanRule(sc rowScanner) (AccessRule, error) {
+	var r AccessRule
+	err := sc.Scan(&r.ID, &r.Org, &r.Team, &r.Role, &r.CreatedAt, &r.CreatedBy)
+	return r, err
+}
+
 // AccessRules lists the rules, by organization then team.
 func (s *Store) AccessRules() ([]AccessRule, error) {
-	rows, err := s.db.Query(`SELECT id, org, team, role, created_at, created_by FROM access_rules ORDER BY org COLLATE NOCASE, team COLLATE NOCASE`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []AccessRule{}
-	for rows.Next() {
-		var r AccessRule
-		if err := rows.Scan(&r.ID, &r.Org, &r.Team, &r.Role, &r.CreatedAt, &r.CreatedBy); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return queryRows(context.Background(), s.db, []AccessRule{}, scanRule,
+		`SELECT `+ruleCols+` FROM access_rules ORDER BY org COLLATE NOCASE, team COLLATE NOCASE`)
 }
 
 // PutAccessRule adds a rule, or changes the role of the rule for the same
@@ -65,9 +63,7 @@ func (s *Store) PutAccessRule(r AccessRule) (AccessRule, error) {
 // DeleteAccessRule removes a rule. Sessions it granted lose that role on
 // their next request.
 func (s *Store) DeleteAccessRule(id int64) (AccessRule, error) {
-	var r AccessRule
-	err := s.db.QueryRow(`DELETE FROM access_rules WHERE id = ? RETURNING id, org, team, role, created_at, created_by`, id).
-		Scan(&r.ID, &r.Org, &r.Team, &r.Role, &r.CreatedAt, &r.CreatedBy)
+	r, err := scanRule(s.db.QueryRow(`DELETE FROM access_rules WHERE id = ? RETURNING `+ruleCols, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}

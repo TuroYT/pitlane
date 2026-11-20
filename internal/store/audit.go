@@ -31,20 +31,15 @@ func (s *Store) AuditPage(ctx context.Context, limit, offset int) ([]AuditEntry,
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, at, actor, action, subject, detail FROM audit ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
+	entries, err := queryRows(ctx, s.db, []AuditEntry{}, func(sc rowScanner) (AuditEntry, error) {
+		var e AuditEntry
+		err := sc.Scan(&e.ID, &e.At, &e.Actor, &e.Action, &e.Subject, &e.Detail)
+		return e, err
+	}, `SELECT id, at, actor, action, subject, detail FROM audit ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-	out := []AuditEntry{}
-	for rows.Next() {
-		var e AuditEntry
-		if err := rows.Scan(&e.ID, &e.At, &e.Actor, &e.Action, &e.Subject, &e.Detail); err != nil {
-			return nil, 0, err
-		}
-		out = append(out, e)
-	}
-	return out, total, rows.Err()
+	return entries, total, nil
 }
 
 // PruneAudit deletes audit entries older than the given age.

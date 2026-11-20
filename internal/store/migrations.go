@@ -1,9 +1,14 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 )
 
+// migrations is the database schema history. Migration i+1 is recorded in
+// schema_version once applied, so this list is append-only: an entry must
+// never change or move, or databases created by earlier versions break.
 var migrations = []string{
 	`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE targets (
@@ -133,30 +138,34 @@ var migrations = []string{
 	`DROP INDEX jobs_repo`,
 }
 
+// migrate applies, in order, the migrations the database has not run yet.
+// A database written by a newer Pitlane (more migrations than this binary
+// knows) is left as is.
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL)`); err != nil {
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL)`); err != nil {
 		return err
 	}
-	var v int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(v), 0) FROM schema_version`).Scan(&v); err != nil {
+	var applied int
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(v), 0) FROM schema_version`).Scan(&applied); err != nil {
 		return err
 	}
-	for i := v; i < len(migrations); i++ {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(migrations[i]); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("migration %d: %w", i+1, err)
-		}
-		if _, err := tx.Exec(`INSERT INTO schema_version (v) VALUES (?)`, i+1); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
+	for i := applied; i < len(migrations); i++ {
+		if err := s.applyMigration(ctx, i); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// applyMigration runs migrations[i] and records it in one transaction, so a
+// migration that fails leaves nothing behind and runs again on next start.
+func (s *Store) applyMigration(ctx context.Context, i int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			return fmt.Errorf("migration %d: %w", i+1, err)
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO schema_version (v) VALUES (?)`, i+1)
+		return err
+	})
 }

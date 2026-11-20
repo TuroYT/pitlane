@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"time"
 )
 
@@ -59,9 +61,19 @@ func DefaultWarmRunners(strict bool) int {
 	return DefaultMinRunners
 }
 
+// kindRepo is the Kind of a repository target (the other one is "org").
+const kindRepo = "repo"
+
+// Defaults of a new target, the same as the column defaults of the targets
+// table.
+const (
+	defaultScaleSetName = "pitlane"
+	defaultMaxRunners   = 4
+)
+
 // FullName returns "owner/repo" or "owner".
 func (t Target) FullName() string {
-	if t.Kind == "repo" {
+	if t.Kind == kindRepo {
 		return t.Owner + "/" + t.Repo
 	}
 	return t.Owner
@@ -72,7 +84,8 @@ func (t Target) URL() string { return "https://github.com/" + t.FullName() }
 
 const targetCols = `id, kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, scale_set_id, strict, max_job_minutes, strict_required, strict_forced_at`
 
-func scanTarget(sc interface{ Scan(...any) error }) (Target, error) {
+// scanTarget reads the targetCols of a row.
+func scanTarget(sc rowScanner) (Target, error) {
 	var t Target
 	var enabled, strict int
 	err := sc.Scan(&t.ID, &t.Kind, &t.Owner, &t.Repo, &t.InstallationID, &enabled, &t.MinRunners, &t.MaxRunners, &t.ScaleSetName, &t.ScaleSetID, &strict, &t.MaxJobMinutes, &t.StrictRequired, &t.StrictForcedAt)
@@ -82,20 +95,7 @@ func scanTarget(sc interface{ Scan(...any) error }) (Target, error) {
 
 // Targets lists all targets.
 func (s *Store) Targets() ([]Target, error) {
-	rows, err := s.db.Query(`SELECT ` + targetCols + ` FROM targets ORDER BY owner, repo`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Target
-	for rows.Next() {
-		t, err := scanTarget(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+	return queryRows(context.Background(), s.db, nil, scanTarget, `SELECT `+targetCols+` FROM targets ORDER BY owner, repo`)
 }
 
 // Target fetches one target.
@@ -103,23 +103,25 @@ func (s *Store) Target(id int64) (Target, error) {
 	return scanTarget(s.db.QueryRow(`SELECT `+targetCols+` FROM targets WHERE id = ?`, id))
 }
 
+const queryCreateTarget = `INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, strict_required, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 // CreateTarget inserts a target and returns it.
 func (s *Store) CreateTarget(t Target) (Target, error) {
 	if t.ScaleSetName == "" {
-		t.ScaleSetName = "pitlane"
+		t.ScaleSetName = defaultScaleSetName
 	}
 	if t.MaxRunners <= 0 {
-		t.MaxRunners = 4
+		t.MaxRunners = defaultMaxRunners
 	}
 	t.MaxJobMinutes = max(0, t.MaxJobMinutes)
-	res, err := s.db.Exec(`INSERT INTO targets (kind, owner, repo, installation_id, enabled, min_runners, max_runners, scale_set_name, strict, max_job_minutes, strict_required, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := s.db.Exec(queryCreateTarget,
 		t.Kind, t.Owner, t.Repo, t.InstallationID, boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, boolInt(t.Strict), t.MaxJobMinutes, t.StrictRequired, time.Now().Unix())
 	if err != nil {
 		return t, err
 	}
-	t.ID, _ = res.LastInsertId()
-	return t, nil
+	t.ID, err = res.LastInsertId()
+	return t, err
 }
 
 // SetScaleSetID records the scale set of a target, leaving its other fields
@@ -133,32 +135,42 @@ func (s *Store) SetScaleSetID(id int64, scaleSetID int) error {
 // not). A requirement switches a non-strict target to strict, which is
 // reported (flipped) and timestamped; clearing it never turns strict off.
 func (s *Store) SetStrictRequirement(id int64, reason string) (flipped bool, err error) {
-	tx, err := s.db.Begin()
+	ctx := context.Background()
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if reason != "" {
+			if flipped, err = forceStrict(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE targets SET strict_required = ? WHERE id = ?`, reason, id)
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback() }() // no-op after Commit
-	if reason != "" {
-		res, err := tx.Exec(`UPDATE targets SET strict = 1, strict_forced_at = ? WHERE id = ? AND strict = 0`, time.Now().Unix(), id)
-		if err != nil {
-			return false, err
-		}
-		n, _ := res.RowsAffected()
-		flipped = n > 0
-	}
-	if _, err := tx.Exec(`UPDATE targets SET strict_required = ? WHERE id = ?`, reason, id); err != nil {
+	return flipped, nil
+}
+
+// forceStrict switches a target to strict and timestamps it, reporting
+// whether it was not strict yet.
+func forceStrict(ctx context.Context, tx *sql.Tx, id int64) (bool, error) {
+	res, err := tx.ExecContext(ctx, `UPDATE targets SET strict = 1, strict_forced_at = ? WHERE id = ? AND strict = 0`, time.Now().Unix(), id)
+	if err != nil {
 		return false, err
 	}
-	return flipped, tx.Commit()
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
+
+// queryUpdateTarget never writes strict off while it is required, whatever
+// the caller read before (the requirement may have been set since).
+const queryUpdateTarget = `UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?,
+	strict = CASE WHEN strict_required != '' THEN 1 ELSE ? END, max_job_minutes = ? WHERE id = ?`
 
 // UpdateTarget saves the mutable fields of a target (not the strict
 // requirement, see SetStrictRequirement).
 func (s *Store) UpdateTarget(t Target) error {
-	// Strict cannot be written off while it is required, whatever the caller
-	// read before (the requirement may have been set since).
-	_, err := s.db.Exec(`UPDATE targets SET enabled = ?, min_runners = ?, max_runners = ?, scale_set_name = ?, scale_set_id = ?, installation_id = ?,
-		strict = CASE WHEN strict_required != '' THEN 1 ELSE ? END, max_job_minutes = ? WHERE id = ?`,
+	_, err := s.db.Exec(queryUpdateTarget,
 		boolInt(t.Enabled), t.MinRunners, t.MaxRunners, t.ScaleSetName, t.ScaleSetID, t.InstallationID, boolInt(t.Strict), max(0, t.MaxJobMinutes), t.ID)
 	return err
 }
@@ -169,6 +181,7 @@ func (s *Store) DeleteTarget(id int64) error {
 	return err
 }
 
+// boolInt is how SQLite stores a boolean.
 func boolInt(b bool) int {
 	if b {
 		return 1

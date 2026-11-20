@@ -4,26 +4,18 @@ import (
 	"context"
 )
 
+// queryJobMemoryPeaks reads the jobs_finished index.
 const queryJobMemoryPeaks = `SELECT COALESCE(runner_mem_peak, 0) + COALESCE(slot_mem_peak, 0) FROM jobs
 	WHERE finished_at >= ? AND (runner_mem_peak IS NOT NULL OR slot_mem_peak IS NOT NULL)`
 
 // JobMemoryPeaks returns the memory peak (runner plus slot, bytes) of the
 // measured jobs finished since the given Unix time.
 func (s *Store) JobMemoryPeaks(ctx context.Context, since int64) ([]float64, error) {
-	rows, err := s.db.QueryContext(ctx, queryJobMemoryPeaks, since)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []float64{}
-	for rows.Next() {
+	return queryRows(ctx, s.db, []float64{}, func(sc rowScanner) (float64, error) {
 		var v int64
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		out = append(out, float64(v))
-	}
-	return out, rows.Err()
+		err := sc.Scan(&v)
+		return float64(v), err
+	}, queryJobMemoryPeaks, since)
 }
 
 // JobResultCounts counts the finished jobs in the history by result.

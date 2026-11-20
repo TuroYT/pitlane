@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"time"
 )
 
@@ -37,18 +38,9 @@ func (s *Store) RunnerIDByName(name string) int64 {
 
 // RegisteredRunners lists the runners registered for a target.
 func (s *Store) RegisteredRunners(targetID int64) ([]RegisteredRunner, error) {
-	rows, err := s.db.Query(`SELECT runner_id, target_id, name, created_at FROM runners WHERE target_id = ? ORDER BY created_at`, targetID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []RegisteredRunner
-	for rows.Next() {
+	return queryRows(context.Background(), s.db, nil, func(sc rowScanner) (RegisteredRunner, error) {
 		var r RegisteredRunner
-		if err := rows.Scan(&r.ID, &r.TargetID, &r.Name, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+		err := sc.Scan(&r.ID, &r.TargetID, &r.Name, &r.CreatedAt)
+		return r, err
+	}, `SELECT runner_id, target_id, name, created_at FROM runners WHERE target_id = ? ORDER BY created_at`, targetID)
 }
