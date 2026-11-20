@@ -120,6 +120,7 @@ func enabledTargets(targets []store.Target) (map[int64]store.Target, bool) {
 	return enabled, strict
 }
 
+// loop runs the manager's periodic work until ctx ends.
 func (m *Manager) loop(ctx context.Context) {
 	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
@@ -156,6 +157,7 @@ func (m *Manager) liveTargets() []*target {
 	return slices.Collect(maps.Values(m.targets))
 }
 
+// reconcileAll reconciles every target, the one waiting longest first.
 func (m *Manager) reconcileAll() {
 	ts := m.liveTargets()
 	// Oldest demand first so a busy target cannot starve the others.

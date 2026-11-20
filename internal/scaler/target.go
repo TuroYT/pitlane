@@ -85,6 +85,7 @@ func (t *target) waitingSince() time.Time {
 	return t.waitSince
 }
 
+// setStatus records the listener's state for the UI.
 func (t *target) setStatus(status, errMsg string) {
 	t.mu.Lock()
 	t.status, t.err = status, errMsg

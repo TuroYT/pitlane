@@ -14,6 +14,8 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
+// scaler is the listener's handler of a target's job messages
+// (listener.Scaler).
 type scaler struct {
 	t       *target
 	session jobSession
@@ -40,6 +42,7 @@ func unixOrNow(ts time.Time) int64 {
 	return time.Now().Unix()
 }
 
+// shortRef is the workflow file name of a job's workflow ref.
 func shortRef(ref string) string {
 	// "owner/repo/.github/workflows/ci.yml@refs/heads/main" -> "ci.yml"
 	if i := strings.Index(ref, "@"); i >= 0 {
@@ -59,6 +62,8 @@ type pendingJob struct {
 // pendingTTL forgets a pending job whose start or completion was never seen.
 const pendingTTL = 24 * time.Hour
 
+// job is the history row of a job message, without what only some message
+// kinds carry.
 func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
 	cfg := s.t.cfg()
 	queued := unix(b.QueueTime)
@@ -84,10 +89,10 @@ func keyOf(j store.Job) jobKey {
 	return jobKey{owner: j.Owner, repo: j.Repo, workflow: j.WorkflowRef, job: j.JobName}
 }
 
-// pendingJob returns the pending entry of a job that just started, or a
+// pendingFor returns the pending entry of a job that just started, or a
 // fresh prediction when it was never seen pending (assigned before a
 // restart).
-func (s *scaler) pendingJob(ctx context.Context, j store.Job) pendingJob {
+func (s *scaler) pendingFor(ctx context.Context, j store.Job) pendingJob {
 	s.t.mu.Lock()
 	pj, ok := s.t.pending[j.JobID]
 	s.t.mu.Unlock()
@@ -258,7 +263,7 @@ func (s *scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	job.StartedAt = unixOrNow(j.RunnerAssignTime)
 	// QueuedAt stays 0 when unknown: the store keeps the queue time recorded
 	// earlier, and a made-up one would fake a wait of 0.
-	pj := s.pendingJob(ctx, job)
+	pj := s.pendingFor(ctx, job)
 	refine := -1 // slot whose reservation changes
 	s.t.mu.Lock()
 	delete(s.t.pending, j.JobID)
