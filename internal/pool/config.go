@@ -42,36 +42,70 @@ const AutoStrictSlots = -1
 // Pitlane, page cache) when admitting jobs.
 const DefaultMemoryReserveMB = 2048
 
+// Cache scopes (Config.CacheScope).
+const (
+	scopeOwner  = "owner"  // caches never cross GitHub owners
+	scopeShared = "shared" // every owner shares the caches
+)
+
+// Defaults of the Config fields left unset.
+const (
+	defaultSlots          = 2
+	defaultCacheScope     = scopeOwner
+	defaultKeepBuildGB    = 20
+	defaultImageOS        = "ubuntu24"
+	defaultActionsCacheGB = 20
+)
+
+// defaults fills the fields left unset (or out of range) with their default.
+// Settings saved by older versions may hold former default images: those
+// follow the current defaults too.
 func (c *Config) defaults() {
+	c.defaultSlots()
+	c.defaultImages()
+	c.defaultCaches()
+	c.defaultMemory()
+}
+
+func (c *Config) defaultSlots() {
 	if c.Slots <= 0 {
-		c.Slots = 2
+		c.Slots = defaultSlots
 	}
+	if c.StrictSlots < AutoStrictSlots {
+		c.StrictSlots = AutoStrictSlots
+	}
+}
+
+func (c *Config) defaultImages() {
 	if c.RunnerImage == "" || isDefaultRunnerImage(c.RunnerImage) {
 		c.RunnerImage = DefaultRunnerImage
 	}
 	if c.DindImage == "" || c.DindImage == legacyDindImage {
 		c.DindImage = DefaultDindImage
 	}
+	if c.ImageOS == "" {
+		c.ImageOS = defaultImageOS
+	}
+}
+
+func (c *Config) defaultCaches() {
 	if c.CacheScope == "" {
-		c.CacheScope = "owner"
+		c.CacheScope = defaultCacheScope
 	}
 	if c.KeepBuildGB <= 0 {
-		c.KeepBuildGB = 20
-	}
-	if c.ImageOS == "" {
-		c.ImageOS = "ubuntu24"
+		c.KeepBuildGB = defaultKeepBuildGB
 	}
 	if c.ActionsCacheGB <= 0 {
-		c.ActionsCacheGB = 20
+		c.ActionsCacheGB = defaultActionsCacheGB
 	}
 	if c.ActionsCacheOwnerPct <= 0 || c.ActionsCacheOwnerPct > 100 {
 		c.ActionsCacheOwnerPct = cache.DefaultOwnerPercent
 	}
+}
+
+func (c *Config) defaultMemory() {
 	if c.MemoryReserveMB < 0 {
 		c.MemoryReserveMB = DefaultMemoryReserveMB
-	}
-	if c.StrictSlots < AutoStrictSlots {
-		c.StrictSlots = AutoStrictSlots
 	}
 }
 

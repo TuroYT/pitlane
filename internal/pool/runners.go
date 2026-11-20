@@ -49,7 +49,7 @@ type RunnerSpec struct {
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 
 func cacheVolume(scope, owner string) string {
-	if scope == "shared" {
+	if scope == scopeShared {
 		return "pitlane-cache"
 	}
 	return "pitlane-cache-" + strings.ToLower(unsafeChars.ReplaceAllString(owner, "_"))

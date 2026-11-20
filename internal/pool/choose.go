@@ -33,7 +33,7 @@ type choice struct {
 // whose last owner is unknown (it may have been a strict job), is always
 // wiped, and so is any non-empty slot for a strict job.
 func (p *Pool) needsWipe(s *slot, owner string, strict bool) bool {
-	return (p.cfg.CacheScope == "owner" || strict || worthless(s.Owner)) && s.Owner != "" && (s.Owner != owner || strict)
+	return (p.cfg.CacheScope == scopeOwner || strict || worthless(s.Owner)) && s.Owner != "" && (s.Owner != owner || strict)
 }
 
 // worthless reports whether the cache of a slot last used by owner can serve
