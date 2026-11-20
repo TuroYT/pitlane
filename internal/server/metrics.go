@@ -82,8 +82,9 @@ func (s *Server) metricsAllowed(r *http.Request) bool {
 		return false // fail closed: a token exists but cannot be read
 	}
 	if tok != "" {
-		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		return ok && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(tok)) == 1
+		// The scheme is case-insensitive (RFC 7235), the token is not.
+		scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		return ok && strings.EqualFold(scheme, "Bearer") && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(tok)) == 1
 	}
 	if _, ok := s.currentUser(r); ok {
 		return true
@@ -129,9 +130,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.mgr != nil {
 		d.Targets = s.mgr.Snapshot()
 	}
-	d.Results, _ = s.store.JobResultCounts(ctx)
-	d.Durations, d.Waits, _ = s.store.JobTimings(ctx, time.Now().Add(-metricsWindow).Unix())
-	d.MemPeaks, _ = s.store.JobMemoryPeaks(ctx, time.Now().Add(-memoryWindow).Unix())
+	// A history that cannot be read must not look like "no job ran": fail
+	// the scrape (the metric `up` drops) instead of reporting zeros.
+	var herr error
+	if d.Results, herr = s.store.JobResultCounts(ctx); herr == nil {
+		d.Durations, d.Waits, herr = s.store.JobTimings(ctx, time.Now().Add(-metricsWindow).Unix())
+	}
+	if herr == nil {
+		d.MemPeaks, herr = s.store.JobMemoryPeaks(ctx, time.Now().Add(-memoryWindow).Unix())
+	}
+	if herr != nil {
+		s.internalErr(w, r, http.StatusInternalServerError, "metrics_jobs", "cannot read the job history", herr)
+		return
+	}
 	if total, free, err := s.pool.DiskSpace(); err == nil {
 		d.DiskTotal, d.DiskFree, d.DiskOK = total, free, true
 	}
