@@ -408,14 +408,10 @@ func TestJobLog(t *testing.T) {
 		case "/repos/acme/api/actions/runs/1/jobs":
 			_, _ = w.Write([]byte(`{"jobs":[{"id":7,"runner_name":"pitlane-a"}]}`))
 		case "/repos/acme/api/actions/jobs/7/logs":
+			// The same headers as every other call, the API version included.
+			requireGitHubHeaders(t, r)
 			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 				t.Errorf("Authorization = %q", got)
-			}
-			if got := r.Header.Get("Accept"); got != "application/vnd.github+json" {
-				t.Errorf("Accept = %q", got)
-			}
-			if got := r.Header.Get("User-Agent"); got != "pitlane" {
-				t.Errorf("User-Agent = %q", got)
 			}
 			http.Redirect(w, r, "/blob/log.txt?sig=abc", http.StatusFound)
 		case "/blob/log.txt":

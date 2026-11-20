@@ -424,13 +424,10 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
+	req, err := newRequest(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), "Bearer "+token, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "pitlane")
 	// The API redirects to a signed blob URL; Go drops the Authorization
 	// header on the cross-host redirect.
 	resp, err := httpClient.Do(req)
@@ -459,18 +456,21 @@ func withoutQuery(err error) error {
 	return &url.Error{Op: ue.Op, URL: u.String(), Err: ue.Err}
 }
 
-func do(ctx context.Context, method, u, auth string, body any, out any) error {
+// newRequest builds a GitHub API request with the headers every call sends.
+// auth is the Authorization header value ("" for none); body, when not nil,
+// is sent as JSON.
+func newRequest(ctx context.Context, method, u, auth string, body any) (*http.Request, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -480,6 +480,14 @@ func do(ctx context.Context, method, u, auth string, body any, out any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+func do(ctx context.Context, method, u, auth string, body any, out any) error {
+	req, err := newRequest(ctx, method, u, auth, body)
+	if err != nil {
+		return err
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
