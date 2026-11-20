@@ -1,9 +1,10 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,20 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
+const (
+	// compareTTL is how long a comparison is served from the cache.
+	compareTTL = 15 * time.Minute
+	// compareTimeout bounds the GitHub calls of one comparison.
+	compareTimeout = 90 * time.Second
+	// compareRuns is how many recent workflow runs are read per repository.
+	compareRuns = 60
+	// Runner name prefixes telling Pitlane's runners from GitHub-hosted ones.
+	pitlaneRunnerPrefix = "pitlane-"
+	hostedRunnerPrefix  = "GitHub Actions"
+)
+
+// compareRow is the median duration of one job on GitHub-hosted runners and
+// on Pitlane, in seconds, with the number of runs each median comes from.
 type compareRow struct {
 	Repo          string  `json:"repo"`
 	Workflow      string  `json:"workflow"`
@@ -22,91 +37,136 @@ type compareRow struct {
 	PitlaneCount  int     `json:"pitlaneCount"`
 }
 
-type compareCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	rows []compareRow
-}
-
-func median(v []float64) float64 {
-	if len(v) == 0 {
-		return 0
-	}
-	sort.Float64s(v)
-	return v[len(v)/2]
+// repoJobs are the recent successful jobs of one repository.
+type repoJobs struct {
+	Repo string // owner/name
+	Jobs []gh.JobRun
 }
 
 // handleCompare compares the median duration of each successful job on
 // Pitlane with the same job on GitHub-hosted runners (from the Actions
-// history of every enabled repository). Cached for 15 minutes.
+// history of every enabled repository). Cached for compareTTL; ?refresh=1
+// skips the cache.
 func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
-	c := &s.compare
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if r.URL.Query().Get("refresh") != "1" && time.Since(c.at) < 15*time.Minute && c.rows != nil {
-		writeJSON(w, c.rows)
-		return
-	}
-	targets, err := s.store.Targets()
+	refresh := r.URL.Query().Get("refresh") == "1"
+	rows, err := s.compare.get(refresh, func() ([]compareRow, error) {
+		targets, err := s.store.Targets()
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), compareTimeout)
+		defer cancel()
+		return compareRows(s.recentRepoJobs(ctx, targets)), nil
+	})
 	if err != nil {
 		s.internalErr(w, r, http.StatusInternalServerError, "targets_list", "cannot list the targets", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	defer cancel()
-	type key struct{ repo, wf, job string }
-	type acc struct{ hosted, pitlane []float64 }
-	groups := map[key]*acc{}
-	var mu sync.Mutex
+	writeJSON(w, rows)
+}
+
+// recentRepoJobs reads the recent jobs of every enabled repository target
+// from GitHub, in parallel. A repository GitHub cannot answer for is left
+// out of the comparison.
+func (s *Server) recentRepoJobs(ctx context.Context, targets []store.Target) []repoJobs {
+	repos := slices.DeleteFunc(slices.Clone(targets), func(t store.Target) bool { return t.Kind != "repo" || !t.Enabled })
+	out := make([]repoJobs, len(repos))
 	var wg sync.WaitGroup
-	for _, t := range targets {
-		if t.Kind != "repo" || !t.Enabled {
-			continue
-		}
-		wg.Add(1)
-		go func(t store.Target) {
-			defer wg.Done()
-			tok, err := s.token(ctx, t)
+	for i, t := range repos {
+		wg.Go(func() {
+			jobs, err := s.recentJobs(ctx, t)
 			if err != nil {
+				s.log.Debug("compare: cannot read the recent jobs", "target", t.FullName(), "error", err)
 				return
 			}
-			jobs, err := gh.RecentJobs(ctx, tok, t.Owner, t.Repo, 60)
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			for _, j := range jobs {
-				k := key{t.FullName(), j.Workflow, j.Name}
-				a := groups[k]
-				if a == nil {
-					a = &acc{}
-					groups[k] = a
-				}
-				switch {
-				case strings.HasPrefix(j.RunnerName, "pitlane-"):
-					a.pitlane = append(a.pitlane, j.Seconds)
-				case strings.HasPrefix(j.RunnerName, "GitHub Actions"):
-					a.hosted = append(a.hosted, j.Seconds)
-				}
-			}
-		}(t)
+			out[i] = repoJobs{Repo: t.FullName(), Jobs: jobs}
+		})
 	}
 	wg.Wait()
+	return out
+}
+
+// recentJobs returns the recent successful jobs of a repository target.
+func (s *Server) recentJobs(ctx context.Context, t store.Target) ([]gh.JobRun, error) {
+	if s.jobHistory != nil {
+		return s.jobHistory(ctx, t)
+	}
+	tok, err := s.token(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	return gh.RecentJobs(ctx, tok, t.Owner, t.Repo, compareRuns)
+}
+
+// compareRows groups jobs by repository, workflow and job name and gives the
+// median duration of each group on GitHub-hosted runners and on Pitlane.
+// Jobs that ran elsewhere (other self-hosted or larger runners) are left
+// out, and so is a group with none on either side. Rows are sorted by
+// repository, then by workflow and job name.
+func compareRows(repos []repoJobs) []compareRow {
+	type key struct{ repo, workflow, job string }
+	type durations struct{ hosted, pitlane []float64 }
+	groups := map[key]*durations{}
+	for _, rj := range repos {
+		for _, j := range rj.Jobs {
+			k := key{rj.Repo, j.Workflow, j.Name}
+			d := groups[k]
+			if d == nil {
+				d = &durations{}
+				groups[k] = d
+			}
+			switch {
+			case strings.HasPrefix(j.RunnerName, pitlaneRunnerPrefix):
+				d.pitlane = append(d.pitlane, j.Seconds)
+			case strings.HasPrefix(j.RunnerName, hostedRunnerPrefix):
+				d.hosted = append(d.hosted, j.Seconds)
+			}
+		}
+	}
 	rows := []compareRow{}
-	for k, a := range groups {
-		if len(a.pitlane) == 0 && len(a.hosted) == 0 {
+	for k, d := range groups {
+		if len(d.pitlane) == 0 && len(d.hosted) == 0 {
 			continue
 		}
-		rows = append(rows, compareRow{Repo: k.repo, Workflow: k.wf, Job: k.job,
-			HostedMedian: median(a.hosted), HostedCount: len(a.hosted), PitlaneMedian: median(a.pitlane), PitlaneCount: len(a.pitlane)})
+		rows = append(rows, compareRow{Repo: k.repo, Workflow: k.workflow, Job: k.job,
+			HostedMedian: median(d.hosted), HostedCount: len(d.hosted), PitlaneMedian: median(d.pitlane), PitlaneCount: len(d.pitlane)})
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Repo != rows[j].Repo {
-			return rows[i].Repo < rows[j].Repo
-		}
-		return rows[i].Workflow+rows[i].Job < rows[j].Workflow+rows[j].Job
+	slices.SortFunc(rows, func(a, b compareRow) int {
+		return cmp.Or(cmp.Compare(a.Repo, b.Repo), cmp.Compare(a.Workflow+a.Job, b.Workflow+b.Job))
 	})
+	return rows
+}
+
+// median returns the upper median of v (0 when empty), leaving v unchanged.
+func median(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	return slices.Sorted(slices.Values(v))[len(v)/2]
+}
+
+// compareCache keeps the last comparison for compareTTL. The zero value is
+// ready to use.
+type compareCache struct {
+	// mu is held while a comparison is computed, so concurrent requests wait
+	// for it instead of asking GitHub again.
+	mu   sync.Mutex
+	at   time.Time
+	rows []compareRow // nil until a comparison succeeds
+}
+
+// get returns the cached rows while they are fresh and refresh is false,
+// else the rows compute returns, cached when compute succeeds.
+func (c *compareCache) get(refresh bool, compute func() ([]compareRow, error)) ([]compareRow, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !refresh && c.rows != nil && time.Since(c.at) < compareTTL {
+		return c.rows, nil
+	}
+	rows, err := compute()
+	if err != nil {
+		return nil, err
+	}
 	c.rows, c.at = rows, time.Now()
-	writeJSON(w, rows)
+	return rows, nil
 }

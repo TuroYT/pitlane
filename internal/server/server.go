@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/TuroYT/pitlane/internal/cache"
+	"github.com/TuroYT/pitlane/internal/gh"
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/scaler"
 	"github.com/TuroYT/pitlane/internal/store"
@@ -55,9 +56,12 @@ type Server struct {
 	exchangeCode func(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, string, error)
 	// member replaces isMember (membership checks on GitHub) in tests.
 	member func(ctx context.Context, userToken, login, org, team string) (bool, error)
-	jobIDs jobIDCache // runner job -> GitHub job ID (see handleGitHubJob)
-	mu     sync.Mutex
-	states map[string]time.Time // OAuth / manifest states
+	// jobHistory replaces recentJobs (a repository's recent jobs on GitHub)
+	// in tests.
+	jobHistory func(ctx context.Context, t store.Target) ([]gh.JobRun, error)
+	jobIDs     jobIDCache // runner job -> GitHub job ID (see handleGitHubJob)
+	mu         sync.Mutex
+	states     map[string]time.Time // OAuth / manifest states
 }
 
 // New creates the server. web is the built UI (may be nil).
