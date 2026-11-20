@@ -12,7 +12,7 @@ import (
 func TestStartKeepsRunnerImageFallback(t *testing.T) {
 	p, _ := slotPool(1)
 	p.env = testHost(t)
-	p.cfg.NoQEMU = true
+	p.cfg.NoQEMU, p.cfg.Slots = true, 1
 	want := runnerRepo + ":v0.1.0"
 	routes := map[string]http.HandlerFunc{
 		"GET /images/" + p.cfg.DindImage + "/json":   reply(map[string]string{"Id": "x"}),

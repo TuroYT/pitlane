@@ -77,7 +77,8 @@ func TestStartSlot(t *testing.T) {
 			p.slots[0].dirty = tc.dirty
 			routes := map[string]http.HandlerFunc{}
 			if tc.down {
-				routes["GET /networks/pitlane-slot-0"] = replyStatus(http.StatusInternalServerError)
+				routes["GET /networks/pitlane-slot-0"] = replyStatus(http.StatusNotFound)
+				routes["POST /networks/create"] = replyStatus(http.StatusInternalServerError)
 			} else {
 				slotUpRoutes(routes, 0)
 			}
@@ -131,6 +132,7 @@ func TestRebuildSlot(t *testing.T) {
 		for _, v := range slotVolumes(0) {
 			routes["DELETE /volumes/"+v] = replyStatus(http.StatusNoContent)
 		}
+		routes["GET /containers/json"] = reply([]any{}) // containers still using its volumes
 		slotUpRoutes(routes, 0)
 		// The volumes are created again and prepared for the runner user.
 		for _, v := range slotVolumes(0) {
@@ -157,6 +159,7 @@ func TestRebuildSlot(t *testing.T) {
 		p, _ := slotPool(1, SlotState{Index: 0, Status: statusStarting, Owner: "acme", TargetID: 4})
 		p.externals[0] = "sha"
 		newDockerAPI(t, p, map[string]http.HandlerFunc{
+			"GET /containers/json":                     reply([]any{}),
 			"DELETE /containers/pitlane-slot-0":        replyStatus(http.StatusNotFound),
 			"DELETE /volumes/pitlane-slot-0-docker":    replyStatus(http.StatusNoContent),
 			"DELETE /volumes/pitlane-slot-0-work":      replyStatus(http.StatusConflict),
@@ -214,12 +217,12 @@ func TestRemoveSlotKeepsVolumesAndForgetsState(t *testing.T) {
 
 func TestDropSlotCache(t *testing.T) {
 	p := newTestPool("owner")
-	routes := map[string]http.HandlerFunc{}
+	routes := map[string]http.HandlerFunc{"GET /containers/json": reply([]any{})}
 	for _, v := range slotVolumes(1) {
 		routes["DELETE /volumes/"+v] = replyStatus(http.StatusNotFound) // already gone
 	}
 	api := newDockerAPI(t, p, routes)
-	if err := p.DropSlotCache(context.Background(), 1); err != nil || len(api.called()) != 3 {
+	if err := p.DropSlotCache(context.Background(), 1); err != nil || len(api.called()) != 6 { // per volume: its users, then the volume
 		t.Fatalf("missing volumes are not an error: %v %v", err, api.called())
 	}
 	routes["DELETE /volumes/pitlane-slot-1-docker"] = replyStatus(http.StatusInternalServerError)

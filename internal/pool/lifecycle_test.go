@@ -12,9 +12,10 @@ import (
 func TestConfigureResizesAndStartsSlots(t *testing.T) {
 	p, _ := slotPool(4, SlotState{Index: 0, Status: statusReady, Owner: "acme"},
 		SlotState{Index: 1, Status: statusReady}, SlotState{Index: 2, Status: statusBusy}, SlotState{Index: 3, Status: statusReady})
-	routes := map[string]http.HandlerFunc{"DELETE /containers/pitlane-slot-3": replyStatus(http.StatusNoContent)}
+	routes := map[string]http.HandlerFunc{}
 	for i := range 4 {
 		slotUpRoutes(routes, i)
+		routes["DELETE /containers/"+slotName(i)] = replyStatus(http.StatusNoContent)
 	}
 	api := newDockerAPI(t, p, routes)
 	cfg := p.Config()
@@ -69,6 +70,7 @@ func TestConfigureAppliesChanges(t *testing.T) {
 	slotUpRoutes(routes, 0)
 	api := newDockerAPI(t, p, routes)
 	cfg := p.Config()
+	cfg.Slots = 1
 	cfg.ActionsCacheGB, cfg.ActionsCacheOwnerPct = 7, 40
 	cfg.RunnerImage = "ghcr.io/acme/runner:v2"
 	cfg.Mirror = true

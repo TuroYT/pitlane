@@ -48,7 +48,8 @@ func TestNewRestoresState(t *testing.T) {
 
 func TestPing(t *testing.T) {
 	p := newTestPool("owner")
-	newDockerAPI(t, p, map[string]http.HandlerFunc{"GET /_ping": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("OK")) }})
+	pong := func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("OK")) }
+	newDockerAPI(t, p, map[string]http.HandlerFunc{"GET /_ping": pong, "HEAD /_ping": pong})
 	if err := p.Ping(context.Background()); err != nil {
 		t.Fatal(err)
 	}

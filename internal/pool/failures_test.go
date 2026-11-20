@@ -32,7 +32,7 @@ func TestStartFailureModes(t *testing.T) {
 	t.Run("a mirror that cannot run is not fatal", func(t *testing.T) {
 		p, _ := slotPool(1)
 		p.env = testHost(t)
-		p.cfg.NoQEMU, p.cfg.Mirror = true, true
+		p.cfg.NoQEMU, p.cfg.Mirror, p.cfg.Slots = true, true, 1
 		var logs bytes.Buffer
 		p.log = slog.New(slog.NewTextHandler(&logs, nil))
 		routes := map[string]http.HandlerFunc{
@@ -203,7 +203,7 @@ func TestMergeStoreFailures(t *testing.T) {
 		text   string
 	}{
 		"canonical volume cannot be created":  {map[string]http.HandlerFunc{"GET /volumes/" + vol: replyStatus(http.StatusNotFound), "POST /volumes/create": replyStatus(http.StatusInternalServerError)}, nil, "create volume"},
-		"canonical volume unknown":            {map[string]http.HandlerFunc{"GET /volumes/" + vol: replyStatus(http.StatusInternalServerError)}, nil, "create volume"},
+		"canonical volume unknown":            {map[string]http.HandlerFunc{"GET /volumes/" + vol: replyStatus(http.StatusInternalServerError), "POST /volumes/create": replyStatus(http.StatusInternalServerError)}, nil, "create volume"},
 		"work volume unknown":                 {map[string]http.HandlerFunc{"GET /volumes/" + vol: volume(canon), "GET /volumes/pitlane-slot-0-work": replyStatus(http.StatusNotFound)}, nil, "inspect volume pitlane-slot-0-work"},
 		"volumes not on Pitlane's filesystem": {map[string]http.HandlerFunc{"GET /volumes/" + vol: volume(canon), "GET /volumes/pitlane-slot-0-work": volume(filepath.Join(root, "nowhere"))}, errNoHostAccess, ""},
 	} {
