@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 
@@ -125,7 +124,7 @@ func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
 		return "", err
 	}
 	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), cacheForwarder, nil)
-	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
+	if err != nil && !alreadyConnected(err) {
 		return "", err
 	}
 	info, err := p.cli.ContainerInspect(ctx, cacheForwarder)

@@ -116,9 +116,7 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 	}
 	hc.LogConfig = runnerLogConfig()
 	hc.CPUShares = cfg.CPUShares
-	if cfg.MemoryMB > 0 {
-		hc.Memory = cfg.MemoryMB * 1024 * 1024
-	}
+	hc.Memory = cfg.memoryBytes()
 	created, err := p.cli.ContainerCreate(ctx, &container.Config{
 		Image: cfg.RunnerImage,
 		User:  "runner",

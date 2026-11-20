@@ -185,6 +185,10 @@ func slotNetwork(i int) string { return fmt.Sprintf("pitlane-slot-%d", i) }
 func slotDocker(i int) string  { return fmt.Sprintf("pitlane-slot-%d-docker", i) }
 func slotWork(i int) string    { return fmt.Sprintf("pitlane-slot-%d-work", i) }
 
+// slotVolumes lists the volumes of slot i: its daemon's data, its work
+// directory and its runner externals.
+func slotVolumes(i int) []string { return []string{slotDocker(i), slotWork(i), slotExternals(i)} }
+
 // slotExternals holds a copy of the runner's /home/runner/externals (the Node
 // runtimes used by JavaScript actions). Job containers (`container:`) get it
 // mounted at /__e, so it must exist on the slot daemon's side too.
@@ -271,9 +275,9 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 	if s, ok := p.slots[i]; ok {
 		s.Owner, s.TargetID, s.dirty = "", 0, false
 	}
-	delete(p.chowned, slotDocker(i))
-	delete(p.chowned, slotWork(i))
-	delete(p.chowned, slotExternals(i))
+	for _, v := range slotVolumes(i) {
+		delete(p.chowned, v)
+	}
 	delete(p.externals, i)
 	p.saveLocked()
 	p.mu.Unlock()
@@ -282,7 +286,7 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 
 // DropSlotCache deletes a retired slot's volumes (frees disk).
 func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
-	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
+	for _, v := range slotVolumes(i) {
 		// Runner and init containers mount these volumes too (even when
 		// stopped): Docker refuses to delete a volume while any container
 		// still references it.
@@ -306,6 +310,7 @@ func (p *Pool) removeVolumeUsers(ctx context.Context, vol string) {
 		p.Remove(ctx, c.ID)
 	}
 }
+
 // MarkRunner records which runner occupies a slot (for the UI).
 func (p *Pool) MarkRunner(slotIdx int, runner string) {
 	p.mu.Lock()

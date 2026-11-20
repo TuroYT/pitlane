@@ -115,3 +115,12 @@ func (c Config) WithDefaults() Config {
 	c.defaults()
 	return c
 }
+
+// memoryBytes is the memory limit of every runner and slot daemon in bytes
+// (0: unlimited).
+func (c Config) memoryBytes() int64 {
+	if c.MemoryMB <= 0 {
+		return 0
+	}
+	return c.MemoryMB << 20
+}

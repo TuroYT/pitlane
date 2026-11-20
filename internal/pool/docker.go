@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
@@ -144,4 +145,10 @@ func (p *Pool) Remove(ctx context.Context, id string) {
 	if err := p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
 		p.log.Warn("remove container", "container", id, "error", err)
 	}
+}
+
+// alreadyConnected reports whether a NetworkConnect error only means that the
+// container is already on the network.
+func alreadyConnected(err error) bool {
+	return cerrdefs.IsConflict(err) || strings.Contains(err.Error(), "already exists")
 }
