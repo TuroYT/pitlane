@@ -190,6 +190,102 @@ func TestInstallations(t *testing.T) {
 	}
 }
 
+// fakeInstallations serves a paginated /app/installations of total
+// installations, counting page requests. A page in failPage answers 502.
+type fakeInstallations struct {
+	t        *testing.T
+	total    int
+	failPage int
+	pages    []int
+}
+
+func (f *fakeInstallations) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	requireGitHubHeaders(f.t, r)
+	requireAppJWT(f.t, r)
+	if r.URL.Path != "/app/installations" {
+		f.t.Errorf("unexpected request %s %s", r.Method, r.URL)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if got := r.URL.Query().Get("per_page"); got != "100" {
+		f.t.Errorf("per_page = %q, want 100", got)
+	}
+	var page int
+	if _, err := fmt.Sscan(r.URL.Query().Get("page"), &page); err != nil {
+		f.t.Errorf("page = %q: %v", r.URL.Query().Get("page"), err)
+	}
+	f.pages = append(f.pages, page)
+	if page == f.failPage {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	var list []map[string]any
+	for i := (page-1)*100 + 1; i <= min(page*100, f.total); i++ {
+		list = append(list, map[string]any{"id": i, "account": map[string]any{"login": fmt.Sprintf("org%d", i), "type": "Organization"}, "repository_selection": "all"})
+	}
+	_ = json.NewEncoder(w).Encode(list)
+}
+
+func TestInstallationsPagination(t *testing.T) {
+	var capped []int
+	for i := 1; i <= maxAppPages; i++ {
+		capped = append(capped, i)
+	}
+	for _, tc := range []struct {
+		name      string
+		total     int
+		wantPages []int
+	}{
+		{"none", 0, []int{1}},
+		{"one short page", 3, []int{1}},
+		{"exactly one full page needs a second request to know it is over", 100, []int{1, 2}},
+		{"one more than a page", 101, []int{1, 2}},
+		{"three pages", 250, []int{1, 2, 3}},
+		{"capped at the page limit", 2500, capped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeInstallations{t: t, total: tc.total}
+			serveAPI(t, f)
+			got, err := newTestClient(t).Installations(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := min(tc.total, maxAppPages*100)
+			if len(got) != want {
+				t.Fatalf("got %d installations, want %d", len(got), want)
+			}
+			if fmt.Sprint(f.pages) != fmt.Sprint(tc.wantPages) {
+				t.Errorf("requested pages %v, want %v", f.pages, tc.wantPages)
+			}
+			if want > 0 {
+				if first := got[0]; first.ID != 1 || first.Account.Login != "org1" {
+					t.Errorf("first installation = %+v", first)
+				}
+				if last := got[len(got)-1]; last.ID != int64(want) {
+					t.Errorf("last installation = %+v, want ID %d", last, want)
+				}
+			}
+		})
+	}
+}
+
+// A page that fails after others succeeded fails the listing: a truncated
+// list of installations must not pass for the whole.
+func TestInstallationsFailingPage(t *testing.T) {
+	f := &fakeInstallations{t: t, total: 250, failPage: 2}
+	serveAPI(t, f)
+	got, err := newTestClient(t).Installations(context.Background())
+	if statusCode(err) != http.StatusBadGateway {
+		t.Fatalf("err = %v, want a 502", err)
+	}
+	if got != nil {
+		t.Errorf("a failed listing returned %d partial installations", len(got))
+	}
+	if fmt.Sprint(f.pages) != "[1 2]" {
+		t.Errorf("requested pages %v, want to stop at the failing page 2", f.pages)
+	}
+}
+
 func TestAppEndpointErrors(t *testing.T) {
 	calls := map[string]func(*AppClient) error{
 		"Installations": func(c *AppClient) error {

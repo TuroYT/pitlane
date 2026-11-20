@@ -12,58 +12,6 @@ import (
 	"testing"
 )
 
-func TestLatestRunnerVersion(t *testing.T) {
-	tests := []struct {
-		name   string
-		status int
-		body   string
-		want   string
-		fail   bool
-	}{
-		{"tag with a leading v", 200, `{"tag_name":"v2.330.0"}`, "2.330.0", false},
-		{"tag without v", 200, `{"tag_name":"2.331.1"}`, "2.331.1", false},
-		{"pre-release suffix is kept", 200, `{"tag_name":"v2.332.0-rc1"}`, "2.332.0-rc1", false},
-		{"rate limited", 403, `{"message":"API rate limit exceeded"}`, "", true},
-		{"no release", 404, `{"message":"Not Found"}`, "", true},
-		{"malformed JSON", 200, `{"tag_name":`, "", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			serveAPI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/repos/actions/runner/releases/latest" {
-					t.Errorf("path = %s", r.URL.Path)
-				}
-				requireGitHubHeaders(t, r)
-				// Public endpoint: no credentials must be sent.
-				if a := r.Header.Get("Authorization"); a != "" {
-					t.Errorf("Authorization = %q, want none", a)
-				}
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			got, err := LatestRunnerVersion(context.Background())
-			if (err != nil) != tc.fail {
-				t.Fatalf("err = %v, want failure: %v", err, tc.fail)
-			}
-			if got != tc.want {
-				t.Errorf("version = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestLatestRunnerVersionCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	serveAPI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cancel()
-		<-r.Context().Done()
-	}))
-	if _, err := LatestRunnerVersion(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want context.Canceled", err)
-	}
-}
-
 // fakeRuns serves the completed runs of acme/app and the jobs of each run.
 // A run whose jobs reply is missing answers 500.
 type fakeRuns struct {
@@ -408,14 +356,10 @@ func TestJobLog(t *testing.T) {
 		case "/repos/acme/api/actions/runs/1/jobs":
 			_, _ = w.Write([]byte(`{"jobs":[{"id":7,"runner_name":"pitlane-a"}]}`))
 		case "/repos/acme/api/actions/jobs/7/logs":
+			// The same headers as every other call, the API version included.
+			requireGitHubHeaders(t, r)
 			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 				t.Errorf("Authorization = %q", got)
-			}
-			if got := r.Header.Get("Accept"); got != "application/vnd.github+json" {
-				t.Errorf("Accept = %q", got)
-			}
-			if got := r.Header.Get("User-Agent"); got != "pitlane" {
-				t.Errorf("User-Agent = %q", got)
 			}
 			http.Redirect(w, r, "/blob/log.txt?sig=abc", http.StatusFound)
 		case "/blob/log.txt":

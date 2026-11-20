@@ -60,7 +60,11 @@ func (m *Manager) archiveRunnerLog(ctx context.Context, r *runner) {
 		m.log.Warn("archive runner log", "runner", r.name, "error", err)
 		return
 	}
-	if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
+	limit := m.logLimit
+	if limit <= 0 {
+		limit = maxArchivedLog
+	}
+	if err := archiveLog(f, limit, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
 		m.log.Warn("archive runner log", "runner", r.name, "error", err)
 	}
 	if err := f.Close(); err != nil {

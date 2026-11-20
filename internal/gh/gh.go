@@ -122,15 +122,29 @@ func (c *AppClient) jwt() (string, error) {
 	return tok.SignedString(c.key)
 }
 
+// maxAppPages bounds the pages read from a list (100 items each), so that
+// at most 2,000 installations or repositories are returned.
+const maxAppPages = 20
+
 // Installations lists the accounts the App is installed on.
 func (c *AppClient) Installations(ctx context.Context) ([]Installation, error) {
 	j, err := c.jwt()
 	if err != nil {
 		return nil, err
 	}
-	var out []Installation
-	err = do(ctx, http.MethodGet, apiBase+"/app/installations?per_page=100", "Bearer "+j, nil, &out)
-	return out, err
+	var all []Installation
+	for page := 1; page <= maxAppPages; page++ {
+		var out []Installation
+		u := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", apiBase, page)
+		if err := do(ctx, http.MethodGet, u, "Bearer "+j, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out...)
+		if len(out) < 100 {
+			break
+		}
+	}
+	return all, nil
 }
 
 // InstallationToken returns a short-lived token for an installation.
@@ -153,7 +167,7 @@ func (c *AppClient) Repositories(ctx context.Context, installationID int64) ([]R
 		return nil, err
 	}
 	var all []Repo
-	for page := 1; page <= 20; page++ {
+	for page := 1; page <= maxAppPages; page++ {
 		var out struct {
 			Repositories []Repo `json:"repositories"`
 		}
@@ -288,17 +302,6 @@ func TeamMember(ctx context.Context, userToken, org, team, login string) (bool, 
 
 // ---------------------------------------------------------------- helpers
 
-// LatestRunnerVersion returns the latest actions/runner release tag (e.g. "2.330.0").
-func LatestRunnerVersion(ctx context.Context) (string, error) {
-	var rel struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := do(ctx, http.MethodGet, apiBase+"/repos/actions/runner/releases/latest", "", nil, &rel); err != nil {
-		return "", err
-	}
-	return strings.TrimPrefix(rel.TagName, "v"), nil
-}
-
 // JobRun is one completed job of a workflow run.
 type JobRun struct {
 	Workflow   string
@@ -410,13 +413,10 @@ func JobLog(ctx context.Context, token, owner, repo string, runID int64, runnerN
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
+	req, err := newRequest(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), "Bearer "+token, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "pitlane")
 	// The API redirects to a signed blob URL; Go drops the Authorization
 	// header on the cross-host redirect.
 	resp, err := httpClient.Do(req)
@@ -445,18 +445,21 @@ func withoutQuery(err error) error {
 	return &url.Error{Op: ue.Op, URL: u.String(), Err: ue.Err}
 }
 
-func do(ctx context.Context, method, u, auth string, body any, out any) error {
+// newRequest builds a GitHub API request with the headers every call sends.
+// auth is the Authorization header value ("" for none); body, when not nil,
+// is sent as JSON.
+func newRequest(ctx context.Context, method, u, auth string, body any) (*http.Request, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rd = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -466,6 +469,14 @@ func do(ctx context.Context, method, u, auth string, body any, out any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+func do(ctx context.Context, method, u, auth string, body any, out any) error {
+	req, err := newRequest(ctx, method, u, auth, body)
+	if err != nil {
+		return err
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {

@@ -33,7 +33,10 @@ type TargetState struct {
 
 // Snapshot returns the live state of every target.
 func (m *Manager) Snapshot() []TargetState {
-	targets, _ := m.store.Targets()
+	targets, err := m.store.Targets()
+	if err != nil {
+		m.log.Error("load targets", "error", err)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]TargetState, 0, len(targets))

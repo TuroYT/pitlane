@@ -25,12 +25,12 @@ func (t *target) run(parent context.Context) {
 	defer context.AfterFunc(parent, t.cancel)()
 	backoff := minListenBackoff
 	for t.ctx.Err() == nil {
-		start := time.Now()
+		start := t.m.clock()
 		err := t.listen()
 		if t.ctx.Err() != nil {
 			break
 		}
-		if time.Since(start) > listenHealthy {
+		if t.m.clock().Sub(start) > listenHealthy {
 			backoff = minListenBackoff
 		}
 		msg := "listener stopped"
@@ -41,7 +41,7 @@ func (t *target) run(parent context.Context) {
 		t.setStatus("error", msg)
 		select {
 		case <-t.ctx.Done():
-		case <-time.After(backoff):
+		case <-t.m.wait(backoff):
 		}
 		backoff = min(backoff*2, maxListenBackoff)
 	}

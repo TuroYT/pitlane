@@ -161,10 +161,14 @@ func (u *Updater) LoadSettings() Settings {
 	}
 }
 
+// errInvalidWindow is what SaveSettings answers to a window out of range:
+// the caller's mistake, as opposed to a store failure.
+var errInvalidWindow = errors.New("the update window hours must be between 0 and 23")
+
 // SaveSettings validates and stores the preferences.
 func (u *Updater) SaveSettings(s Settings) error {
 	if !s.Window.Valid() {
-		return errors.New("the update window hours must be between 0 and 23")
+		return errInvalidWindow
 	}
 	for k, v := range map[string]string{
 		keyAuto: strconv.FormatBool(s.AutoUpdate), keyAutoPull: strconv.FormatBool(s.AutoPull),
@@ -544,7 +548,13 @@ func (u *Updater) Handler() http.Handler {
 			return
 		}
 		if err := u.SaveSettings(s); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			if errors.Is(err, errInvalidWindow) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			// The store failed (disk full, read-only database): not the client's fault.
+			u.log().Error("save update settings", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot save the settings"})
 			return
 		}
 		writeJSON(w, http.StatusOK, u.State())

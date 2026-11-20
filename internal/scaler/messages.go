@@ -164,7 +164,7 @@ func (s *scaler) fetchQueueTime(job store.Job) {
 	var err error
 	for attempt := range queueLookupAttempts {
 		if attempt > 0 {
-			time.Sleep(s.t.m.queueLookupRetry)
+			<-s.t.m.wait(s.t.m.queueLookupRetry)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), queueLookupTimeout)
 		var at time.Time

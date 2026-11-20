@@ -103,7 +103,7 @@ func (t *target) stop(remove bool) {
 	t.cancel()
 	t.removeIdleRunners()
 	if remove {
-		t.deleteScaleSetWhenDrained(time.Now, time.Sleep)
+		t.deleteScaleSetWhenDrained(t.m.clock, t.m.sleep)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,12 +29,14 @@ type fakePool struct {
 	stopped   []string
 	started   []pool.RunnerSpec
 	orphans   []pool.Orphan
+	listErr   error // RunnerContainers fails
 	names     map[string]bool
 	namesErr  error
 	stopErr   error
 	prepErr   error
 	startErr  error
 	logs      string
+	logsErr   error // Logs fails after writing logs
 	exits     map[string]chan struct{}
 	signal    chan struct{}
 	nextID    int
@@ -53,7 +56,7 @@ func newFakePool(free int) *fakePool {
 func (f *fakePool) RunnerContainers(context.Context) ([]pool.Orphan, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.orphans, nil
+	return f.orphans, f.listErr
 }
 
 func (f *fakePool) RunnerNames(context.Context) (map[string]bool, error) {
@@ -170,8 +173,13 @@ func (f *fakePool) Logs(_ context.Context, _ string, _ bool, w io.Writer) error 
 	f.mu.Lock()
 	logs := f.logs
 	f.mu.Unlock()
-	_, err := io.WriteString(w, logs)
-	return err
+	f.mu.Lock()
+	logsErr := f.logsErr
+	f.mu.Unlock()
+	if _, err := io.WriteString(w, logs); err != nil {
+		return err
+	}
+	return logsErr
 }
 
 func (f *fakePool) Remove(_ context.Context, id string) {
@@ -215,21 +223,43 @@ type fakeAPI struct {
 	gets       []int64
 	deleted    []int
 	session    *fakeSession
+	// ensureID is the scale set ensureScaleSet returns (42 when 0); created
+	// is what it reports. The errors make the matching call fail.
+	ensureID  int
+	created   bool
+	ensureErr error
+	openErr   error
+	jitErr    error
+	deleteErr error
 }
 
 func newFakeAPI() *fakeAPI {
 	return &fakeAPI{nextRunner: 100, removeErr: map[int64]error{}, getErr: map[int64]error{}, session: newFakeSession()}
 }
 
-func (f *fakeAPI) ensureScaleSet(context.Context, string) (int, bool, error) { return 42, false, nil }
+func (f *fakeAPI) ensureScaleSet(context.Context, string) (int, bool, error) {
+	if f.ensureErr != nil {
+		return 0, false, f.ensureErr
+	}
+	if f.ensureID != 0 {
+		return f.ensureID, f.created, nil
+	}
+	return 42, f.created, nil
+}
 
 func (f *fakeAPI) openSession(context.Context, int, string) (jobSession, error) {
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
 	return f.session, nil
 }
 
 func (f *fakeAPI) generateJIT(_ context.Context, name string, _ int) (jitConfig, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.jitErr != nil {
+		return jitConfig{}, f.jitErr
+	}
 	f.nextRunner++
 	return jitConfig{encoded: "jit-" + name, runnerID: f.nextRunner}, nil
 }
@@ -255,7 +285,7 @@ func (f *fakeAPI) deleteScaleSet(_ context.Context, id int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, id)
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeAPI) removedIDs() []int64 {
@@ -271,6 +301,11 @@ type fakeSession struct {
 	max      int
 	running  chan struct{}
 	once     sync.Once
+	// runFn, when set, replaces the wait for the context in run.
+	runFn      func(ctx context.Context) error
+	acquireErr error
+	closeErr   error
+	closed     int
 }
 
 func newFakeSession() *fakeSession { return &fakeSession{running: make(chan struct{})} }
@@ -279,12 +314,15 @@ func (f *fakeSession) acquireJobs(_ context.Context, ids []int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acquired = append(f.acquired, ids...)
-	return nil
+	return f.acquireErr
 }
 
 func (f *fakeSession) run(ctx context.Context, _, maxRunners int, _ *slog.Logger, _ listener.Scaler) error {
 	f.setMaxRunners(maxRunners)
 	f.once.Do(func() { close(f.running) })
+	if f.runFn != nil {
+		return f.runFn(ctx)
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -295,7 +333,12 @@ func (f *fakeSession) setMaxRunners(n int) {
 	f.mu.Unlock()
 }
 
-func (f *fakeSession) close(context.Context) error { return nil }
+func (f *fakeSession) close(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed++
+	return f.closeErr
+}
 
 // harness is a manager wired to fakes, with one target already listening.
 type harness struct {
@@ -374,3 +417,138 @@ func (h *harness) startingCount() int {
 }
 
 func notFound() error { return fmt.Errorf("wrapped: %w", scaleset.RunnerNotFoundError) }
+
+// recordingLog is a slog handler that keeps what was logged.
+type recordingLog struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+func (r *recordingLog) Enabled(context.Context, slog.Level) bool { return true }
+func (r *recordingLog) WithAttrs([]slog.Attr) slog.Handler       { return r }
+func (r *recordingLog) WithGroup(string) slog.Handler            { return r }
+func (r *recordingLog) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, rec.Level.String()+" "+rec.Message)
+	return nil
+}
+
+// has reports whether a message containing s was logged.
+func (r *recordingLog) has(s string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.logs {
+		if strings.Contains(l, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// fakeClock replaces the manager's time sources: after answers at once and
+// remembers the delays, now only moves when the test advances it.
+type fakeClock struct {
+	mu     sync.Mutex
+	at     time.Time
+	delays []time.Duration
+	// onAfter, when set, runs for each delay (outside mu) with its number
+	// (from 1) and may move the clock.
+	onAfter func(n int, d time.Duration)
+}
+
+func newFakeClock() *fakeClock { return &fakeClock{at: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)} }
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.at = c.at.Add(d)
+	c.mu.Unlock()
+}
+
+func (c *fakeClock) after(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	c.delays = append(c.delays, d)
+	n, hook := len(c.delays), c.onAfter
+	c.mu.Unlock()
+	if hook != nil {
+		hook(n, d)
+	}
+	ch := make(chan time.Time, 1)
+	ch <- c.now()
+	return ch
+}
+
+func (c *fakeClock) waited() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.delays...)
+}
+
+// install makes the manager use the fake time sources.
+func (c *fakeClock) install(m *Manager) { m.now, m.after = c.now, c.after }
+
+// addTarget adds a second live target to the harness's manager.
+func (h *harness) addTarget(t *testing.T, cfg store.Target) *target {
+	t.Helper()
+	created, err := h.st.CreateTarget(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := newTarget(h.m, created)
+	tg.client, tg.session, tg.scaleSetID = h.api, h.api.session, 42
+	t.Cleanup(tg.cancel)
+	h.m.mu.Lock()
+	h.m.targets[created.ID] = tg
+	h.m.mu.Unlock()
+	return tg
+}
+
+// startedManager marks the manager as started, the way Start does, without
+// the background loops.
+func (h *harness) startedManager(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.m.mu.Lock()
+	h.m.ctx = ctx
+	h.m.mu.Unlock()
+	return ctx
+}
+
+// fakeTickers hands the manager loop channels the test fires by hand. A
+// send returns once the loop received it, so sending twice on the same
+// channel also tells the first tick's work is done.
+type fakeTickers struct {
+	ch map[time.Duration]chan time.Time
+}
+
+func newFakeTickers() *fakeTickers {
+	f := &fakeTickers{ch: map[time.Duration]chan time.Time{}}
+	for _, d := range []time.Duration{reconcileInterval, housekeepingInterval, timeoutCheckInterval, orphanInterval} {
+		f.ch[d] = make(chan time.Time)
+	}
+	return f
+}
+
+func (f *fakeTickers) tick(d time.Duration) (<-chan time.Time, func()) { return f.ch[d], func() {} }
+
+func (f *fakeTickers) fire(d time.Duration) { f.ch[d] <- time.Time{} }
+
+// newBareManager is a manager over a fresh store, without any target.
+func newBareManager(t *testing.T, p Pool) (*Manager, *store.Store) {
+	t.Helper()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	m := New(st, p, t.TempDir(), func() Credentials { return Credentials{PAT: "x"} }, func() {},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return m, st
+}
