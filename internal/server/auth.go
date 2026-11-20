@@ -348,7 +348,11 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		_ = s.store.DeleteSession(c.Value)
+		if err := s.store.DeleteSession(c.Value); err != nil {
+			// The browser forgets the cookie anyway, but the session lives on
+			// until it expires: someone must be able to see that.
+			s.log.Error("cannot delete the session at sign-out", "error", err)
+		}
 	}
 	s.setCookie(w, r, sessionCookie, "", -1)
 	writeJSON(w, map[string]bool{"ok": true})
