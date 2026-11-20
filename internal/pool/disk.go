@@ -184,7 +184,7 @@ func (p *Pool) idleSlots() []int {
 	defer p.mu.Unlock()
 	var out []int
 	for i, s := range p.slots {
-		if s.Status == "ready" && !s.retire && !s.dirty {
+		if s.Status == statusReady && !s.retire && !s.dirty {
 			out = append(out, i)
 		}
 	}
@@ -197,10 +197,10 @@ func (p *Pool) claimIdle(i int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s, ok := p.slots[i]
-	if !ok || s.Status != "ready" || s.retire || s.dirty {
+	if !ok || s.Status != statusReady || s.retire || s.dirty {
 		return false
 	}
-	s.Status = "cleaning"
+	s.Status = statusCleaning
 	return true
 }
 
@@ -219,7 +219,7 @@ func (p *Pool) unclaim(ctx context.Context, i int) {
 		p.signal()
 		return
 	}
-	p.setStatus(i, "ready", "")
+	p.setStatus(i, statusReady, "")
 }
 
 func gb(b int64) float64 { return float64(b*10>>30) / 10 }

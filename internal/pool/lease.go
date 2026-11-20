@@ -53,7 +53,7 @@ func (p *Pool) wipeFailed(i int, err error) {
 		s.dirty, s.wiping = true, false
 	}
 	p.mu.Unlock()
-	p.setStatus(i, "error", "wipe failed, slot will be rebuilt: "+err.Error())
+	p.setStatus(i, statusError, "wipe failed, slot will be rebuilt: "+err.Error())
 }
 
 // Prepare readies a reserved slot for a runner: it wipes the slot when it
@@ -120,7 +120,7 @@ func strictVolumes(runner string) (cache, tools string) {
 // failure it stays dirty and is rebuilt rather than reused.
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.unreserve(l.Slot)
-	p.setStatus(l.Slot, "cleaning", "")
+	p.setStatus(l.Slot, statusCleaning, "")
 	err := p.ops().wipe(ctx, l.Slot)
 	if l.Runner != "" {
 		c, t := strictVolumes(l.Runner)
@@ -159,7 +159,7 @@ func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	if err := p.ensureExternals(ctx, l.Slot, p.Config().RunnerImage); err != nil {
 		p.log.Warn("cannot copy the runner externals after a strict job, the next job copies them", "slot", l.Slot, "error", err)
 	}
-	p.setStatus(l.Slot, "ready", "")
+	p.setStatus(l.Slot, statusReady, "")
 }
 
 // clearDir returns a command removing everything in dir (hidden files
@@ -198,7 +198,7 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 		return
 	}
 	p.unreserve(l.Slot) // the job is over: its memory is free
-	p.setStatus(l.Slot, "cleaning", "")
+	p.setStatus(l.Slot, statusCleaning, "")
 	cfg := p.Config()
 	_, code, err := p.ops().exec(ctx, slotName(l.Slot), releaseScript(cfg.KeepBuildGB))
 	failed := err != nil || code != 0
@@ -241,18 +241,18 @@ func (p *Pool) Release(ctx context.Context, l Lease) {
 		if err != nil {
 			msg += ": " + err.Error()
 		}
-		p.setStatus(l.Slot, "error", msg)
+		p.setStatus(l.Slot, statusError, msg)
 		return
 	}
 	if upgrade {
 		p.log.Info("upgrading slot after its job", "slot", l.Slot)
 		if err := p.ops().recreate(ctx, l.Slot); err != nil {
-			p.setStatus(l.Slot, "error", err.Error())
+			p.setStatus(l.Slot, statusError, err.Error())
 			return
 		}
 	}
 	p.markUsed(l.Slot)
-	p.setStatus(l.Slot, "ready", "")
+	p.setStatus(l.Slot, statusReady, "")
 }
 
 // markUsed records (and persists) that a slot just finished a job: the least

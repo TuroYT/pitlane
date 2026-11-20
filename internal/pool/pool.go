@@ -46,10 +46,20 @@ const (
 	LabelSpec       = "dev.pitlane.spec"
 )
 
+// Slot statuses (SlotState.Status).
+const (
+	statusStarting = "starting" // its daemon is being created or started
+	statusReady    = "ready"    // free: can be handed out
+	statusBusy     = "busy"     // leased to a job
+	statusCleaning = "cleaning" // cleaned after a job, or pruned for disk space
+	statusError    = "error"    // failed: the retry loop starts (or rebuilds) it again
+	statusRetiring = "retiring" // shown for a slot beyond the slot count, until removed
+)
+
 // SlotState is a read-only snapshot of a slot.
 type SlotState struct {
 	Index    int    `json:"index"`
-	Status   string `json:"status"` // starting, ready, busy, cleaning, error, retiring
+	Status   string `json:"status"` // one of the status constants
 	Owner    string `json:"owner"`
 	TargetID int64  `json:"targetId"`
 	Runner   string `json:"runner"`

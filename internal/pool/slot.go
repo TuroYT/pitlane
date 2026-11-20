@@ -89,8 +89,8 @@ func (p *Pool) retryFailed(ctx context.Context) {
 		p.mu.Lock()
 		var failed, dirty []int
 		for i, s := range p.slots {
-			if s.Status == "error" && !s.retire {
-				s.Status = "starting"
+			if s.Status == statusError && !s.retire {
+				s.Status = statusStarting
 				if s.dirty {
 					dirty = append(dirty, i)
 				} else {
@@ -130,7 +130,7 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	for i, s := range p.slots {
 		if i >= cfg.Slots {
 			s.retire = true
-			if s.Status != "busy" && s.Status != "cleaning" {
+			if s.Status != statusBusy && s.Status != statusCleaning {
 				toRemove = append(toRemove, i)
 			}
 		}
@@ -177,7 +177,7 @@ func (p *Pool) restoredSlotLocked(i int) *slot {
 		// used).
 		st = persistedSlot{Owner: UnknownOwner}
 	}
-	return &slot{SlotState: SlotState{Index: i, Status: "starting", Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID, LastUsed: st.LastUsed}}
+	return &slot{SlotState: SlotState{Index: i, Status: statusStarting, Since: time.Now().Unix(), Owner: st.Owner, TargetID: st.TargetID, LastUsed: st.LastUsed}}
 }
 
 func slotName(i int) string    { return fmt.Sprintf("pitlane-slot-%d", i) }
@@ -194,12 +194,12 @@ func (p *Pool) setStatus(i int, status, errMsg string) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
 		s.Status, s.Error, s.Since = status, errMsg, time.Now().Unix()
-		if status == "ready" {
+		if status == statusReady {
 			s.Runner = ""
 		}
 	}
 	p.mu.Unlock()
-	if status == "ready" {
+	if status == statusReady {
 		p.signal()
 	}
 }
@@ -207,20 +207,20 @@ func (p *Pool) setStatus(i int, status, errMsg string) {
 func (p *Pool) startSlot(ctx context.Context, i int) {
 	if err := p.ensureSlot(ctx, i); err != nil {
 		p.log.Error("slot failed to start", "slot", i, "error", err)
-		p.setStatus(i, "error", err.Error())
+		p.setStatus(i, statusError, err.Error())
 		return
 	}
 	p.mu.Lock()
 	s := p.slots[i]
-	busy := s != nil && s.Status == "busy"
+	busy := s != nil && s.Status == statusBusy
 	dirty := s != nil && s.dirty
 	p.mu.Unlock()
 	if dirty {
-		p.setStatus(i, "error", "slot must be rebuilt before reuse")
+		p.setStatus(i, statusError, "slot must be rebuilt before reuse")
 		return
 	}
 	if !busy {
-		p.setStatus(i, "ready", "")
+		p.setStatus(i, statusReady, "")
 	}
 	p.log.Info("slot ready", "slot", i)
 }
@@ -240,7 +240,7 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 // rebuildSlot deletes a slot with all its volumes and starts it again empty.
 func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	if err := p.resetSlot(ctx, i); err != nil {
-		p.setStatus(i, "error", "rebuild: "+err.Error())
+		p.setStatus(i, statusError, "rebuild: "+err.Error())
 		return
 	}
 	p.startSlot(ctx, i)
@@ -325,7 +325,7 @@ func (p *Pool) Slots() []SlotState {
 		if s, ok := p.slots[i]; ok {
 			st := s.SlotState
 			if s.retire {
-				st.Status = "retiring"
+				st.Status = statusRetiring
 			}
 			st.StrictOnly = reserved[i]
 			if res, ok := p.reserved[i]; ok {
@@ -343,7 +343,7 @@ func (p *Pool) FreeSlots() int {
 	defer p.mu.Unlock()
 	n := 0
 	for _, s := range p.slots {
-		if s.Status == "ready" && !s.retire {
+		if s.Status == statusReady && !s.retire {
 			n++
 		}
 	}

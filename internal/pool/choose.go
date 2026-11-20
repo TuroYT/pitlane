@@ -47,7 +47,7 @@ func warmFor(s *slot, owner string) bool {
 		return false
 	}
 	switch s.Status {
-	case "ready", "busy", "cleaning", "starting":
+	case statusReady, statusBusy, statusCleaning, statusStarting:
 		return true
 	}
 	return false
@@ -72,7 +72,7 @@ func (p *Pool) othersWarmLocked(s *slot) int {
 // other case is an idle empty slot pruned for disk space). Callers hold p.mu.
 func (p *Pool) strictCleaningLocked() bool {
 	for _, s := range p.slots {
-		if (s.Owner == StrictOwner || s.Owner == "") && s.Status == "cleaning" && !s.dirty && !s.retire {
+		if (s.Owner == StrictOwner || s.Owner == "") && s.Status == statusCleaning && !s.dirty && !s.retire {
 			return true
 		}
 	}
@@ -156,7 +156,7 @@ func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
 	var bestUsed int64
 	skipped := false // a free slot a strict job may not wipe
 	for _, s := range p.slots {
-		if s.Status != "ready" || s.retire || s.dirty {
+		if s.Status != statusReady || s.retire || s.dirty {
 			continue
 		}
 		res := reserved[s.Index]

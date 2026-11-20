@@ -108,7 +108,7 @@ func (p *Pool) maybeRegisterQEMU(ctx context.Context) {
 	p.mu.Lock()
 	idle := true
 	for _, s := range p.slots {
-		if s.Status == "busy" || s.Status == "cleaning" {
+		if s.Status == statusBusy || s.Status == statusCleaning {
 			idle = false
 		}
 	}

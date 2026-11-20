@@ -98,7 +98,7 @@ func (p *Pool) Admit(ctx context.Context, r Request) (Lease, string) {
 	}
 	best := c.s
 	l := Lease{Slot: best.Index, Owner: r.Owner, TargetID: r.TargetID, Strict: r.Strict, wipe: c.wipe, Predicted: r.Predicted}
-	best.Status, best.Since = "busy", time.Now().Unix()
+	best.Status, best.Since = statusBusy, time.Now().Unix()
 	if p.reserved == nil {
 		p.reserved = map[int]int64{}
 	}
@@ -228,7 +228,7 @@ func (p *Pool) SetPrediction(slot int, bytes int64) {
 	}
 	// A runner adopted after a restart: its slot is busy but was never
 	// leased by this process.
-	if s, ok := p.slots[slot]; ok && s.Status == "busy" {
+	if s, ok := p.slots[slot]; ok && s.Status == statusBusy {
 		if p.reserved == nil {
 			p.reserved = map[int]int64{}
 		}

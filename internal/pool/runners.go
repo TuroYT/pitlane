@@ -251,9 +251,9 @@ func (p *Pool) adoptContainer(id string, labels map[string]string, state string,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.slots[slotIdx]; ok {
-		s.Status, s.Owner, s.TargetID, s.Runner = "busy", owner, tid, o.Name
+		s.Status, s.Owner, s.TargetID, s.Runner = statusBusy, owner, tid, o.Name
 	} else {
-		p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: "busy", Owner: owner, TargetID: tid, Runner: o.Name, Since: time.Now().Unix()}}
+		p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: statusBusy, Owner: owner, TargetID: tid, Runner: o.Name, Since: time.Now().Unix()}}
 	}
 	return o
 }
