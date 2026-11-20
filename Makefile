@@ -41,6 +41,7 @@ check: ## Run what CI runs on code, in CI's order, stopping at the first failure
 	$(MAKE) --no-print-directory lint
 	$(MAKE) --no-print-directory test-race
 	$(MAKE) --no-print-directory build
+	$(MAKE) --no-print-directory vuln
 
 lint: ## What CI's "Go / lint" checks: gofmt, go vet, go.mod tidiness, golangci-lint
 	@test -z "$$(gofmt -l ./cmd ./internal ./web)" || { gofmt -l ./cmd ./internal ./web; echo "run gofmt -w on the files above"; exit 1; }
