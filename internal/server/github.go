@@ -21,6 +21,7 @@ func (s *Server) Credentials() scaler.Credentials {
 	return scaler.Credentials{AppClientID: s.store.Get("app_client_id", ""), AppPEM: pem}
 }
 
+// appConfigured reports whether the setup saved a GitHub App.
 func (s *Server) appConfigured() bool { return s.store.Get("app_client_id", "") != "" }
 
 // errAppKey is a GitHub App private key that cannot be read back.

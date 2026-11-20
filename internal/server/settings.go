@@ -50,6 +50,14 @@ type Settings struct {
 	StrictSlotsActive int   `json:"strictSlotsActive"`
 }
 
+// Defaults of the settings that are not the pool's own.
+const (
+	defaultDiskGB = 20 // keep_build_gb, min_free_disk_gb and actions_cache_gb
+	// defaultHistoryDays is the job history kept; internal/scaler prunes the
+	// history with the same default.
+	defaultHistoryDays = 30
+)
+
 // LoadPoolConfig reads the pool configuration from the store.
 func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 	return pool.Config{
@@ -62,10 +70,10 @@ func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 		CacheScope:           st.Get("cache_scope", "owner"),
 		Mirror:               st.Get("mirror", "true") == "true",
 		NoQEMU:               st.Get("qemu", "true") != "true",
-		KeepBuildGB:          st.GetInt("keep_build_gb", 20),
-		MinFreeDiskGB:        st.GetInt("min_free_disk_gb", 20),
+		KeepBuildGB:          st.GetInt("keep_build_gb", defaultDiskGB),
+		MinFreeDiskGB:        st.GetInt("min_free_disk_gb", defaultDiskGB),
 		ActionsCache:         st.Get("actions_cache", "true") == "true",
-		ActionsCacheGB:       st.GetInt("actions_cache_gb", 20),
+		ActionsCacheGB:       st.GetInt("actions_cache_gb", defaultDiskGB),
 		ActionsCacheOwnerPct: st.GetInt("actions_cache_owner_pct", cache.DefaultOwnerPercent),
 		MemoryAdmission:      st.Get("memory_admission", "true") == "true",
 		MemoryReserveMB:      int64(st.GetInt("memory_reserve_mb", pool.DefaultMemoryReserveMB)),
@@ -82,7 +90,7 @@ func (s *Server) settings(r *http.Request) Settings {
 	return Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
-		HistoryDays: s.store.GetInt("history_days", 30), BaseURL: s.knownBaseURL(r),
+		HistoryDays: s.store.GetInt("history_days", defaultHistoryDays), BaseURL: s.knownBaseURL(r),
 		MetricsTokenSet: s.store.Get(metricsTokenKey, "") != "",
 		ActionsCache:    c.ActionsCache, ActionsCacheGB: c.ActionsCacheGB, ActionsCacheOwnerPct: c.ActionsCacheOwnerPct,
 		ActionsCacheStats: s.actionsCacheStats(),
@@ -90,6 +98,7 @@ func (s *Server) settings(r *http.Request) Settings {
 	}
 }
 
+// handleGetSettings answers the current settings.
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.settings(r))
 }
