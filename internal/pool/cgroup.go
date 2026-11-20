@@ -34,35 +34,56 @@ func (fs cgroupFS) find(id string, pid int) string {
 	if _, err := os.Stat(filepath.Join(fs.root, "cgroup.controllers")); err != nil {
 		return "" // not cgroup v2 (or not mounted here)
 	}
-	// The main process's own cgroup works with any cgroup driver and parent,
-	// as long as Pitlane shares the host's PID and cgroup namespaces. A slot
-	// daemon moves itself into a child cgroup ("…/init"): cut the path at
-	// the container's own directory.
-	if pid > 0 {
-		if b, err := os.ReadFile(filepath.Join(fs.proc, strconv.Itoa(pid), "cgroup")); err == nil {
-			for _, line := range strings.Split(string(b), "\n") {
-				rel, ok := strings.CutPrefix(line, "0::")
-				if !ok {
-					continue
-				}
-				parts := strings.Split(strings.Trim(rel, "/"), "/")
-				for i, part := range parts {
-					if strings.Contains(part, id) {
-						dir := filepath.Join(append([]string{fs.root}, parts[:i+1]...)...)
-						if strings.HasPrefix(dir, filepath.Clean(fs.root)+"/") && isCgroup(dir) {
-							return dir
-						}
-						break
-					}
-				}
-			}
-		}
+	if dir := fs.fromProc(id, pid); dir != "" {
+		return dir
 	}
 	// Default layouts: systemd cgroup driver, then cgroupfs.
 	for _, rel := range []string{"system.slice/docker-" + id + ".scope", "docker/" + id} {
 		if dir := filepath.Join(fs.root, rel); isCgroup(dir) {
 			return dir
 		}
+	}
+	return ""
+}
+
+// fromProc finds the cgroup of container id from its main process pid (0:
+// unknown). It works with any cgroup driver and parent, as long as Pitlane
+// shares the host's PID and cgroup namespaces. A slot daemon moves itself
+// into a child cgroup ("…/init"): the path is cut at the container's own
+// directory.
+func (fs cgroupFS) fromProc(id string, pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(fs.proc, strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		rel, ok := strings.CutPrefix(line, "0::")
+		if !ok {
+			continue
+		}
+		if dir := fs.containerDir(id, rel); dir != "" {
+			return dir
+		}
+	}
+	return ""
+}
+
+// containerDir returns the directory of the first component of the cgroup
+// path rel naming container id, when it is a cgroup under the root.
+func (fs cgroupFS) containerDir(id, rel string) string {
+	parts := strings.Split(strings.Trim(rel, "/"), "/")
+	for i, part := range parts {
+		if !strings.Contains(part, id) {
+			continue
+		}
+		dir := filepath.Join(append([]string{fs.root}, parts[:i+1]...)...)
+		if strings.HasPrefix(dir, filepath.Clean(fs.root)+"/") && isCgroup(dir) {
+			return dir
+		}
+		return ""
 	}
 	return ""
 }

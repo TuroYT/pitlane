@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"testing"
 
 	"github.com/TuroYT/pitlane/internal/cache"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
 )
 
 type fakeBroker struct {
@@ -408,4 +411,61 @@ console.log('include-hidden-files=' + core.getBooleanInput('include-hidden-files
 		}
 	}
 	t.Log(checked, "Node runtimes shimmed in", img)
+}
+
+func TestSlotGatewayPrefersIPv4(t *testing.T) {
+	p := newTestPool("owner")
+	newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"GET /networks/pitlane-slot-1": reply(map[string]any{"IPAM": map[string]any{"Config": []map[string]string{
+			{"Gateway": "fd00::1"}, {"Gateway": ""}, {"Gateway": "172.20.0.1"},
+		}}}),
+		"GET /networks/pitlane-slot-2": reply(map[string]any{"IPAM": map[string]any{"Config": []map[string]string{{"Gateway": "fd00::1"}}}}),
+	})
+	if gw, err := p.slotGateway(context.Background(), 1); err != nil || gw != "172.20.0.1" {
+		t.Fatalf("gateway: %q %v", gw, err)
+	}
+	if gw, err := p.slotGateway(context.Background(), 2); err != nil || gw != "fd00::1" {
+		t.Fatalf("IPv6 only: %q %v", gw, err)
+	}
+}
+
+func TestEnsureForwarderReplacesStale(t *testing.T) {
+	p := newTestPool("owner")
+	var created container.Config
+	api := newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"GET /containers/pitlane-cache-forward/json": reply(map[string]any{"Id": "old", "Config": map[string]any{"Labels": map[string]string{LabelSpec: "other/1"}},
+			"State": map[string]any{"Running": true}}),
+		"DELETE /containers/pitlane-cache-forward": replyStatus(http.StatusNoContent),
+		"POST /containers/create": func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&created)
+			_, _ = io.WriteString(w, `{"Id":"new"}`)
+		},
+		"POST /containers/pitlane-cache-forward/start": replyStatus(http.StatusNoContent),
+	})
+	self := selfInfo{ID: "self", Image: "pitlane:test", Exe: "/pitlane", Network: "compose", Target: "pitlane"}
+	if err := p.ensureForwarder(context.Background(), self, 8091); err != nil {
+		t.Fatal(err)
+	}
+	if created.Labels[LabelSpec] != "self/8091" || strings.Join(created.Cmd, " ") != "cache-forward :8091 pitlane:8091" || created.User != "65534:65534" {
+		t.Fatalf("forwarder: %+v", created)
+	}
+	if got := api.called(); !slices.Contains(got, "DELETE /containers/pitlane-cache-forward") {
+		t.Fatalf("stale forwarder not removed: %v", got)
+	}
+}
+
+func TestForwarderNetwork(t *testing.T) {
+	nets := map[string]*network.EndpointSettings{
+		"pitlane-slot-0": {IPAddress: "10.0.0.2"},
+		"bridge":         {IPAddress: "172.17.0.2"},
+		"zeta":           {IPAddress: "10.3.0.2"},
+		"down":           {},
+	}
+	if n, target := forwarderNetwork("pitlane", nets); n != "bridge" || target != "172.17.0.2" {
+		t.Fatalf("default bridge needs the IP: %s %s", n, target)
+	}
+	delete(nets, "bridge")
+	if n, target := forwarderNetwork("pitlane", nets); n != "zeta" || target != "pitlane" {
+		t.Fatalf("named network: %s %s", n, target)
+	}
 }

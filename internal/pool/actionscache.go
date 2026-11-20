@@ -148,44 +148,57 @@ type selfInfo struct {
 // selfContainer returns the container Pitlane runs in, nil when it runs on
 // the host. It is looked up once.
 func (p *Pool) selfContainer(ctx context.Context) *selfInfo {
-	p.selfOnce.Do(func() {
-		env := p.host()
-		if !env.inDocker() {
-			return
-		}
-		host, err := env.hostname()
-		if err != nil {
-			return
-		}
-		exe, err := env.executable()
-		if err != nil {
-			return
-		}
-		info, err := p.cli.ContainerInspect(ctx, host)
-		if err != nil || info.NetworkSettings == nil || info.Config == nil {
-			p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
-			return
-		}
-		self := &selfInfo{ID: info.ID, Image: info.Image, Exe: exe}
-		for name, n := range info.NetworkSettings.Networks {
-			if n == nil || n.IPAddress == "" || strings.HasPrefix(name, "pitlane-") {
-				continue
-			}
-			target := strings.TrimPrefix(info.Name, "/")
-			if name == "bridge" { // no name resolution on the default bridge
-				target = n.IPAddress
-			}
-			if self.Network == "" || name < self.Network {
-				self.Network, self.Target = name, target
-			}
-		}
-		if self.Network == "" {
-			p.log.Warn("Pitlane's container has no network the actions cache forwarder can join: runners reach it through the slot gateway")
-			return
-		}
-		p.self = self
-	})
+	p.selfOnce.Do(func() { p.self = p.lookupSelf(ctx) })
 	return p.self
+}
+
+// lookupSelf finds the container Pitlane runs in by its host name, nil when
+// Pitlane runs on the host or the container cannot be used.
+func (p *Pool) lookupSelf(ctx context.Context) *selfInfo {
+	env := p.host()
+	if !env.inDocker() {
+		return nil
+	}
+	host, err := env.hostname()
+	if err != nil {
+		return nil
+	}
+	exe, err := env.executable()
+	if err != nil {
+		return nil
+	}
+	info, err := p.cli.ContainerInspect(ctx, host)
+	if err != nil || info.NetworkSettings == nil || info.Config == nil {
+		p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
+		return nil
+	}
+	self := &selfInfo{ID: info.ID, Image: info.Image, Exe: exe}
+	self.Network, self.Target = forwarderNetwork(strings.TrimPrefix(info.Name, "/"), info.NetworkSettings.Networks)
+	if self.Network == "" {
+		p.log.Warn("Pitlane's container has no network the actions cache forwarder can join: runners reach it through the slot gateway")
+		return nil
+	}
+	return self
+}
+
+// forwarderNetwork picks the network of Pitlane's container (named name)
+// that the cache forwarder joins, the first by name except Pitlane's own,
+// and Pitlane's address on it: its name, or its IP on the default bridge
+// (no name resolution there). "" when there is none.
+func forwarderNetwork(name string, nets map[string]*network.EndpointSettings) (netName, target string) {
+	for n, ep := range nets {
+		if ep == nil || ep.IPAddress == "" || strings.HasPrefix(n, "pitlane-") {
+			continue
+		}
+		if netName != "" && n >= netName {
+			continue
+		}
+		netName, target = n, name
+		if n == "bridge" {
+			target = ep.IPAddress
+		}
+	}
+	return netName, target
 }
 
 // ensureForwarder (re)creates the forwarder for this Pitlane container.
