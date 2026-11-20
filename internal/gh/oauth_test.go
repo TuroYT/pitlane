@@ -113,8 +113,13 @@ func TestExchangeCodeFailures(t *testing.T) {
 			wantInErr: "The code passed is incorrect or expired.",
 		},
 		{
+			name: "error code without description", tokenStatus: 200,
+			tokenBody: `{"error":"access_denied"}`,
+			wantInErr: "access_denied",
+		},
+		{
 			name: "no token and no error", tokenStatus: 200, tokenBody: `{}`,
-			wantInErr: "oauth:",
+			wantInErr: "no access token",
 		},
 		{
 			name: "token endpoint down", tokenStatus: 502, tokenBody: `<html>Bad Gateway</html>`,

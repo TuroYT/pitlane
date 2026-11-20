@@ -213,13 +213,22 @@ func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI
 	defer resp.Body.Close()
 	var tok struct {
 		AccessToken string `json:"access_token"`
-		Error       string `json:"error_description"`
+		Code        string `json:"error"`
+		Description string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
 		return "", "", err
 	}
 	if tok.AccessToken == "" {
-		return "", "", fmt.Errorf("oauth: %s", tok.Error)
+		// GitHub answers 200 with an error payload; the description is
+		// optional, so fall back on the error code.
+		switch {
+		case tok.Description != "":
+			return "", "", fmt.Errorf("oauth: %s", tok.Description)
+		case tok.Code != "":
+			return "", "", fmt.Errorf("oauth: %s", tok.Code)
+		}
+		return "", "", errors.New("oauth: no access token in the answer")
 	}
 	var user struct {
 		Login string `json:"login"`
