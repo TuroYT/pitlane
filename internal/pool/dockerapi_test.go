@@ -15,6 +15,7 @@ import (
 // are keyed by "METHOD /path" (API version prefix and query dropped); any
 // other call answers 501, so a test fails on calls it did not expect.
 type dockerAPI struct {
+	t      *testing.T
 	mu     sync.Mutex
 	routes map[string]http.HandlerFunc
 	calls  []string
@@ -23,7 +24,7 @@ type dockerAPI struct {
 // newDockerAPI serves routes and points p at them.
 func newDockerAPI(t *testing.T, p *Pool, routes map[string]http.HandlerFunc) *dockerAPI {
 	t.Helper()
-	d := &dockerAPI{routes: routes}
+	d := &dockerAPI{t: t, routes: routes}
 	srv := httptest.NewServer(d)
 	t.Cleanup(srv.Close)
 	cli, err := client.NewClientWithOpts(client.WithHost("tcp://"+strings.TrimPrefix(srv.URL, "http://")), client.WithVersion("1.47"))
@@ -47,6 +48,10 @@ func (d *dockerAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if h == nil {
+		// A missing route is a hole in the test, not a Docker error: code
+		// that discards the error would hide it. Explicit replyStatus routes
+		// stand for the errors a test wants.
+		d.t.Errorf("unexpected Docker API call %s", key)
 		w.WriteHeader(http.StatusNotImplemented)
 		_, _ = w.Write([]byte(`{"message":"unexpected ` + key + `"}`))
 		return

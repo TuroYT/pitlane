@@ -75,6 +75,14 @@ func TestMemoryProbeCaches(t *testing.T) {
 	}
 }
 
+func TestMemoryProbeReadsFirstWithAZeroClock(t *testing.T) {
+	reads := 0
+	m := &memoryProbe{read: func() int64 { reads++; return 42 }, now: func() time.Time { return time.Time{} }}
+	if got := m.total(); got != 42 || reads != 1 {
+		t.Fatalf("first call: %d after %d reads, want 42 after 1", got, reads)
+	}
+}
+
 func TestSelfContainer(t *testing.T) {
 	p := newTestPool("owner")
 	p.env = testHost(t)
@@ -107,7 +115,11 @@ func TestRestoreBinfmtKeepsUnchangedHandlers(t *testing.T) {
 	p := newTestPool("owner")
 	p.env = testHost(t)
 	p.cfg.StateFile = filepath.Join(t.TempDir(), "slots.json")
-	def := qemuDef("qemu-aarch64", `\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00`)
+	magic := "7f454c460201010000000000000000000200b700" // aarch64, as the kernel prints it
+	if hostMachine() == "b700" {
+		magic = "7f454c460201010000000000000000000200f300" // not native on this host
+	}
+	def := qemuDef("qemu-aarch64", magic)
 	write(t, filepath.Join(p.env.binfmtDir, "register"), "")
 	write(t, filepath.Join(p.env.binfmtDir, "qemu-aarch64"), def)
 	b, _ := json.Marshal(map[string]string{"qemu-aarch64": def})

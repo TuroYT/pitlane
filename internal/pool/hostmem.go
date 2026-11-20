@@ -21,16 +21,17 @@ type memoryProbe struct {
 	mu   sync.Mutex
 	at   time.Time // guarded by mu: when last was read
 	last int64     // guarded by mu
+	ok   bool      // guarded by mu: last holds a reading
 }
 
 func (m *memoryProbe) total() int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := m.now()
-	if now.Sub(m.at) < hostMemoryTTL {
+	if m.ok && m.now().Sub(m.at) < hostMemoryTTL {
 		return m.last
 	}
-	m.last, m.at = m.read(), now
+	m.last = m.read()
+	m.at, m.ok = m.now(), true
 	return m.last
 }
 
