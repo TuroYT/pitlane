@@ -32,6 +32,21 @@ import (
 
 var version = "dev"
 
+// Timeouts of both HTTP servers. There is deliberately no ReadTimeout or
+// WriteTimeout: they would cut the long-lived event streams and the actions
+// cache uploads and downloads, which can take minutes.
+const (
+	// readHeaderTimeout bounds how long a client may take to send its headers.
+	readHeaderTimeout = 10 * time.Second
+	// idleTimeout closes keep-alive connections nobody uses.
+	idleTimeout = 2 * time.Minute
+)
+
+// newHTTPServer is the http.Server both listeners (UI and actions cache) use.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -197,8 +212,7 @@ func startActionsCache(log *slog.Logger, dataDir, listen string) (*cache.Server,
 		log.Error("actions cache disabled (jobs use GitHub's cache)", "error", err)
 		return nil, nil, 0
 	}
-	// No write timeout: archives can take minutes to stream.
-	hs := &http.Server{Handler: cs.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	hs := newHTTPServer("", cs.Handler()) // the listener is already open
 	go func() {
 		log.Info("actions cache listening", "addr", listen)
 		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -271,7 +285,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 	}
 	srv.SetUpdates(upd.Handler())
 
-	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := newHTTPServer(listen, srv.Handler())
 	go func() {
 		log.Info("pitlane listening", "addr", listen, "version", version)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

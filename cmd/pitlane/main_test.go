@@ -2,8 +2,20 @@ package main
 
 import (
 	"log/slog"
+	"net/http"
 	"testing"
 )
+
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(":0", http.NotFoundHandler())
+	if srv.ReadHeaderTimeout != readHeaderTimeout || srv.IdleTimeout != idleTimeout {
+		t.Errorf("ReadHeaderTimeout=%v IdleTimeout=%v, want %v and %v", srv.ReadHeaderTimeout, srv.IdleTimeout, readHeaderTimeout, idleTimeout)
+	}
+	// Event streams and cache transfers outlive any fixed deadline.
+	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
+		t.Errorf("ReadTimeout=%v WriteTimeout=%v, want none", srv.ReadTimeout, srv.WriteTimeout)
+	}
+}
 
 func TestCheckNoAuthListen(t *testing.T) {
 	for _, tc := range []struct {
