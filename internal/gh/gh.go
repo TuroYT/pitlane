@@ -302,17 +302,6 @@ func TeamMember(ctx context.Context, userToken, org, team, login string) (bool, 
 
 // ---------------------------------------------------------------- helpers
 
-// LatestRunnerVersion returns the latest actions/runner release tag (e.g. "2.330.0").
-func LatestRunnerVersion(ctx context.Context) (string, error) {
-	var rel struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := do(ctx, http.MethodGet, apiBase+"/repos/actions/runner/releases/latest", "", nil, &rel); err != nil {
-		return "", err
-	}
-	return strings.TrimPrefix(rel.TagName, "v"), nil
-}
-
 // JobRun is one completed job of a workflow run.
 type JobRun struct {
 	Workflow   string
