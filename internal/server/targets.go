@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,22 +18,36 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
-// ------------------------------------------------------------- installations
+// installationsTimeout bounds the GitHub calls listing the App's
+// installations and their repositories.
+const installationsTimeout = 30 * time.Second
 
+// installation is a GitHub App installation and the repositories it grants.
+type installation struct {
+	ID      int64              `json:"id"`
+	Account string             `json:"account"`
+	Type    string             `json:"type"`
+	Repos   []installationRepo `json:"repos"`
+	Error   string             `json:"error,omitempty"`
+}
+
+type installationRepo struct {
+	Name     string `json:"name"`
+	FullName string `json:"fullName"`
+	Private  bool   `json:"private"`
+}
+
+// installationLister is the part of *gh.AppClient that lists installations.
+type installationLister interface {
+	Installations(ctx context.Context) ([]gh.Installation, error)
+	Repositories(ctx context.Context, installationID int64) ([]gh.Repo, error)
+}
+
+// handleInstallations lists the installations of the GitHub App, with the
+// link to install it, and switches the targets of public repositories to
+// strict mode on the way.
 func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
-	type repo struct {
-		Name     string `json:"name"`
-		FullName string `json:"fullName"`
-		Private  bool   `json:"private"`
-	}
-	type inst struct {
-		ID      int64  `json:"id"`
-		Account string `json:"account"`
-		Type    string `json:"type"`
-		Repos   []repo `json:"repos"`
-		Error   string `json:"error,omitempty"`
-	}
-	out := map[string]any{"installations": []inst{}, "installUrl": ""}
+	out := map[string]any{"installations": []installation{}, "installUrl": ""}
 	if slug := s.store.Get("app_slug", ""); slug != "" {
 		out["installUrl"] = "https://github.com/apps/" + slug + "/installations/new"
 	}
@@ -49,41 +64,56 @@ func (s *Server) handleInstallations(w http.ResponseWriter, r *http.Request) {
 		s.internalErr(w, r, http.StatusInternalServerError, "github_app", msg, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), installationsTimeout)
 	defer cancel()
-	insts, err := client.Installations(ctx)
+	list, err := listInstallations(ctx, client, s.log)
 	if err != nil {
 		s.internalErr(w, r, http.StatusBadGateway, "github_installations", "cannot list the GitHub App installations", err)
 		return
 	}
-	list := make([]inst, len(insts))
+	s.enforcePublicRepos(repoPrivacy(list))
+	out["installations"] = list
+	writeJSON(w, out)
+}
+
+// listInstallations lists the App's installations and, in parallel, the
+// repositories of each. An installation whose repositories GitHub cannot
+// list gets an Error instead (the details go to log).
+func listInstallations(ctx context.Context, c installationLister, log *slog.Logger) ([]installation, error) {
+	insts, err := c.Installations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list installations: %w", err)
+	}
+	list := make([]installation, len(insts))
 	var wg sync.WaitGroup
 	for i, in := range insts {
-		list[i] = inst{ID: in.ID, Account: in.Account.Login, Type: in.Account.Type, Repos: []repo{}}
-		wg.Add(1)
-		go func(i int, id int64) {
-			defer wg.Done()
-			repos, err := client.Repositories(ctx, id)
+		list[i] = installation{ID: in.ID, Account: in.Account.Login, Type: in.Account.Type, Repos: []installationRepo{}}
+		wg.Go(func() {
+			repos, err := c.Repositories(ctx, in.ID)
 			if err != nil {
-				s.log.Error("list installation repositories", "installation", id, "error", err)
+				log.Error("list installation repositories", "installation", in.ID, "error", err)
 				list[i].Error = "cannot list the repositories of this installation on GitHub (details in the server log)"
 				return
 			}
 			for _, rp := range repos {
-				list[i].Repos = append(list[i].Repos, repo{Name: rp.Name, FullName: rp.FullName, Private: rp.Private})
+				list[i].Repos = append(list[i].Repos, installationRepo{Name: rp.Name, FullName: rp.FullName, Private: rp.Private})
 			}
-		}(i, in.ID)
+		})
 	}
 	wg.Wait()
+	return list, nil
+}
+
+// repoPrivacy maps the full name, in lower case, of every repository listed
+// to whether it is private.
+func repoPrivacy(list []installation) map[string]bool {
 	private := map[string]bool{}
 	for _, in := range list {
 		for _, rp := range in.Repos {
 			private[strings.ToLower(rp.FullName)] = rp.Private
 		}
 	}
-	s.enforcePublicRepos(private)
-	out["installations"] = list
-	writeJSON(w, out)
+	return private
 }
 
 // enforcePublicRepos applies the visibility of the repositories just listed
@@ -114,9 +144,9 @@ func (s *Server) enforcePublicRepos(private map[string]bool) {
 	}
 }
 
-// ------------------------------------------------------------------ targets
-
-var validName = func(s string) bool {
+// validName accepts a repository, owner, runner or label name: letters,
+// digits, '-', '_' and '.', at most 100 characters.
+func validName(s string) bool {
 	if s == "" || len(s) > 100 {
 		return false
 	}
@@ -187,6 +217,7 @@ func duplicateTarget(t store.Target, all []store.Target) (store.Target, bool) {
 	return store.Target{}, false
 }
 
+// scaleSetName is the runner label of t, with the store's default.
 func scaleSetName(t store.Target) string {
 	if t.ScaleSetName == "" {
 		return "pitlane" // store default
@@ -250,9 +281,13 @@ func applyStrictPolicy(t *store.Target, opts targetOptions, reason string, check
 	return nil
 }
 
+// strictCheckTimeout bounds the GitHub calls deciding whether a target must
+// run strict.
+const strictCheckTimeout = 30 * time.Second
+
 // checkStrict asks GitHub why a target must run strict.
 func (s *Server) checkStrict(ctx context.Context, t store.Target) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, strictCheckTimeout)
 	defer cancel()
 	if s.strictCheck != nil {
 		return s.strictCheck(ctx, t)
@@ -317,6 +352,8 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, created)
 }
 
+// targetFromPath returns the target named by the {id} path value, or answers
+// 404 and returns false.
 func (s *Server) targetFromPath(w http.ResponseWriter, r *http.Request) (store.Target, bool) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	t, err := s.store.Target(id)
@@ -327,37 +364,70 @@ func (s *Server) targetFromPath(w http.ResponseWriter, r *http.Request) (store.T
 	return t, true
 }
 
+// targetPatch is the body of PATCH /api/targets/{id}: a field left out
+// keeps its value.
+type targetPatch struct {
+	Enabled      *bool   `json:"enabled"`
+	MinRunners   *int    `json:"minRunners"`
+	MaxRunners   *int    `json:"maxRunners"`
+	ScaleSetName *string `json:"scaleSetName"`
+	Strict       *bool   `json:"strict"`
+	MaxJobMins   *int    `json:"maxJobMinutes"`
+}
+
+// adminOnly reports whether the patch changes more than whether the target
+// is enabled, which operators may not do.
+func (p targetPatch) adminOnly() bool {
+	return p.MinRunners != nil || p.MaxRunners != nil || p.ScaleSetName != nil || p.Strict != nil || p.MaxJobMins != nil
+}
+
+// turnsStrictOff reports whether the patch turns strict mode off for t.
+func (p targetPatch) turnsStrictOff(t store.Target) bool {
+	return p.Strict != nil && !*p.Strict && t.Strict
+}
+
+// apply changes t as the patch asks, clamping numbers to their valid range.
+// It fails, leaving t partly changed, on an invalid runner label.
+func (p targetPatch) apply(t *store.Target) error {
+	if p.Enabled != nil {
+		t.Enabled = *p.Enabled
+	}
+	if p.MinRunners != nil {
+		t.MinRunners = max(0, *p.MinRunners)
+	}
+	if p.Strict != nil {
+		t.Strict = *p.Strict
+	}
+	if p.MaxJobMins != nil {
+		t.MaxJobMinutes = max(0, *p.MaxJobMins)
+	}
+	if p.MaxRunners != nil {
+		t.MaxRunners = max(1, *p.MaxRunners)
+	}
+	if p.ScaleSetName != nil && *p.ScaleSetName != t.ScaleSetName {
+		if !validName(*p.ScaleSetName) {
+			return errors.New("invalid runner label")
+		}
+		t.ScaleSetName, t.ScaleSetID = *p.ScaleSetName, 0
+	}
+	t.MinRunners = min(t.MinRunners, t.MaxRunners)
+	return nil
+}
+
 func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.targetFromPath(w, r)
 	if !ok {
 		return
 	}
-	var body struct {
-		Enabled      *bool   `json:"enabled"`
-		MinRunners   *int    `json:"minRunners"`
-		MaxRunners   *int    `json:"maxRunners"`
-		ScaleSetName *string `json:"scaleSetName"`
-		Strict       *bool   `json:"strict"`
-		MaxJobMins   *int    `json:"maxJobMinutes"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		badJSON(w)
+	var patch targetPatch
+	if !readJSON(w, r.Body, &patch) {
 		return
 	}
-	if p, _ := s.currentUser(r); !p.can(store.RoleAdmin) &&
-		(body.MinRunners != nil || body.MaxRunners != nil || body.ScaleSetName != nil || body.Strict != nil || body.MaxJobMins != nil) {
+	if p, _ := s.currentUser(r); !p.can(store.RoleAdmin) && patch.adminOnly() {
 		writeErr(w, http.StatusForbidden, "operators can only enable or disable a target")
 		return
 	}
-	before := targetValues(t)
-	wasEnabled, oldLabel := t.Enabled, t.ScaleSetName
-	if body.Enabled != nil {
-		t.Enabled = *body.Enabled
-	}
-	if body.MinRunners != nil {
-		t.MinRunners = max(0, *body.MinRunners)
-	}
-	if body.Strict != nil && !*body.Strict && t.Strict {
+	if patch.turnsStrictOff(t) {
 		// Only once GitHub confirms the target need not run strict.
 		reason, err := s.checkStrict(r.Context(), t)
 		if err != nil {
@@ -372,23 +442,12 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.Strict != nil {
-		t.Strict = *body.Strict
+	before := targetValues(t)
+	wasEnabled, oldLabel := t.Enabled, t.ScaleSetName
+	if err := patch.apply(&t); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if body.MaxJobMins != nil {
-		t.MaxJobMinutes = max(0, *body.MaxJobMins)
-	}
-	if body.MaxRunners != nil {
-		t.MaxRunners = max(1, *body.MaxRunners)
-	}
-	if body.ScaleSetName != nil && *body.ScaleSetName != t.ScaleSetName {
-		if !validName(*body.ScaleSetName) {
-			writeErr(w, http.StatusBadRequest, "invalid runner label")
-			return
-		}
-		t.ScaleSetName, t.ScaleSetID = *body.ScaleSetName, 0
-	}
-	t.MinRunners = min(t.MinRunners, t.MaxRunners)
 	if t.Enabled && (!wasEnabled || !strings.EqualFold(t.ScaleSetName, oldLabel)) && !s.checkDuplicate(w, r, t) {
 		return
 	}
@@ -420,6 +479,7 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 // targetKeys are the target fields the audit log reports, in order.
 var targetKeys = []string{"enabled", "label", "warm runners", "max parallel", "strict", "job limit (min)"}
 
+// targetValues are the audited fields of t, keyed by targetKeys.
 func targetValues(t store.Target) map[string]string {
 	return map[string]string{
 		"enabled": strconv.FormatBool(t.Enabled), "label": scaleSetName(t), "warm runners": strconv.Itoa(t.MinRunners),

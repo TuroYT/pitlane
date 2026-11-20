@@ -1,8 +1,6 @@
 package server
 
 import (
-	"encoding/json"
-	"net/http"
 	"os"
 	"runtime"
 	"strconv"
@@ -12,11 +10,11 @@ import (
 	"time"
 )
 
-// ------------------------------------------------------------------- state
-
+// hostStats describes the machine (or container) Pitlane runs on, for the
+// dashboard.
 type hostStats struct {
 	CPUs       int     `json:"cpus"`
-	CPUPercent float64 `json:"cpuPercent"` // 0-100, whole machine/container`
+	CPUPercent float64 `json:"cpuPercent"` // 0-100, whole machine/container
 	MemTotal   int64   `json:"memTotal"`
 	MemAvail   int64   `json:"memAvailable"`
 	DiskTotal  int64   `json:"diskTotal"`
@@ -25,16 +23,23 @@ type hostStats struct {
 
 // cpuSampler measures real CPU usage. It reads the cgroup v2 counter of the
 // container Pitlane runs in (correct inside LXC/Docker, where /proc/loadavg
-// reports the whole host) and falls back to /proc/stat.
+// reports the whole host) and falls back to /proc/stat. The zero value is
+// ready to use.
 type cpuSampler struct {
-	mu       sync.Mutex
-	lastUse  float64 // CPU-seconds
+	mu       sync.Mutex // guards the fields below
+	lastUse  float64    // CPU-seconds
 	lastWall time.Time
 	percent  float64
 }
 
-var cpu = &cpuSampler{}
+// cpuSampleInterval is the shortest time between two CPU samples: a shorter
+// one would give a noisy percentage, so the previous one is kept.
+const cpuSampleInterval = time.Second
 
+// userHZ is the unit of the /proc/stat counters (USER_HZ, ticks per second).
+const userHZ = 100
+
+// cpuSeconds returns the CPU time used so far, in seconds.
 func cpuSeconds() (float64, bool) {
 	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.stat"); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
@@ -55,12 +60,14 @@ func cpuSeconds() (float64, bool) {
 				v, _ := strconv.ParseFloat(x, 64)
 				busy += v
 			}
-			return busy / 100, true // USER_HZ
+			return busy / userHZ, true
 		}
 	}
 	return 0, false
 }
 
+// sample returns the CPU usage, in percent of all CPUs, since the previous
+// sample (0 until there is one).
 func (c *cpuSampler) sample() float64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -70,8 +77,8 @@ func (c *cpuSampler) sample() float64 {
 		return 0
 	}
 	if !c.lastWall.IsZero() {
-		if dt := now.Sub(c.lastWall).Seconds(); dt >= 1 {
-			c.percent = min(100, max(0, (use-c.lastUse)/dt/float64(runtime.NumCPU())*100))
+		if dt := now.Sub(c.lastWall); dt >= cpuSampleInterval {
+			c.percent = min(100, max(0, (use-c.lastUse)/dt.Seconds()/float64(runtime.NumCPU())*100))
 			c.lastUse, c.lastWall = use, now
 		}
 	} else {
@@ -80,7 +87,9 @@ func (c *cpuSampler) sample() float64 {
 	return c.percent
 }
 
-func readHost(dataDir string) hostStats {
+// readHost reads the host's CPU, memory and disk figures. The disk is the one
+// holding Docker's data, else the one holding dataDir.
+func readHost(dataDir string, cpu *cpuSampler) hostStats {
 	h := hostStats{CPUs: runtime.NumCPU(), CPUPercent: cpu.sample()}
 	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
 		for _, line := range strings.Split(string(b), "\n") {
@@ -107,57 +116,4 @@ func readHost(dataDir string) hostStats {
 		h.DiskFree = int64(st.Bavail) * st.Bsize  //nolint:gosec // G115: same
 	}
 	return h
-}
-
-func (s *Server) snapshot() map[string]any {
-	return map[string]any{
-		"targets": s.mgr.Snapshot(),
-		"slots":   s.pool.Slots(),
-		"host":    readHost(s.cfg.DataDir),
-		"memory":  s.pool.Memory(),
-		"time":    time.Now().Unix(),
-	}
-}
-
-func (s *Server) handleState(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.snapshot()) }
-
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-	send := func() bool {
-		b, _ := json.Marshal(s.snapshot())
-		if _, err := w.Write([]byte("data: " + string(b) + "\n\n")); err != nil {
-			return false
-		}
-		fl.Flush()
-		return true
-	}
-	if !send() {
-		return
-	}
-	heartbeat := time.NewTicker(5 * time.Second) // also refreshes host stats
-	defer heartbeat.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ch:
-			time.Sleep(150 * time.Millisecond) // coalesce bursts
-			if !send() {
-				return
-			}
-		case <-heartbeat.C:
-			if !send() {
-				return
-			}
-		}
-	}
 }

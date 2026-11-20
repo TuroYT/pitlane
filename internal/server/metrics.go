@@ -17,7 +17,11 @@ import (
 	"github.com/TuroYT/pitlane/internal/scaler"
 )
 
-// ------------------------------------------------------------------ readyz
+// Timeouts of the Docker checks behind /readyz and /metrics.
+const (
+	readyzTimeout  = 3 * time.Second
+	metricsTimeout = 5 * time.Second
+)
 
 // readiness reports whether Pitlane can run jobs: Docker answers and at least
 // one slot is up. A slot running or cleaning up after a job counts: a fully
@@ -36,7 +40,7 @@ func readiness(pingErr error, slots []pool.SlotState) (bool, string) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), readyzTimeout)
 	defer cancel()
 	err := s.pool.Ping(ctx)
 	ok, reason := readiness(err, s.pool.Slots())
@@ -50,8 +54,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, "ready\n")
 }
 
-// ----------------------------------------------------------------- metrics
-
+// metricsTokenKey is the store key of the bearer token /metrics requires.
 const metricsTokenKey = "metrics_token"
 
 // isLoopback reports whether the request comes straight from this host. A
@@ -109,6 +112,7 @@ type metricsData struct {
 	Memory    pool.MemoryState
 }
 
+// metricsWindow is the job history the duration and wait summaries cover.
 const metricsWindow = 24 * time.Hour
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +121,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), metricsTimeout)
 	defer cancel()
 	d := metricsData{Version: s.cfg.Version, StartTime: s.started, Slots: s.pool.Slots(), SlotWipes: s.pool.SlotWipes(), Memory: s.pool.Memory()}
 	err := s.pool.Ping(ctx)
@@ -215,6 +219,7 @@ func boolFloat(b bool) float64 {
 	return 0
 }
 
+// writeMetrics writes d in the Prometheus text format.
 func writeMetrics(w io.Writer, d metricsData) {
 	p := promWriter{w}
 	p.head("pitlane_info", "gauge", "Pitlane version.")
@@ -226,6 +231,15 @@ func writeMetrics(w io.Writer, d metricsData) {
 	p.head("pitlane_docker_up", "gauge", "1 if the Docker daemon answers.")
 	p.sample("pitlane_docker_up", nil, boolFloat(d.DockerUp))
 
+	p.slotMetrics(d)
+	p.targetMetrics(d.Targets)
+	p.memoryMetrics(d.Memory)
+	p.jobMetrics(d)
+	p.hostMetrics(d)
+}
+
+// slotMetrics writes the slots by status and the slot wipes.
+func (p promWriter) slotMetrics(d metricsData) {
 	p.head("pitlane_slots", "gauge", "Slots by status.")
 	counts := map[string]int{}
 	for _, st := range []string{"starting", "ready", "busy", "cleaning", "error", "retiring"} {
@@ -247,9 +261,12 @@ func writeMetrics(w io.Writer, d metricsData) {
 	for _, r := range pool.WipeReasons {
 		p.sample("pitlane_slot_wipes_total", []string{"reason", r}, float64(d.SlotWipes[r]))
 	}
+}
 
+// targetMetrics writes the runners and the waiting jobs of each target.
+func (p promWriter) targetMetrics(targets []scaler.TargetState) {
 	p.head("pitlane_runners", "gauge", "Runners per target and state.")
-	for _, t := range d.Targets {
+	for _, t := range targets {
 		busy := 0
 		for _, r := range t.Runners {
 			if r.Busy {
@@ -261,7 +278,7 @@ func writeMetrics(w io.Writer, d metricsData) {
 		p.sample("pitlane_runners", []string{"target", name, "label", t.ScaleSetName, "state", "idle"}, float64(len(t.Runners)-busy))
 	}
 	p.head("pitlane_jobs_waiting", "gauge", "Jobs assigned by GitHub that wait, per target and reason (slot, memory, strict_slot).")
-	for _, t := range d.Targets {
+	for _, t := range targets {
 		reason := t.WaitReason
 		if reason == "" {
 			reason = pool.WaitSlot
@@ -274,16 +291,23 @@ func writeMetrics(w io.Writer, d metricsData) {
 			p.sample("pitlane_jobs_waiting", []string{"target", t.FullName(), "label", t.ScaleSetName, "reason", r}, float64(n))
 		}
 	}
+}
 
+// memoryMetrics writes the memory admission figures.
+func (p promWriter) memoryMetrics(m pool.MemoryState) {
 	p.head("pitlane_memory_budget_bytes", "gauge", "Memory jobs may use: host memory minus the reserve (0 when unknown).")
-	p.sample("pitlane_memory_budget_bytes", nil, float64(d.Memory.Budget))
+	p.sample("pitlane_memory_budget_bytes", nil, float64(m.Budget))
 	p.head("pitlane_memory_predicted_bytes", "gauge", "Memory reserved for the running jobs by prediction.")
-	p.sample("pitlane_memory_predicted_bytes", nil, float64(d.Memory.Predicted))
+	p.sample("pitlane_memory_predicted_bytes", nil, float64(m.Predicted))
 	p.head("pitlane_memory_committed_bytes", "gauge", "Memory the admission counts for the running jobs: per job the larger of its prediction and its use.")
-	p.sample("pitlane_memory_committed_bytes", nil, float64(d.Memory.Committed))
+	p.sample("pitlane_memory_committed_bytes", nil, float64(m.Committed))
 	p.head("pitlane_memory_admission_enabled", "gauge", "1 when jobs are admitted by predicted memory.")
-	p.sample("pitlane_memory_admission_enabled", nil, boolFloat(d.Memory.Enabled))
+	p.sample("pitlane_memory_admission_enabled", nil, boolFloat(m.Enabled))
+}
 
+// jobMetrics writes the job results and the duration, wait and memory
+// summaries.
+func (p promWriter) jobMetrics(d metricsData) {
 	p.head("pitlane_jobs_completed", "gauge", "Finished jobs in the job history by result (history retention applies).")
 	results := make([]string, 0, len(d.Results))
 	for r := range d.Results {
@@ -297,7 +321,11 @@ func writeMetrics(w io.Writer, d metricsData) {
 	p.summary("pitlane_job_duration_seconds", "Run time of the jobs finished in the last 24 hours.", d.Durations)
 	p.summary("pitlane_job_wait_seconds", "Queue time (queued to started) of the jobs started in the last 24 hours.", d.Waits)
 	p.summary("pitlane_job_memory_peak_bytes", "Peak memory (runner plus slot, page cache included) of the measured jobs finished in the last 7 days.", d.MemPeaks)
+}
 
+// hostMetrics writes the disk space and the actions cache figures, when
+// known.
+func (p promWriter) hostMetrics(d metricsData) {
 	if d.DiskOK {
 		p.head("pitlane_disk_free_bytes", "gauge", "Free bytes on Docker's filesystem.")
 		p.sample("pitlane_disk_free_bytes", nil, float64(d.DiskFree))

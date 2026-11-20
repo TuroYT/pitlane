@@ -14,13 +14,22 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
-// --------------------------------------------------------------- jobs, logs
+// Job list page sizes (?limit=) and filter bounds.
+const (
+	defaultJobsPage = 200
+	maxJobsPage     = 1000
+	maxRefFilter    = 200
+	maxResultFilter = 20
+)
+
+// gitHubJobTimeout bounds the GitHub lookup of a job's page.
+const gitHubJobTimeout = 15 * time.Second
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 1000 {
-		limit = 200
+	if limit <= 0 || limit > maxJobsPage {
+		limit = defaultJobsPage
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	f := store.JobFilter{Result: q.Get("result"), Ref: q.Get("ref")}
@@ -32,7 +41,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		f.Owner, f.Repo = owner, name
 	}
-	if len(f.Ref) > 200 || len(f.Result) > 20 {
+	if len(f.Ref) > maxRefFilter || len(f.Result) > maxResultFilter {
 		writeErr(w, http.StatusBadRequest, "filter too long")
 		return
 	}
@@ -59,6 +68,8 @@ func (s *Server) handleJobRepos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, repos)
 }
 
+// flushWriter flushes every write, so a streamed log reaches the browser
+// as it comes.
 type flushWriter struct {
 	w http.ResponseWriter
 	f http.Flusher
@@ -70,21 +81,36 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+// streamWriter is w, flushed after every write when it can be.
+func streamWriter(w http.ResponseWriter) io.Writer {
+	if fl, ok := w.(http.Flusher); ok {
+		return flushWriter{w, fl}
+	}
+	return w
+}
+
+// runnerName returns the {name} path value, or answers 400 and returns false
+// when it is not a valid runner name.
+func runnerName(w http.ResponseWriter, r *http.Request) (string, bool) {
 	name := r.PathValue("name")
 	if !validName(name) {
 		writeErr(w, http.StatusBadRequest, "invalid runner name")
+		return "", false
+	}
+	return name, true
+}
+
+// handleLogs streams a runner's own log: live from its container while it
+// runs, from the archived file afterwards.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	name, ok := runnerName(w, r)
+	if !ok {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	if id, ok := s.mgr.RunnerContainer(name); ok {
-		fl, _ := w.(http.Flusher)
-		var out io.Writer = w
-		if fl != nil {
-			out = flushWriter{w, fl}
-		}
-		_ = s.pool.Logs(r.Context(), id, r.URL.Query().Get("follow") == "1", out)
+		_ = s.pool.Logs(r.Context(), id, r.URL.Query().Get("follow") == "1", streamWriter(w))
 		return
 	}
 	f, err := os.Open(s.mgr.LogFile(name))
@@ -99,20 +125,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // handleJobLog streams the step output of the job a runner ran: live from the
 // runner while it runs, from the GitHub API once it is done.
 func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if !validName(name) {
-		writeErr(w, http.StatusBadRequest, "invalid runner name")
+	name, ok := runnerName(w, r)
+	if !ok {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	if id, ok := s.mgr.RunnerContainer(name); ok {
-		fl, _ := w.(http.Flusher)
-		var out io.Writer = w
-		if fl != nil {
-			out = flushWriter{w, fl}
-		}
-		_ = s.pool.TailJobOutput(r.Context(), id, out)
+		_ = s.pool.TailJobOutput(r.Context(), id, streamWriter(w))
 		return
 	}
 	job, err := s.store.JobByRunner(r.Context(), name)
@@ -147,9 +167,8 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 // a job the store has and only once GitHub found it (the cache is bounded,
 // see jobIDCache). When it cannot be found, it falls back to the run page.
 func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if !validName(name) {
-		writeErr(w, http.StatusBadRequest, "invalid runner name")
+	name, ok := runnerName(w, r)
+	if !ok {
 		return
 	}
 	job, err := s.store.JobByRunner(r.Context(), name)
@@ -158,25 +177,36 @@ func (s *Server) handleGitHubJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runURL := fmt.Sprintf("https://github.com/%s/%s/actions/runs/%d", job.Owner, job.Repo, job.RunID)
-	key := jobKey{name, job.RunID}
-	if id, ok := s.jobIDs.get(key); ok {
-		http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
+	id, err := s.gitHubJobID(r.Context(), job, name)
+	if err != nil {
+		s.log.Debug("github job page not found, opening the run", "runner", name, "err", err)
+		http.Redirect(w, r, runURL, http.StatusFound)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
+}
+
+// gitHubJobID returns GitHub's numeric ID of the job a runner ran: from the
+// cache, else asked to GitHub and cached once found.
+func (s *Server) gitHubJobID(ctx context.Context, job store.Job, runner string) (int64, error) {
+	key := jobKey{runner, job.RunID}
+	if id, ok := s.jobIDs.get(key); ok {
+		return id, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, gitHubJobTimeout)
 	defer cancel()
 	t, err := s.store.Target(job.TargetID)
-	if err == nil {
-		var tok string
-		if tok, err = s.token(ctx, t); err == nil {
-			var id int64
-			if id, err = gh.RunJobID(ctx, tok, job.Owner, job.Repo, job.RunID, name); err == nil {
-				s.jobIDs.put(key, id)
-				http.Redirect(w, r, fmt.Sprintf("%s/job/%d", runURL, id), http.StatusFound)
-				return
-			}
-		}
+	if err != nil {
+		return 0, fmt.Errorf("target %d: %w", job.TargetID, err)
 	}
-	s.log.Debug("github job page not found, opening the run", "runner", name, "err", err)
-	http.Redirect(w, r, runURL, http.StatusFound)
+	tok, err := s.token(ctx, t)
+	if err != nil {
+		return 0, err
+	}
+	id, err := gh.RunJobID(ctx, tok, job.Owner, job.Repo, job.RunID, runner)
+	if err != nil {
+		return 0, err
+	}
+	s.jobIDs.put(key, id)
+	return id, nil
 }

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -183,11 +182,17 @@ func orNone(v string) string {
 	return v
 }
 
+// Audit log page sizes (?limit=).
+const (
+	defaultAuditPage = 50
+	maxAuditPage     = 500
+)
+
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 500 {
-		limit = 50
+	if limit <= 0 || limit > maxAuditPage {
+		limit = defaultAuditPage
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	entries, total, err := s.store.AuditPage(r.Context(), limit, max(0, offset))
@@ -200,6 +205,9 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 // ------------------------------------------------------------------- users
+
+// maxAccessBody bounds the bodies of the user and access rule requests.
+const maxAccessBody = 4096
 
 // validLogin accepts a GitHub login (or organization name): letters,
 // digits and hyphens, at most 39 characters.
@@ -250,8 +258,7 @@ func (s *Server) handlePutUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		badJSON(w)
+	if !readJSON(w, http.MaxBytesReader(w, r.Body, maxAccessBody), &body) {
 		return
 	}
 	if !validLogin(login) {
@@ -294,8 +301,7 @@ func (s *Server) handlePutRule(w http.ResponseWriter, r *http.Request) {
 		Team string `json:"team"`
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		badJSON(w)
+	if !readJSON(w, http.MaxBytesReader(w, r.Body, maxAccessBody), &body) {
 		return
 	}
 	org, team := strings.TrimSpace(body.Org), strings.TrimSpace(body.Team)
@@ -329,4 +335,15 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "rule.remove", rule.Subject(), "was "+rule.Role)
 	s.handleUsers(w, r)
+}
+
+// containsFold reports whether list holds v, ignoring case and the spaces
+// around list's items.
+func containsFold(list []string, v string) bool {
+	for _, x := range list {
+		if strings.EqualFold(strings.TrimSpace(x), v) {
+			return true
+		}
+	}
+	return false
 }
