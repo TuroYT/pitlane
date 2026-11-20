@@ -21,6 +21,10 @@ import (
 
 var apiBase = "https://api.github.com" // tests point it at a fake server
 
+// oauthBase hosts the OAuth endpoints (authorize and access_token); tests
+// point it at a fake server too.
+var oauthBase = "https://github.com"
+
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // App holds the credentials of the GitHub App Pitlane created for itself.
@@ -170,7 +174,7 @@ func (c *AppClient) Repositories(ctx context.Context, installationID int64) ([]R
 // AuthorizeURL is where users are sent to sign in to the UI.
 func AuthorizeURL(clientID, redirectURI, state string) string {
 	q := url.Values{"client_id": {clientID}, "redirect_uri": {redirectURI}, "state": {state}}
-	return "https://github.com/login/oauth/authorize?" + q.Encode()
+	return oauthBase + "/login/oauth/authorize?" + q.Encode()
 }
 
 // StatusError is a GitHub API answer with an error status.
@@ -196,7 +200,7 @@ func statusCode(err error) int {
 // stored).
 func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI string) (login, token string, err error) {
 	body := url.Values{"client_id": {clientID}, "client_secret": {clientSecret}, "code": {code}, "redirect_uri": {redirectURI}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(body.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthBase+"/login/oauth/access_token", strings.NewReader(body.Encode()))
 	if err != nil {
 		return "", "", err
 	}
@@ -209,13 +213,22 @@ func ExchangeCode(ctx context.Context, clientID, clientSecret, code, redirectURI
 	defer resp.Body.Close()
 	var tok struct {
 		AccessToken string `json:"access_token"`
-		Error       string `json:"error_description"`
+		Code        string `json:"error"`
+		Description string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
 		return "", "", err
 	}
 	if tok.AccessToken == "" {
-		return "", "", fmt.Errorf("oauth: %s", tok.Error)
+		// GitHub answers 200 with an error payload; the description is
+		// optional, so fall back on the error code.
+		switch {
+		case tok.Description != "":
+			return "", "", fmt.Errorf("oauth: %s", tok.Description)
+		case tok.Code != "":
+			return "", "", fmt.Errorf("oauth: %s", tok.Code)
+		}
+		return "", "", errors.New("oauth: no access token in the answer")
 	}
 	var user struct {
 		Login string `json:"login"`
