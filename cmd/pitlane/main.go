@@ -5,100 +5,110 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
-	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 
-	"github.com/TuroYT/pitlane/internal/cache"
 	// Installed as the runner's externals/node*/bin/node, the binary runs as
 	// the Node shim from this package's init, before anything else.
 	_ "github.com/TuroYT/pitlane/internal/nodeshim"
-	"github.com/TuroYT/pitlane/internal/server"
+	"github.com/TuroYT/pitlane/internal/pool"
 )
 
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	os.Exit(realSystem().main(context.Background(), os.Args))
+}
+
+// system is everything the command takes from the process and the host:
+// environment, standard streams, signals, listeners, Docker and exec. main
+// uses the real one; tests replace what they cannot run (Docker, exec,
+// signals) and keep the rest.
+type system struct {
+	getenv  func(string) string
+	environ func() []string
+	stdout  io.Writer
+	stderr  io.Writer
+	// signals derives the context that ends on SIGINT or SIGTERM.
+	signals func(context.Context) (context.Context, context.CancelFunc)
+	listen  func(network, address string) (net.Listener, error)
+	// ping checks that the Docker daemon answers.
+	ping       func(context.Context, *pool.Pool) error
+	executable func() (string, error)
+	exec       func(argv0 string, argv, envv []string) error
+	// setDefaultLogger installs the logger of packages that have none of
+	// their own (store).
+	setDefaultLogger func(*slog.Logger)
+}
+
+// realSystem is the system of the running process.
+func realSystem() system {
+	return system{
+		getenv:  os.Getenv,
+		environ: os.Environ,
+		stdout:  os.Stdout,
+		stderr:  os.Stderr,
+		signals: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		},
+		listen:           net.Listen,
+		ping:             func(ctx context.Context, p *pool.Pool) error { return p.Ping(ctx) },
+		executable:       os.Executable,
+		exec:             syscall.Exec,
+		setDefaultLogger: slog.SetDefault,
+	}
+}
+
+// main runs the command line args (args[0] is the program) and returns the
+// exit code.
+func (s system) main(ctx context.Context, args []string) int {
+	if len(args) > 1 {
+		switch args[1] {
 		case "version", "--version", "-v":
-			fmt.Println("pitlane", version)
-			return
+			return s.printVersion()
 		case "cache-forward":
-			// Run by Pitlane itself, in the actions cache forwarder container
-			// (see internal/pool/actionscache.go): cache-forward <listen> <target>.
-			if len(os.Args) != 4 {
-				fmt.Fprintln(os.Stderr, "usage: pitlane cache-forward <listen> <target>")
-				os.Exit(2)
-			}
-			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-			if err := cache.Forward(ctx, os.Args[2], os.Args[3], log); err != nil {
-				log.Error("fatal", "error", err)
-				os.Exit(1)
-			}
-			return
+			return s.cacheForward(ctx, args[2:])
 		case "setup-token":
-			dir := env("PITLANE_DATA", "/var/lib/pitlane")
-			if len(os.Args) > 2 {
-				dir = os.Args[2]
-			}
-			// The operator's own command line chooses the directory.
-			b, err := os.ReadFile(filepath.Join(dir, "setup-token")) //nolint:gosec // G703: local CLI argument, not remote input
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "no setup token: setup is already complete (or Pitlane never started)")
-				os.Exit(1)
-			}
-			fmt.Print(string(b))
-			return
+			return s.setupToken(args[2:])
 		}
 	}
+	return s.daemon(ctx, args)
+}
 
-	listen := flag.String("listen", env("PITLANE_LISTEN", ":8080"), "HTTP listen address (PITLANE_LISTEN)")
-	cacheListen := flag.String("cache-listen", env("PITLANE_CACHE_LISTEN", ":8091"),
-		"listen address of the actions cache that runners reach on the slot networks' gateway, \"off\" to disable (PITLANE_CACHE_LISTEN)")
-	dataDir := flag.String("data", env("PITLANE_DATA", "/var/lib/pitlane"), "data directory (PITLANE_DATA)")
-	baseURL := flag.String("base-url", env("PITLANE_BASE_URL", ""), "public URL of the UI, e.g. http://pitlane.lan:8080 (PITLANE_BASE_URL)")
-	trusted := flag.String("trusted-proxies", env("PITLANE_TRUSTED_PROXIES", ""),
-		"comma-separated IPs or CIDRs of reverse proxies whose Host and X-Forwarded-Proto headers are trusted when no base URL is set; loopback always is (PITLANE_TRUSTED_PROXIES)")
-	logLevel := flag.String("log-level", env("PITLANE_LOG_LEVEL", "info"), "debug, info, warn or error (PITLANE_LOG_LEVEL)")
-	noAuth := flag.Bool("insecure-no-auth", env("PITLANE_INSECURE_NO_AUTH", "") == "true", "disable login (development only, loopback listen address only) (PITLANE_INSECURE_NO_AUTH)")
-	noAuthAnyAddr := flag.Bool("insecure-no-auth-any-address", env("PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS", "") == "true",
-		"allow --insecure-no-auth on a non-loopback listen address, e.g. behind an authenticating proxy (PITLANE_INSECURE_NO_AUTH_ANY_ADDRESS)")
-	flag.Parse()
-
-	lvl, err := parseLogLevel(*logLevel)
+// daemon runs Pitlane itself until a signal or a restart request, then
+// re-executes the updated binary when an update asked for it.
+func (s system) daemon(ctx context.Context, args []string) int {
+	cfg, err := parseConfig(programName(args), args[min(1, len(args)):], s.getenv, s.stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pitlane:", err)
-		os.Exit(2)
+		return usageExitCode(err)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
-	slog.SetDefault(log) // packages without a logger of their own (store)
-	if *noAuth {
-		if err := checkNoAuthListen(*listen, *noAuthAnyAddr); err != nil {
-			log.Error("fatal", "error", err)
-			os.Exit(1)
-		}
-		log.Warn("login is disabled (--insecure-no-auth): anyone reaching this address controls Pitlane", "addr", *listen)
-	}
-	proxies, err := server.ParseTrustedProxies(*trusted)
+	log := slog.New(slog.NewTextHandler(s.stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	proxies, err := cfg.check(log)
 	if err != nil {
 		log.Error("fatal", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	err = run(log, server.Config{Version: version, DataDir: *dataDir, BaseURL: *baseURL, InsecureNoAuth: *noAuth,
-		Listen: *listen, TrustedProxies: proxies, PAT: strings.TrimSpace(os.Getenv("PITLANE_GITHUB_TOKEN"))}, *cacheListen)
+	s.setDefaultLogger(log)
+	err = run(ctx, log, cfg.serverConfig(proxies), cfg.CacheListen, s)
 	if errors.Is(err, errRestart) {
-		reexec(log)
+		return s.reexec(log, args)
 	}
 	if err != nil {
 		log.Error("fatal", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+// programName is the name the usage message shows, as the flag package
+// shows os.Args[0].
+func programName(args []string) string {
+	if len(args) == 0 {
+		return "pitlane"
+	}
+	return args[0]
 }
