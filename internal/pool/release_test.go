@@ -28,13 +28,19 @@ type fakeSlotOps struct {
 	copyErr     error
 	merges      []string
 	recreates   int
+	// failures to inject
+	removeErr   error
+	recreateErr error
+	mergeErr    error
+	storeFull   bool // the slot already has a pnpm store
+	stores      int  // slotStoreEmpty calls
 }
 
 func (f *fakeSlotOps) removeVolume(_ context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, name)
-	return nil
+	return f.removeErr
 }
 
 func (f *fakeSlotOps) exec(_ context.Context, _, script string) (string, int, error) {
@@ -57,7 +63,7 @@ func (f *fakeSlotOps) recreate(context.Context, int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recreates++
-	return nil
+	return f.recreateErr
 }
 
 func (f *fakeSlotOps) imageID(context.Context, string) (string, error) {
@@ -77,13 +83,18 @@ func (f *fakeSlotOps) copyExternals(context.Context, int, string) error {
 	return f.copyErr
 }
 
-func (f *fakeSlotOps) slotStoreEmpty(context.Context, int) bool { return true }
+func (f *fakeSlotOps) slotStoreEmpty(context.Context, int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stores++
+	return !f.storeFull
+}
 
 func (f *fakeSlotOps) mergeStore(_ context.Context, _ int, vol string) (mergeStats, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.merges = append(f.merges, vol)
-	return mergeStats{}, nil
+	return mergeStats{}, f.mergeErr
 }
 
 func listDir(t *testing.T, dir string) []string {

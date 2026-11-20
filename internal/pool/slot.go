@@ -3,6 +3,8 @@ package pool
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,7 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.mu.Lock()
 	if img != cfg.RunnerImage { // a fallback
 		p.cfg.RunnerImage = img
+		p.runnerFallback.from, p.runnerFallback.to = cfg.RunnerImage, img
 	}
 	p.qemuWant = !cfg.NoQEMU
 	p.mu.Unlock()
@@ -135,6 +138,7 @@ func (p *Pool) takeFailed() (failed, dirty []int) {
 // settings apply to the next runners.
 func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	cfg.defaults()
+	cfg.RunnerImage = p.keepRunnerFallback(ctx, cfg.RunnerImage)
 	p.mu.Lock()
 	old := p.cfg
 	p.cfg = cfg
@@ -151,6 +155,28 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// keepRunnerFallback returns the runner image Configure applies for want.
+// defaults() sends a Pitlane runner image back to the current default: while
+// that default is still not on the host, the fallback Start chose stays. Once
+// it is there (nothing is pulled here), the fallback is dropped.
+func (p *Pool) keepRunnerFallback(ctx context.Context, want string) string {
+	p.mu.Lock()
+	fb := p.runnerFallback
+	p.mu.Unlock()
+	if fb.from == "" || want != fb.from {
+		return want
+	}
+	if _, err := p.ops().imageID(ctx, fb.from); err != nil {
+		return fb.to
+	}
+	p.mu.Lock()
+	if p.runnerFallback == fb {
+		p.runnerFallback.from, p.runnerFallback.to = "", ""
+	}
+	p.mu.Unlock()
+	return want
 }
 
 // resizeLocked adds the slots missing below n (from their persisted state)
@@ -360,28 +386,25 @@ func (p *Pool) MarkRunner(slotIdx int, runner string) {
 	p.mu.Unlock()
 }
 
-// slotIndexSlack is how far beyond the slot count Slots looks for slots
-// (retired ones, or adopted runners' slots with a higher index).
-const slotIndexSlack = 8
-
 // Slots returns a snapshot of every slot, by index.
 func (p *Pool) Slots() []SlotState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]SlotState, 0, len(p.slots))
 	reserved := p.reservedLocked()
-	for i := 0; i < len(p.slots)+slotIndexSlack; i++ {
-		if s, ok := p.slots[i]; ok {
-			st := s.SlotState
-			if s.retire {
-				st.Status = statusRetiring
-			}
-			st.StrictOnly = reserved[i]
-			if res, ok := p.reserved[i]; ok {
-				st.Predicted, st.Actual = res, p.meters[i].Current()
-			}
-			out = append(out, st)
+	// Every slot, whatever its index: retired ones and adopted runners'
+	// slots can sit far above the configured count.
+	for _, i := range slices.Sorted(maps.Keys(p.slots)) {
+		s := p.slots[i]
+		st := s.SlotState
+		if s.retire {
+			st.Status = statusRetiring
 		}
+		st.StrictOnly = reserved[i]
+		if res, ok := p.reserved[i]; ok {
+			st.Predicted, st.Actual = res, p.meters[i].Current()
+		}
+		out = append(out, st)
 	}
 	return out
 }
