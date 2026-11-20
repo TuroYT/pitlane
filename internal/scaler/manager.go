@@ -159,12 +159,42 @@ func (m *Manager) liveTargets() []*target {
 
 // reconcileAll reconciles every target, the one waiting longest first.
 func (m *Manager) reconcileAll() {
-	ts := m.liveTargets()
-	// Oldest demand first so a busy target cannot starve the others.
-	slices.SortFunc(ts, func(a, b *target) int { return a.waitingSince().Compare(b.waitingSince()) })
-	for _, t := range ts {
+	for _, t := range byWaitTurn(m.liveTargets()) {
 		t.reconcile()
 	}
+}
+
+// byWaitTurn orders targets oldest demand first, so a busy target cannot
+// starve the others; targets that wait for nothing go last. Each target's
+// state is read once, so the order is consistent while targets change.
+func byWaitTurn(ts []*target) []*target {
+	type turn struct {
+		t       *target
+		waiting bool
+		since   time.Time
+	}
+	turns := make([]turn, len(ts))
+	for i, t := range ts {
+		waiting, since := t.waitTurn()
+		turns[i] = turn{t: t, waiting: waiting, since: since}
+	}
+	slices.SortStableFunc(turns, func(a, b turn) int {
+		if a.waiting != b.waiting {
+			if a.waiting {
+				return -1
+			}
+			return 1
+		}
+		if !a.waiting {
+			return 0
+		}
+		return a.since.Compare(b.since)
+	})
+	out := make([]*target, len(turns))
+	for i, tn := range turns {
+		out[i] = tn.t
+	}
+	return out
 }
 
 // Sync starts, restarts or stops listeners so they match the stored targets.

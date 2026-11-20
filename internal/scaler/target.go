@@ -74,15 +74,12 @@ func (t *target) update(n store.Target) {
 	go t.reconcile()
 }
 
-// waitingSince orders targets for admission: the one waiting longest goes
-// first, and a target that waits for nothing goes last.
-func (t *target) waitingSince() time.Time {
+// waitTurn reports whether runners of the target wait for a slot, and
+// since when it has its turn (meaningful only while waiting).
+func (t *target) waitTurn() (waiting bool, since time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.waiting == 0 {
-		return time.Now()
-	}
-	return t.waitSince
+	return t.waiting > 0, t.waitSince
 }
 
 // setStatus records the listener's state for the UI.
@@ -106,7 +103,7 @@ func (t *target) stop(remove bool) {
 	t.cancel()
 	t.removeIdleRunners()
 	if remove {
-		t.deleteScaleSetWhenDrained()
+		t.deleteScaleSetWhenDrained(time.Now, time.Sleep)
 	}
 }
 
@@ -128,14 +125,19 @@ func (t *target) removeIdleRunners() {
 }
 
 // deleteScaleSetWhenDrained deletes the scale set on GitHub once the target
-// has no runner left, giving up after drainTimeout.
-func (t *target) deleteScaleSetWhenDrained() {
-	deadline := time.Now().Add(drainTimeout)
-	for t.runnerCount() > 0 {
-		if time.Now().After(deadline) {
+// has no runner left, giving up after drainTimeout: a target that drains
+// only after the cutoff keeps its scale set. now and sleep are the clock
+// (injected by tests).
+func (t *target) deleteScaleSetWhenDrained(now func() time.Time, sleep func(time.Duration)) {
+	deadline := now().Add(drainTimeout)
+	for {
+		if !now().Before(deadline) {
 			return
 		}
-		time.Sleep(drainPoll)
+		if t.runnerCount() == 0 {
+			break
+		}
+		sleep(drainPoll)
 	}
 	t.mu.Lock()
 	client, id := t.client, t.scaleSetID

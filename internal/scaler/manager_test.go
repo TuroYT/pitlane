@@ -146,7 +146,54 @@ func TestUnix(t *testing.T) {
 	if unixOrNow(at) != at.Unix() {
 		t.Fatal("unixOrNow kept a set time")
 	}
-	if now := time.Now().Unix(); unixOrNow(time.Time{}) < now {
-		t.Fatal("unixOrNow: an unset time becomes now")
+	before := time.Now().Unix()
+	got := unixOrNow(time.Time{})
+	if after := time.Now().Unix(); got < before || got > after {
+		t.Fatalf("unixOrNow: an unset time becomes now, got %d not in [%d, %d]", got, before, after)
+	}
+}
+
+func TestByWaitTurn(t *testing.T) {
+	now := time.Now()
+	idle := &target{}
+	old := &target{waiting: 1, waitSince: now.Add(-time.Minute)}
+	recent := &target{waiting: 2, waitSince: now}
+	got := byWaitTurn([]*target{idle, recent, old})
+	if got[0] != old || got[1] != recent || got[2] != idle {
+		t.Fatal("waiting targets go first, oldest turn first; idle ones last")
+	}
+}
+
+func TestDeleteScaleSetWhenDrained(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// drainAt is how long after the start the last runner exits.
+		drainAt time.Duration
+		deleted bool
+	}{
+		{"drained before the cutoff", time.Hour, true},
+		{"drained only after the cutoff", drainTimeout + drainPoll/2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4}, 0)
+			h.addRunner("busy", 0, time.Minute, true, false)
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			clock := start
+			sleep := func(d time.Duration) {
+				clock = clock.Add(d)
+				if clock.Sub(start) >= tc.drainAt {
+					h.t.mu.Lock()
+					delete(h.t.runners, "busy")
+					h.t.mu.Unlock()
+				}
+			}
+			h.t.deleteScaleSetWhenDrained(func() time.Time { return clock }, sleep)
+			h.api.mu.Lock()
+			deleted := len(h.api.deleted) > 0
+			h.api.mu.Unlock()
+			if deleted != tc.deleted {
+				t.Fatalf("scale set deleted: %v, want %v", deleted, tc.deleted)
+			}
+		})
 	}
 }
