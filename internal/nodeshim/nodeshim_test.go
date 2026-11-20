@@ -2,11 +2,14 @@ package nodeshim
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -132,5 +135,69 @@ func TestShimWithoutRealNode(t *testing.T) {
 	out, err := exec.Command(node, "--version").CombinedOutput() //nolint:gosec // G204: test
 	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 127 {
 		t.Fatalf("exit: %v (%s)", err, out)
+	}
+}
+
+// run is the shim's logic with its dependencies injected: it is what the
+// subprocess tests above exercise, but in-process.
+func TestRun(t *testing.T) {
+	t.Parallel()
+	errBoom := errors.New("boom")
+	exeOK := func(p string) func() (string, error) { return func() (string, error) { return p, nil } }
+	exeFail := func() (string, error) { return "", errors.New("no /proc") }
+	tests := []struct {
+		name     string
+		exe      func() (string, error)
+		args     []string
+		execErr  error
+		want     int
+		wantExec bool
+		wantPath string
+		stderr   string
+	}{
+		{name: "not the shim", exe: exeOK("/opt/pitlane/pitlane"), args: []string{"pitlane"}, want: -1},
+		{name: "prefix of the name is not the shim", exe: exeOK("/x/nodejs"), args: []string{"nodejs"}, want: -1},
+		{name: "exec failure", exe: exeOK("/r/externals/node24/bin/node"), args: []string{"node", "a.js"}, execErr: errBoom,
+			want: 126, wantExec: true, wantPath: "/r/externals/node24/bin/node.pitlane", stderr: "run /r/externals/node24/bin/node.pitlane: boom"},
+		{name: "missing real node", exe: exeOK("/r/node"), args: []string{"node"}, execErr: &os.PathError{Op: "fork/exec", Path: "/r/node.pitlane", Err: syscall.ENOENT},
+			want: 127, wantExec: true, wantPath: "/r/node.pitlane", stderr: "pitlane node shim: run /r/node.pitlane"},
+		{name: "no /proc falls back to argv[0]", exe: exeFail, args: []string{"/r/node", "x"}, execErr: errBoom,
+			want: 126, wantExec: true, wantPath: "/r/node.pitlane", stderr: "boom"},
+		{name: "no /proc and not the shim", exe: exeFail, args: []string{"/usr/bin/pitlane"}, want: -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotPath string
+			var gotArgs, gotEnv []string
+			called := false
+			execFn := func(path string, argv, envv []string) error {
+				called, gotPath, gotArgs, gotEnv = true, path, argv, envv
+				return tc.execErr
+			}
+			environ := []string{"PITLANE_CACHE_URL=http://x/", "GITHUB_REPOSITORY=acme/api"}
+			var stderr strings.Builder
+			if got := run(tc.exe, tc.args, environ, execFn, &stderr); got != tc.want {
+				t.Fatalf("code = %d, want %d", got, tc.want)
+			}
+			if called != tc.wantExec {
+				t.Fatalf("exec called = %v, want %v", called, tc.wantExec)
+			}
+			if !strings.Contains(stderr.String(), tc.stderr) {
+				t.Fatalf("stderr %q lacks %q", stderr.String(), tc.stderr)
+			}
+			if !tc.wantExec {
+				if stderr.Len() != 0 {
+					t.Fatalf("a non-shim process must stay silent: %q", stderr.String())
+				}
+				return
+			}
+			if gotPath != tc.wantPath || !slices.Equal(gotArgs, tc.args) {
+				t.Fatalf("exec(%q, %q), want (%q, %q)", gotPath, gotArgs, tc.wantPath, tc.args)
+			}
+			if !slices.Equal(gotEnv, Env(environ)) || !slices.Contains(gotEnv, "ACTIONS_CACHE_URL=http://x/acme/api/") {
+				t.Fatalf("env not rewritten: %q", gotEnv)
+			}
+		})
 	}
 }

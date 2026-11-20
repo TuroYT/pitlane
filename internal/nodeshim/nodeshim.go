@@ -22,6 +22,7 @@ package nodeshim
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,20 +41,30 @@ const (
 )
 
 func init() {
-	exe, err := os.Executable() // /proc/self/exe: symlinks (nodejs -> node) resolved
+	if code := run(os.Executable, os.Args, os.Environ(), syscall.Exec, os.Stderr); code >= 0 {
+		os.Exit(code)
+	}
+}
+
+// run is init without its process-wide dependencies, so that tests can drive
+// it. It returns -1 when the process is not the shim (nothing to do), and the
+// exit code otherwise: exec only returns when it failed.
+func run(executable func() (string, error), args, environ []string,
+	execFn func(path string, argv, envv []string) error, stderr io.Writer) int {
+	exe, err := executable() // /proc/self/exe: symlinks (nodejs -> node) resolved
 	if err != nil {
-		exe = os.Args[0] // no /proc: the path the runner used
+		exe = args[0] // no /proc: the path the runner used
 	}
 	if filepath.Base(exe) != Name {
-		return
+		return -1
 	}
 	real := exe + Real
-	err = syscall.Exec(real, os.Args, Env(os.Environ())) //nolint:gosec // G204: the real Node next to the shim, with the runner's own arguments
-	fmt.Fprintf(os.Stderr, "pitlane node shim: run %s: %v\n", real, err)
+	err = execFn(real, args, Env(environ)) //nolint:gosec // G204: the real Node next to the shim, with the runner's own arguments
+	fmt.Fprintf(stderr, "pitlane node shim: run %s: %v\n", real, err)
 	if os.IsNotExist(err) {
-		os.Exit(127)
+		return 127
 	}
-	os.Exit(126)
+	return 126
 }
 
 // Env returns the environment for the real Node: env unchanged (order,

@@ -103,6 +103,14 @@ type Updater struct {
 	Log      *slog.Logger
 	Now      func() time.Time
 
+	// Test seams, zero in production: the new binary's smoke test (nil: run
+	// it), the pause before restarting (nil: time.Sleep), and the delay before
+	// the first periodic check and its period (0: 20 s and 5 min).
+	smoke      func(ctx context.Context, path string) (string, error)
+	sleep      func(time.Duration)
+	startDelay time.Duration
+	every      time.Duration
+
 	mu         sync.Mutex
 	cap        Capability
 	releases   []Release
@@ -379,7 +387,7 @@ func (u *Updater) Apply(auto bool) error {
 func (u *Updater) install(rel Release, want Version, c Capability, auto bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	in := &Installer{GitHub: u.GitHub, Executable: c.Executable, Arch: u.Probe.GOARCH, Verify: u.Verify, Log: u.log()}
+	in := &Installer{GitHub: u.GitHub, Executable: c.Executable, Arch: u.Probe.GOARCH, Verify: u.Verify, Smoke: u.smoke, Log: u.log()}
 	if in.Arch == "" {
 		in.Arch = runtime.GOARCH
 	}
@@ -409,7 +417,12 @@ func (u *Updater) install(rel Release, want Version, c Capability, auto bool) {
 	u.mu.Unlock()
 	u.notify()
 	u.log().Info("update: restarting into the new version (busy runners keep running and are adopted)", "version", want.String())
-	time.Sleep(time.Second) // let the UI see "restarting"
+	// Let the UI see "restarting".
+	if u.sleep != nil {
+		u.sleep(time.Second)
+	} else {
+		time.Sleep(time.Second)
+	}
 	if u.Restart != nil {
 		u.Restart()
 	}
@@ -467,12 +480,19 @@ func (u *Updater) autoUpdate(set Settings) {
 // Run does the periodic work until ctx ends.
 func (u *Updater) Run(ctx context.Context) {
 	u.log().Info("update checks enabled", "version", u.Version, "mode", u.capability().Mode, "selfUpdate", u.capability().CanSelfUpdate)
+	startDelay, every := u.startDelay, u.every
+	if startDelay <= 0 {
+		startDelay = 20 * time.Second // let the slots start first
+	}
+	if every <= 0 {
+		every = 5 * time.Minute
+	}
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(20 * time.Second): // let the slots start first
+	case <-time.After(startDelay):
 	}
-	t := time.NewTicker(5 * time.Minute)
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		u.tick(ctx)

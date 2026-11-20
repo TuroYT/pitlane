@@ -48,3 +48,37 @@ func TestParseChecksumsRejectsBadFiles(t *testing.T) {
 		t.Errorf("duplicate identical entry: %v %v", m, err)
 	}
 }
+
+func TestParseChecksumsFormats(t *testing.T) {
+	t.Parallel()
+	sum := sha256.Sum256([]byte("a"))
+	upper := strings.ToUpper(fmt.Sprintf("%x", sum))
+	m, err := ParseChecksums([]byte(fmt.Sprintf("# comment\n\n  %x   spaced  \n%s *UPPER\r\n", sum, upper)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["spaced"] != sum || m["UPPER"] != sum || len(m) != 2 {
+		t.Errorf("%v", m)
+	}
+	// A line too long for the scanner is an error, not a silently truncated file.
+	long := fmt.Sprintf("%x  %s\n", sum, strings.Repeat("n", 100<<10))
+	if _, err := ParseChecksums([]byte(long)); err == nil {
+		t.Error("overlong line accepted")
+	}
+	if m, err := ParseChecksums(nil); err != nil || len(m) != 0 {
+		t.Errorf("empty file: %v %v", m, err)
+	}
+}
+
+func TestVerifyChecksumRefusesUnparsableFile(t *testing.T) {
+	t.Parallel()
+	var got [32]byte
+	if err := VerifyChecksum([]byte("garbage line\n"), "x", got); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("err = %v", err)
+	}
+	// An all-zero digest never passes just because it is the zero value.
+	sum := sha256.Sum256([]byte("x"))
+	if err := VerifyChecksum([]byte(fmt.Sprintf("%x  x\n", sum)), "x", got); err == nil {
+		t.Error("zero digest accepted")
+	}
+}
