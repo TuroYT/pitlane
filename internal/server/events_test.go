@@ -28,6 +28,7 @@ type stateBody struct {
 }
 
 func TestStateEndpoint(t *testing.T) {
+	t.Parallel()
 	_, st, fp, h := apiServer(t)
 	fp.slots = []pool.SlotState{{Index: 0, Status: "busy", Runner: "pitlane-a"}}
 	fp.mem = pool.MemoryState{Enabled: true, Budget: 123}
@@ -67,6 +68,7 @@ func readEvent(t *testing.T, br *bufio.Reader) stateBody {
 }
 
 func TestEventsStream(t *testing.T) {
+	t.Parallel()
 	s, st, fp, h := apiServer(t)
 	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +128,7 @@ func (brokenWriter) Write([]byte) (int, error) { return 0, errors.New("broken pi
 func (brokenWriter) Flush()                    {}
 
 func TestEventsHandlerEdgeCases(t *testing.T) {
+	t.Parallel()
 	s, _, _, _ := apiServer(t)
 	t.Run("no streaming support", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -154,6 +157,7 @@ func TestEventsHandlerEdgeCases(t *testing.T) {
 }
 
 func TestHubNotifyNeverBlocks(t *testing.T) {
+	t.Parallel()
 	h := newHub()
 	slow, fast := h.subscribe(), h.subscribe()
 	for range 3 { // the slow subscriber never reads: its signal is not queued twice

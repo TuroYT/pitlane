@@ -9,6 +9,7 @@ import (
 )
 
 func TestWebHandler(t *testing.T) {
+	t.Parallel()
 	s, _, _, _ := apiServer(t)
 	s.web = fstest.MapFS{
 		"index.html":      {Data: []byte("<!doctype html>index")},
@@ -44,6 +45,7 @@ func TestWebHandler(t *testing.T) {
 
 // The mux cleans a path with dot segments before the UI sees it.
 func TestWebPathsAreCleaned(t *testing.T) {
+	t.Parallel()
 	s, _, _, _ := apiServer(t)
 	s.web = fstest.MapFS{"index.html": {Data: []byte("index")}}
 	for path, want := range map[string]string{"/../../etc/passwd": "/etc/passwd", "/ui/../api/nope": "/api/nope"} {
@@ -56,6 +58,7 @@ func TestWebPathsAreCleaned(t *testing.T) {
 }
 
 func TestWebNotBuilt(t *testing.T) {
+	t.Parallel()
 	s, _, _, _ := apiServer(t)
 	s.web = nil
 	w := httptest.NewRecorder()
@@ -71,6 +74,7 @@ func TestWebNotBuilt(t *testing.T) {
 // Every state-changing API route refuses a request without the X-Pitlane
 // header, even from an admin.
 func TestCSRFOnEveryRoute(t *testing.T) {
+	t.Parallel()
 	s, _, _, _ := apiServer(t)
 	s.SetUpdates(&upstream{status: http.StatusOK})
 	h := s.Handler()
@@ -114,6 +118,7 @@ func TestCSRFOnEveryRoute(t *testing.T) {
 }
 
 func TestRequestIDInErrorResponses(t *testing.T) {
+	t.Parallel()
 	s, _, dir, logs := serverAt(t)
 	dropTable(t, dir, "jobs")
 	h := s.Handler()

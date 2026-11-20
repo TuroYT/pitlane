@@ -15,6 +15,7 @@ import (
 )
 
 func TestReadyzEndpoint(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		pingErr  error
@@ -42,6 +43,7 @@ func TestReadyzEndpoint(t *testing.T) {
 }
 
 func TestMetricsEndpoint(t *testing.T) {
+	t.Parallel()
 	s, st, fp, h := apiServer(t)
 	fp.slots = []pool.SlotState{{Status: "ready"}, {Status: "busy"}}
 	fp.wipes = map[string]int64{pool.WipeStrict: 3}
@@ -88,6 +90,7 @@ func TestMetricsEndpoint(t *testing.T) {
 }
 
 func TestMetricsAuthorization(t *testing.T) {
+	t.Parallel()
 	const token = "0123456789abcdef-token"
 	_, st, _, h := apiServer(t)
 	req := func(remote string, header map[string]string, who string) *httptest.ResponseRecorder {

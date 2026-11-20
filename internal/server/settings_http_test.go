@@ -26,6 +26,7 @@ func decodeSettings(t *testing.T, body string) Settings {
 }
 
 func TestGetSettings(t *testing.T) {
+	t.Parallel()
 	s, st, fp, h := apiServer(t)
 	fp.cfg = pool.Config{Slots: 6, RunnerImage: "runner:1", CacheScope: "shared", Mirror: true, ActionsCache: true, ActionsCacheGB: 30,
 		ActionsCacheOwnerPct: 40, MemoryAdmission: true, MemoryReserveMB: 2048, StrictSlots: 1, MinFreeDiskGB: 10, NoQEMU: true}
@@ -77,6 +78,7 @@ func putSettings(t *testing.T, h http.Handler, fp *fakePool, body string) (int, 
 }
 
 func TestPutSettingsSavesAndApplies(t *testing.T) {
+	t.Parallel()
 	s, st, fp, h := apiServer(t)
 	ch := s.hub.subscribe()
 	code, body := putSettings(t, h, fp, `{"slots":6,"runnerImage":" runner:2 ","cacheScope":"bogus","mirror":true,"qemu":true,"keepBuildGb":0,
@@ -122,6 +124,7 @@ func TestPutSettingsSavesAndApplies(t *testing.T) {
 // Fields added after the first release keep their value when a PUT leaves
 // them out (an older UI must not reset them).
 func TestPutSettingsKeepsFieldsLeftOut(t *testing.T) {
+	t.Parallel()
 	_, st, fp, h := apiServer(t)
 	fp.cfg.MinFreeDiskGB, fp.cfg.ActionsCache, fp.cfg.ActionsCacheGB, fp.cfg.ActionsCacheOwnerPct = 7, true, 33, 25
 	fp.cfg.MemoryAdmission, fp.cfg.MemoryReserveMB, fp.cfg.StrictSlots = true, 512, 1
@@ -139,6 +142,7 @@ func TestPutSettingsKeepsFieldsLeftOut(t *testing.T) {
 }
 
 func TestPutSettingsValidation(t *testing.T) {
+	t.Parallel()
 	short := `"short"`
 	for _, tc := range []struct {
 		name, body, want string
@@ -170,6 +174,7 @@ func TestPutSettingsValidation(t *testing.T) {
 }
 
 func TestPutSettingsMetricsToken(t *testing.T) {
+	t.Parallel()
 	_, st, fp, h := apiServer(t)
 	const token = "0123456789abcdef-secret"
 	secret := func() string { v, _ := st.GetSecret(metricsTokenKey); return v }
@@ -217,6 +222,7 @@ func TestPutSettingsMetricsToken(t *testing.T) {
 // A failure while saving is an internal error (the cause stays in the log),
 // and nothing is applied to the pool.
 func TestPutSettingsSaveFailures(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, trigger, body string
 		wantToken           bool // the token was saved before the failure
@@ -245,6 +251,7 @@ func TestPutSettingsSaveFailures(t *testing.T) {
 }
 
 func TestApplyPoolConfigFailureIsLogged(t *testing.T) {
+	t.Parallel()
 	s, _, logs := newErrServer(t)
 	fp := newFakePool()
 	fp.configErr = errors.New("docker exploded")

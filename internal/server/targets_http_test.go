@@ -25,6 +25,7 @@ func createTarget(t *testing.T, h http.Handler, body string) store.Target {
 func targetPath(tg store.Target) string { return "/api/targets/" + strconv.FormatInt(tg.ID, 10) }
 
 func TestCreateTargetAPI(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	tg := createTarget(t, h, `{"kind":"repo","owner":"acme","repo":"api","scaleSetName":"fast","maxRunners":3,"minRunners":1,"maxJobMinutes":30}`)
 	if tg.Owner != "acme" || tg.Repo != "api" || tg.ScaleSetName != "fast" || tg.MaxRunners != 3 || tg.MinRunners != 1 || tg.MaxJobMinutes != 30 || !tg.Enabled {
@@ -68,6 +69,7 @@ func TestCreateTargetAPI(t *testing.T) {
 }
 
 func TestDeleteTargetAPI(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	tg := createTarget(t, h, `{"kind":"repo","owner":"acme","repo":"api"}`)
 
@@ -109,6 +111,7 @@ func cookiesFor(who string) []*http.Cookie {
 }
 
 func TestDeleteTargetStoreFailure(t *testing.T) {
+	t.Parallel()
 	s, st, dir, logs := serverAt(t)
 	tg, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1})
 	if err != nil {
@@ -126,6 +129,7 @@ func TestDeleteTargetStoreFailure(t *testing.T) {
 }
 
 func TestUpdateTargetAPI(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	tg := createTarget(t, h, `{"kind":"repo","owner":"acme","repo":"api","maxRunners":4,"minRunners":2,"scaleSetName":"fast"}`)
 	path := targetPath(tg)
@@ -172,6 +176,7 @@ func TestUpdateTargetAPI(t *testing.T) {
 }
 
 func TestUpdateTargetDeniedToViewers(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	tg := createTarget(t, h, `{"kind":"repo","owner":"acme","repo":"api"}`)
 	for _, who := range []string{"", "vera", "olga"} {
@@ -185,6 +190,7 @@ func TestUpdateTargetDeniedToViewers(t *testing.T) {
 }
 
 func TestUpdateTargetStoreFailure(t *testing.T) {
+	t.Parallel()
 	s, st, dir, logs := serverAt(t)
 	tg, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1})
 	if err != nil {
@@ -199,6 +205,7 @@ func TestUpdateTargetStoreFailure(t *testing.T) {
 }
 
 func TestDuplicateCheckStoreFailure(t *testing.T) {
+	t.Parallel()
 	s, _, dir, logs := serverAt(t)
 	s.strictCheck = func(_ context.Context, _ store.Target) (string, error) { return "", nil }
 	dropTable(t, dir, "targets")
@@ -207,6 +214,7 @@ func TestDuplicateCheckStoreFailure(t *testing.T) {
 }
 
 func TestInstallationsWithoutApp(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	_ = st.Set("app_client_id", "") // no GitHub App yet
 	var out struct {

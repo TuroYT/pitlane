@@ -13,6 +13,7 @@ import (
 )
 
 func TestCompareEndpoint(t *testing.T) {
+	t.Parallel()
 	s, st, _, h := apiServer(t)
 	for _, tg := range []store.Target{
 		{Kind: "repo", Owner: "acme", Repo: "web", Enabled: true},
@@ -73,6 +74,7 @@ func TestCompareEndpoint(t *testing.T) {
 // Without a GitHub App or token, the repositories cannot be read: the
 // comparison is empty, not an error.
 func TestCompareWithoutGitHubAccess(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	if _, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "web", Enabled: true}); err != nil {
 		t.Fatal(err)

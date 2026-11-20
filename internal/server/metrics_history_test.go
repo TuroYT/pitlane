@@ -9,6 +9,7 @@ import (
 // The job history feeds several metrics. A history that cannot be read is
 // not reported as "no job": the scrape fails, and the cause goes to the log.
 func TestMetricsFailWhenTheJobHistoryIsUnreadable(t *testing.T) {
+	t.Parallel()
 	s, _, dir, logs := serverAt(t)
 	h := s.Handler()
 	if w := get(h, "/metrics", ""); w.Code != http.StatusOK {

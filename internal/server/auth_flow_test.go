@@ -46,6 +46,7 @@ func loginFrom(t *testing.T, h http.Handler, remote string, header http.Header, 
 // Cookies are Secure whenever the browser reached Pitlane over HTTPS, as
 // far as the server can know: the base URL, else a trusted proxy's word.
 func TestCookieFlags(t *testing.T) {
+	t.Parallel()
 	proxies := []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}
 	xfpHTTPS := http.Header{"X-Forwarded-Proto": {"https"}}
 	for _, tc := range []struct {
@@ -103,6 +104,7 @@ func TestCookieFlags(t *testing.T) {
 }
 
 func TestSetupUnlockCookieFlags(t *testing.T) {
+	t.Parallel()
 	for _, secure := range []bool{false, true} {
 		s, _ := newSetupServer(t)
 		s.cfg.BaseURL = map[bool]string{false: "http://p.test", true: "https://p.test"}[secure]
@@ -118,6 +120,7 @@ func TestSetupUnlockCookieFlags(t *testing.T) {
 }
 
 func TestSessionLifetimes(t *testing.T) {
+	t.Parallel()
 	s, st := authServer(t, "dave")
 	addUser(t, st, "alice", store.RoleAdmin)
 	if _, err := st.PutAccessRule(store.AccessRule{Org: "acme", Role: store.RoleViewer}); err != nil {
@@ -154,6 +157,7 @@ func TestSessionLifetimes(t *testing.T) {
 }
 
 func TestLogoutClearsTheSession(t *testing.T) {
+	t.Parallel()
 	s, st := authServer(t, "alice")
 	addUser(t, st, "alice", store.RoleAdmin)
 	h := s.Handler()
@@ -182,6 +186,7 @@ func TestLogoutClearsTheSession(t *testing.T) {
 }
 
 func TestLoginRedirect(t *testing.T) {
+	t.Parallel()
 	s, _ := authServer(t, "alice")
 	h := s.Handler()
 	w := do(h, "GET", "/auth/login", nil)
@@ -205,6 +210,7 @@ func TestLoginRedirect(t *testing.T) {
 }
 
 func TestOAuthCallbackFailures(t *testing.T) {
+	t.Parallel()
 	t.Run("the exchange fails", func(t *testing.T) {
 		s, st := authServer(t, "alice")
 		addUser(t, st, "alice", store.RoleAdmin)
@@ -290,6 +296,7 @@ func TestOAuthCallbackFailures(t *testing.T) {
 }
 
 func TestStatusEndpoint(t *testing.T) {
+	t.Parallel()
 	type status struct {
 		Version       string `json:"version"`
 		Mode          string `json:"mode"`
@@ -372,6 +379,7 @@ type manifestReply struct {
 }
 
 func TestSetupManifestFlow(t *testing.T) {
+	t.Parallel()
 	post := func(s *Server, body string, cs ...*http.Cookie) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", "/api/setup/manifest", strings.NewReader(body))
 		r.Header.Set("X-Pitlane", "1")
@@ -459,6 +467,7 @@ func TestSetupManifestFlow(t *testing.T) {
 }
 
 func TestSetupCallbackConversion(t *testing.T) {
+	t.Parallel()
 	s, setup := newSetupServer(t)
 	h := s.Handler()
 	state := s.newState("manifest")

@@ -12,6 +12,7 @@ import (
 // A session that cannot be deleted stays valid: the user is told they are
 // signed out, so the failure must at least be in the log.
 func TestLogoutFailureIsLogged(t *testing.T) {
+	t.Parallel()
 	s, st, dir, logs := serverAt(t)
 	s.cfg.InsecureNoAuth = false
 	addUser(t, st, "alice", store.RoleAdmin)

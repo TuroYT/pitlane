@@ -13,6 +13,7 @@ import (
 )
 
 func TestFormatFloat(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   float64
 		want string
@@ -28,6 +29,7 @@ func TestFormatFloat(t *testing.T) {
 }
 
 func TestDuplicateTarget(t *testing.T) {
+	t.Parallel()
 	org := store.Target{ID: 1, Kind: "org", Owner: "Acme", Enabled: true}
 	repo := store.Target{ID: 2, Kind: "repo", Owner: "acme", Repo: "api", Enabled: true}
 	for _, tc := range []struct {
@@ -54,6 +56,7 @@ func TestDuplicateTarget(t *testing.T) {
 }
 
 func TestHostStats(t *testing.T) {
+	t.Parallel()
 	var cpu cpuSampler
 	h := readHost(t.TempDir(), &cpu)
 	if h.CPUs < 1 || h.CPUPercent < 0 || h.CPUPercent > 100 {
@@ -78,6 +81,7 @@ func TestHostStats(t *testing.T) {
 }
 
 func TestBaseURLWithTLS(t *testing.T) {
+	t.Parallel()
 	s, _ := authServer(t, "alice")
 	s.cfg.BaseURL = ""
 	r := httptest.NewRequest("GET", "/", nil)
@@ -108,6 +112,7 @@ func TestBaseURLWithTLS(t *testing.T) {
 }
 
 func TestEnforcePublicReposStoreFailure(t *testing.T) {
+	t.Parallel()
 	s, _, dir, logs := serverAt(t)
 	dropTable(t, dir, "targets")
 	s.enforcePublicRepos(map[string]bool{"acme/api": false})

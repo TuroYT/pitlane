@@ -13,6 +13,7 @@ import (
 )
 
 func TestJobsEndpoint(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	for i, j := range []store.Job{
 		{JobID: "a", RunID: 1, Owner: "acme", Repo: "api", WorkflowRef: "refs/heads/main", Result: "succeeded", RunnerName: "pitlane-1"},
@@ -73,6 +74,7 @@ func TestJobsEndpoint(t *testing.T) {
 }
 
 func TestJobReposEndpoint(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	for i, repo := range []string{"api", "web", "api"} {
 		if err := st.UpsertJob(store.Job{TargetID: 1, JobID: strconv.Itoa(i), RunID: int64(i + 1), Owner: "acme", Repo: repo, Slot: -1}); err != nil {
@@ -87,6 +89,7 @@ func TestJobReposEndpoint(t *testing.T) {
 }
 
 func TestJobMemoryEndpoint(t *testing.T) {
+	t.Parallel()
 	_, st, fp, h := apiServer(t)
 	fp.cfg.MemoryMB = 1024
 	fp.mem.Total, fp.mem.Budget = 16<<30, 14<<30
@@ -114,6 +117,7 @@ func TestJobMemoryEndpoint(t *testing.T) {
 }
 
 func TestStreamWriter(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	w := streamWriter(rec)
 	if _, err := w.Write([]byte("line\n")); err != nil || !rec.Flushed || rec.Body.String() != "line\n" {
@@ -126,6 +130,7 @@ func TestStreamWriter(t *testing.T) {
 }
 
 func TestJobLogEndpoint(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	tg, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1, InstallationID: 7})
 	if err != nil {
@@ -158,6 +163,7 @@ func TestJobLogEndpoint(t *testing.T) {
 }
 
 func TestGitHubJobFallsBackToTheRunPage(t *testing.T) {
+	t.Parallel()
 	s, st, _, h := apiServer(t)
 	tg, _ := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1})
 	for _, j := range []store.Job{
@@ -189,6 +195,7 @@ func TestGitHubJobFallsBackToTheRunPage(t *testing.T) {
 }
 
 func TestRunnerLogsEndpoint(t *testing.T) {
+	t.Parallel()
 	_, _, _, h := apiServer(t)
 	if w := get(h, "/api/runners/pitlane-none/logs", "vera"); w.Code != http.StatusNotFound || !bodyHas(w, "no logs for this runner") {
 		t.Fatalf("%d %s", w.Code, w.Body)

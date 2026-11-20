@@ -13,6 +13,7 @@ import (
 )
 
 func TestUserAndRuleValidation(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	admin := session("alice")
 	long := strings.Repeat("a", 40)
@@ -51,6 +52,7 @@ func TestUserAndRuleValidation(t *testing.T) {
 }
 
 func TestRuleForms(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	admin := session("alice")
 	// "org/team" in the org field, an org with a team field, and a plain
@@ -77,6 +79,7 @@ func TestRuleForms(t *testing.T) {
 }
 
 func TestAuditPaging(t *testing.T) {
+	t.Parallel()
 	_, st, _, h := apiServer(t)
 	for i := range 60 {
 		if err := st.AddAudit(store.AuditEntry{Actor: "alice", Action: "x", Subject: strconv.Itoa(i)}); err != nil {
@@ -113,6 +116,7 @@ func TestAuditPaging(t *testing.T) {
 }
 
 func TestAccessStoreFailures(t *testing.T) {
+	t.Parallel()
 	t.Run("the rules cannot be listed", func(t *testing.T) {
 		s, _, dir, logs := serverAt(t)
 		dropTable(t, dir, "access_rules")
@@ -154,6 +158,7 @@ func TestAccessStoreFailures(t *testing.T) {
 // A user whose role comes from rules that can no longer be read gets no
 // access: failing closed.
 func TestRuleSessionFailsClosedWhenRulesAreUnreadable(t *testing.T) {
+	t.Parallel()
 	s, st, dir, logs := serverAt(t)
 	s.cfg.InsecureNoAuth = false
 	if err := st.CreateSession("tok", "olga", time.Hour, "acme"); err != nil {
@@ -185,6 +190,7 @@ func TestRuleSessionFailsClosedWhenRulesAreUnreadable(t *testing.T) {
 }
 
 func TestSignInRoleEdgeCases(t *testing.T) {
+	t.Parallel()
 	s, st := authServer(t, "dave")
 	// No rule at all, or no user token: no role, and no GitHub call.
 	called := false

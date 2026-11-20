@@ -37,6 +37,7 @@ func updateAudit(t *testing.T, s *Server) (actions []string, details []string) {
 }
 
 func TestUpdatesNotAvailable(t *testing.T) {
+	t.Parallel()
 	_, _, _, h := apiServer(t)
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/api/updates"}, {"POST", "/api/updates/check"}, {"POST", "/api/updates/apply"},
@@ -49,6 +50,7 @@ func TestUpdatesNotAvailable(t *testing.T) {
 }
 
 func TestUpdatesAreProxiedAndAudited(t *testing.T) {
+	t.Parallel()
 	s, _, _, h := apiServer(t)
 	up := &upstream{status: http.StatusOK}
 	s.SetUpdates(up)
@@ -91,6 +93,7 @@ func TestUpdatesAreProxiedAndAudited(t *testing.T) {
 }
 
 func TestUpdatesFailuresAreNotAudited(t *testing.T) {
+	t.Parallel()
 	s, _, _, h := apiServer(t)
 	up := &upstream{status: http.StatusConflict}
 	s.SetUpdates(up)
@@ -103,6 +106,7 @@ func TestUpdatesFailuresAreNotAudited(t *testing.T) {
 }
 
 func TestUpdatesRoles(t *testing.T) {
+	t.Parallel()
 	s, _, _, h := apiServer(t)
 	s.SetUpdates(&upstream{status: http.StatusOK})
 	for _, tc := range []struct {
@@ -146,6 +150,7 @@ func TestUpdatesLargeBody(t *testing.T) {
 }
 
 func TestStatusWriterKeepsTheCode(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	sw := &statusWriter{ResponseWriter: rec, code: http.StatusOK}
 	sw.WriteHeader(http.StatusTeapot)

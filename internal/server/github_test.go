@@ -8,6 +8,7 @@ import (
 )
 
 func TestCredentials(t *testing.T) {
+	t.Parallel()
 	s, st := authServer(t, "alice")
 	if err := st.SetSecret("app_pem", "PEM"); err != nil {
 		t.Fatal(err)
@@ -22,6 +23,7 @@ func TestCredentials(t *testing.T) {
 }
 
 func TestTokenSources(t *testing.T) {
+	t.Parallel()
 	s, _ := authServer(t, "alice")
 	tg := store.Target{Kind: "repo", Owner: "acme", Repo: "api", InstallationID: 7}
 	s.cfg.PAT = "ghp_x"
