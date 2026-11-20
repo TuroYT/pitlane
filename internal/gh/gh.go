@@ -122,15 +122,29 @@ func (c *AppClient) jwt() (string, error) {
 	return tok.SignedString(c.key)
 }
 
+// maxAppPages bounds the pages read from a list (100 items each), so that
+// at most 2,000 installations or repositories are returned.
+const maxAppPages = 20
+
 // Installations lists the accounts the App is installed on.
 func (c *AppClient) Installations(ctx context.Context) ([]Installation, error) {
 	j, err := c.jwt()
 	if err != nil {
 		return nil, err
 	}
-	var out []Installation
-	err = do(ctx, http.MethodGet, apiBase+"/app/installations?per_page=100", "Bearer "+j, nil, &out)
-	return out, err
+	var all []Installation
+	for page := 1; page <= maxAppPages; page++ {
+		var out []Installation
+		u := fmt.Sprintf("%s/app/installations?per_page=100&page=%d", apiBase, page)
+		if err := do(ctx, http.MethodGet, u, "Bearer "+j, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out...)
+		if len(out) < 100 {
+			break
+		}
+	}
+	return all, nil
 }
 
 // InstallationToken returns a short-lived token for an installation.
@@ -153,7 +167,7 @@ func (c *AppClient) Repositories(ctx context.Context, installationID int64) ([]R
 		return nil, err
 	}
 	var all []Repo
-	for page := 1; page <= 20; page++ {
+	for page := 1; page <= maxAppPages; page++ {
 		var out struct {
 			Repositories []Repo `json:"repositories"`
 		}
