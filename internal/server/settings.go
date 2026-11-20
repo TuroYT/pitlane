@@ -86,7 +86,11 @@ func DefaultSlots() int { return min(8, max(1, runtime.NumCPU()/2)) }
 
 // settings returns the current settings, as GET /api/settings shows them.
 func (s *Server) settings(r *http.Request) Settings {
-	c := s.pool.Config()
+	return s.settingsOf(r, s.pool.Config())
+}
+
+// settingsOf shows the pool configuration c with the other settings.
+func (s *Server) settingsOf(r *http.Request, c pool.Config) Settings {
 	return Settings{
 		Slots: c.Slots, RunnerImage: c.RunnerImage, DindImage: c.DindImage, CPUShares: c.CPUShares, MemoryMB: c.MemoryMB,
 		CacheScope: c.CacheScope, Mirror: c.Mirror, QEMU: !c.NoQEMU, KeepBuildGB: c.KeepBuildGB, MinFreeDiskGB: c.MinFreeDiskGB,
@@ -173,7 +177,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// Applying may rebuild slots: it must not be cut short with the request.
 	go s.applyPoolConfig(context.WithoutCancel(r.Context()))
-	s.handleGetSettings(w, r)
+	// The pool has not applied them yet: answer with what was saved, or the
+	// UI shows the old values again.
+	writeJSON(w, s.settingsOf(r, LoadPoolConfig(s.store, s.cfg.DataDir).WithDefaults()))
 }
 
 // settingsBase is what a PUT /api/settings body is decoded into: the fields

@@ -133,6 +133,13 @@ func (c *Config) defaults() {
 	}
 }
 
+// WithDefaults returns c with the defaults Configure applies to the settings
+// left empty or out of range.
+func (c Config) WithDefaults() Config {
+	c.defaults()
+	return c
+}
+
 // SlotState is a read-only snapshot of a slot.
 type SlotState struct {
 	Index    int    `json:"index"`
