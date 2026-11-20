@@ -82,8 +82,9 @@ func (s *Server) metricsAllowed(r *http.Request) bool {
 		return false // fail closed: a token exists but cannot be read
 	}
 	if tok != "" {
-		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		return ok && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(tok)) == 1
+		// The scheme is case-insensitive (RFC 7235), the token is not.
+		scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		return ok && strings.EqualFold(scheme, "Bearer") && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(tok)) == 1
 	}
 	if _, ok := s.currentUser(r); ok {
 		return true

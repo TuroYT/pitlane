@@ -30,7 +30,8 @@ func TestReadyzEndpoint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, _, fp, h := apiServer(t)
-			fp.pingErr, fp.slots = tc.pingErr, tc.slots
+			fp.pingErr = tc.pingErr
+			fp.setSlots(tc.slots)
 			w := get(h, "/readyz", "") // public: no session
 			if w.Code != tc.wantCode || !strings.HasPrefix(w.Body.String(), tc.wantBody) {
 				t.Fatalf("got %d %q, want %d %q", w.Code, w.Body.String(), tc.wantCode, tc.wantBody)
@@ -45,9 +46,9 @@ func TestReadyzEndpoint(t *testing.T) {
 func TestMetricsEndpoint(t *testing.T) {
 	t.Parallel()
 	s, st, fp, h := apiServer(t)
-	fp.slots = []pool.SlotState{{Status: "ready"}, {Status: "busy"}}
+	fp.setSlots([]pool.SlotState{{Status: "ready"}, {Status: "busy"}})
 	fp.wipes = map[string]int64{pool.WipeStrict: 3}
-	fp.mem = pool.MemoryState{Enabled: true, Budget: 8 << 30, Predicted: 2 << 30, Committed: 3 << 30}
+	fp.setMem(pool.MemoryState{Enabled: true, Budget: 8 << 30, Predicted: 2 << 30, Committed: 3 << 30})
 	fp.diskTotal, fp.diskFree, fp.diskErr = 100<<30, 40<<30, nil
 	s.cfg.Version = "v9.9"
 	now := time.Now().Unix()
@@ -143,7 +144,10 @@ func TestMetricsAuthorization(t *testing.T) {
 		{"wrong token", map[string]string{"Authorization": "Bearer " + token + "x"}, "", http.StatusUnauthorized},
 		{"prefix of the token", map[string]string{"Authorization": "Bearer " + token[:10]}, "", http.StatusUnauthorized},
 		{"token without Bearer", map[string]string{"Authorization": token}, "", http.StatusUnauthorized},
-		{"lower case scheme", map[string]string{"Authorization": "bearer " + token}, "", http.StatusUnauthorized},
+		{"lower case scheme", map[string]string{"Authorization": "bearer " + token}, "", http.StatusOK},
+		{"upper case scheme", map[string]string{"Authorization": "BEARER " + token}, "", http.StatusOK},
+		{"lower case scheme, wrong token", map[string]string{"Authorization": "bearer " + token + "x"}, "", http.StatusUnauthorized},
+		{"scheme with no token", map[string]string{"Authorization": "Bearer"}, "", http.StatusUnauthorized},
 		{"basic scheme", map[string]string{"Authorization": "Basic " + token}, "", http.StatusUnauthorized},
 	} {
 		if w := req("127.0.0.1:1", tc.hdr, tc.who); w.Code != tc.want {
