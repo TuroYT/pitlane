@@ -64,6 +64,7 @@ jobs:
               - web/**
             web:
               - *ci
+              - Makefile # vuln-web runs from it
               - web/**
             docs:
               - *ci
