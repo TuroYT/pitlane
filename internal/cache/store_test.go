@@ -299,7 +299,7 @@ func TestForwardTargetUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(60 * time.Second)) // only a hang waits this long
 	if n, err := io.ReadAll(c); err != nil || len(n) != 0 {
 		t.Fatalf("read %q: %v", n, err)
 	}

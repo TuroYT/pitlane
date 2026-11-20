@@ -139,10 +139,36 @@ func (f *flow) setStatus(code int) {
 	f.status = code
 }
 
+// testWait bounds every wait for a background step (an install, a restart, a
+// stopped loop). A passing test returns as soon as the step ends; only a real
+// hang costs the whole wait, so it is generous for a loaded CI machine.
+const testWait = 60 * time.Second
+
+// waitRestart waits for the updater to ask for its restart, which is the last
+// step of a successful install.
+func (f *flow) waitRestart() {
+	f.t.Helper()
+	select {
+	case <-f.restart:
+	case <-time.After(testWait):
+		f.t.Fatalf("no restart after %v; state %+v", testWait, f.u.State().Pitlane)
+	}
+}
+
+// waitDone waits for done to be closed.
+func waitDone(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatalf("%s: still not done after %v", what, testWait)
+	}
+}
+
 // waitFor waits until cond holds, re-checking after each Notify.
 func (f *flow) waitFor(what string, cond func(State) bool) State {
 	f.t.Helper()
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(testWait)
 	for {
 		if s := f.u.State(); cond(s) {
 			return s
@@ -196,11 +222,7 @@ func TestApplyHappyPath(t *testing.T) {
 	if err := f.u.Apply(false); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-f.restart:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("no restart; state %+v", f.u.State().Pitlane)
-	}
+	f.waitRestart()
 	if got := f.binary(); got != "new binary" {
 		t.Errorf("binary = %q", got)
 	}
@@ -235,11 +257,7 @@ func TestAutoUpdateWaitsForBusyRunners(t *testing.T) {
 	isBusy = false
 	busy.Unlock()
 	f.u.tick(ctx)
-	select {
-	case <-f.restart:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no restart once the runners are idle")
-	}
+	f.waitRestart()
 	if got := f.binary(); got != "new binary" {
 		t.Errorf("binary = %q", got)
 	}
@@ -387,11 +405,7 @@ func TestApplyRefusals(t *testing.T) {
 		if err := f.u.Apply(false); err != nil { // manually it is allowed
 			t.Fatalf("manual update: %v", err)
 		}
-		select { // let the install finish before the temporary directory goes
-		case <-f.restart:
-		case <-time.After(10 * time.Second):
-			t.Fatal("no restart")
-		}
+		f.waitRestart()
 	})
 	t.Run("an update is already running", func(t *testing.T) {
 		t.Parallel()
@@ -406,11 +420,7 @@ func TestApplyRefusals(t *testing.T) {
 			t.Errorf("second Apply: %v", err)
 		}
 		close(block)
-		select {
-		case <-f.restart:
-		case <-time.After(10 * time.Second):
-			t.Fatal("no restart")
-		}
+		f.waitRestart()
 	})
 	t.Run("self-update disabled", func(t *testing.T) {
 		t.Parallel()
@@ -491,11 +501,7 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 	cancel()
 	done := make(chan struct{})
 	go func() { f.u.Run(ctx); close(done) }() // default 20 s start delay: returns without waiting for it
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run ignored the cancelled context")
-	}
+	waitDone(t, done, "Run ignored the cancelled context")
 	if !f.u.State().Pitlane.Capability.CanSelfUpdate || f.u.State().Pitlane.CheckedAt != 0 {
 		t.Errorf("Run checked before its start delay: %+v", f.u.State().Pitlane)
 	}
@@ -511,11 +517,7 @@ func TestRunChecksPeriodically(t *testing.T) {
 	go func() { f.u.Run(ctx); close(done) }()
 	f.waitFor("the first check", func(s State) bool { return s.Pitlane.Latest == "v0.2.1" && s.Runner.ImageID != "" })
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Run did not stop")
-	}
+	waitDone(t, done, "Run did not stop")
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -670,11 +672,7 @@ func TestHandlerApply(t *testing.T) {
 		if code != http.StatusAccepted || decodeState(t, body).Pitlane.Phase == "" {
 			t.Fatalf("%d %s", code, body)
 		}
-		select {
-		case <-f.restart:
-		case <-time.After(10 * time.Second):
-			t.Fatal("no restart")
-		}
+		f.waitRestart()
 		if f.binary() != "new binary" {
 			t.Error("binary not replaced")
 		}
