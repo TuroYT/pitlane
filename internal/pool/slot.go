@@ -2,9 +2,7 @@ package pool
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,8 +11,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
 )
 
 // localRunnerImage returns the most recent Pitlane runner image present on
@@ -194,12 +190,6 @@ func slotWork(i int) string    { return fmt.Sprintf("pitlane-slot-%d-work", i) }
 // mounted at /__e, so it must exist on the slot daemon's side too.
 func slotExternals(i int) string { return fmt.Sprintf("pitlane-slot-%d-externals", i) }
 
-const externalsDir = "/home/runner/externals"
-
-// pnpmStoreDir lives in the slot work volume (kept between jobs of the same
-// owner, wiped on owner change and for strict jobs).
-const pnpmStoreDir = ".pnpm-store"
-
 func (p *Pool) setStatus(i int, status, errMsg string) {
 	p.mu.Lock()
 	if s, ok := p.slots[i]; ok {
@@ -233,119 +223,6 @@ func (p *Pool) startSlot(ctx context.Context, i int) {
 		p.setStatus(i, "ready", "")
 	}
 	p.log.Info("slot ready", "slot", i)
-}
-
-func (p *Pool) ensureSlot(ctx context.Context, i int) error {
-	cfg := p.Config()
-	if err := p.ensureNetwork(ctx, slotNetwork(i), false); err != nil {
-		return err
-	}
-	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
-		if err := p.ensureVolume(ctx, v); err != nil {
-			return err
-		}
-	}
-	name := slotName(i)
-	info, err := p.cli.ContainerInspect(ctx, name)
-	switch {
-	case cerrdefs.IsNotFound(err):
-		cmd := []string{"--host=" + dindAddr, "--host=unix:///var/run/docker.sock", "--tls=false"}
-		if cfg.Mirror {
-			cmd = append(cmd, "--registry-mirror=http://"+mirrorName+":5000")
-		}
-		labels := map[string]string{LabelManaged: "true", LabelRole: "dind", LabelSlot: strconv.Itoa(i), LabelSpec: slotSpecVersion}
-		hc := &container.HostConfig{
-			Privileged:    true,
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-			// /run (= /var/run) on tmpfs: emptied on every start. After an
-			// unclean stop (host out of memory, power loss) a docker.pid left
-			// in the container's filesystem made dockerd refuse to start
-			// ("process with PID 1 is still running") and the slot restarted
-			// in a loop.
-			Tmpfs: map[string]string{"/run": "rw,nosuid,nodev,mode=755"},
-			Mounts: []mount.Mount{
-				{Type: mount.TypeVolume, Source: slotDocker(i), Target: "/var/lib/docker"},
-				{Type: mount.TypeVolume, Source: slotWork(i), Target: workDir},
-				{Type: mount.TypeVolume, Source: slotExternals(i), Target: externalsDir, ReadOnly: true},
-			},
-		}
-		if cfg.MemoryMB > 0 {
-			hc.Memory = cfg.MemoryMB * 1024 * 1024
-		}
-		_, err = p.cli.ContainerCreate(ctx, &container.Config{
-			Image: cfg.DindImage,
-			// Skip dockerd-entrypoint.sh: it would add its own TCP listener on
-			// 0.0.0.0. The "dind" wrapper only prepares cgroups and mounts.
-			Entrypoint: []string{"dind", "dockerd"},
-			Cmd:        cmd,
-			Env:        []string{"DOCKER_TLS_CERTDIR="},
-			Labels:     labels,
-			Hostname:   name,
-		}, hc, &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{slotNetwork(i): {Aliases: []string{name}}}}, nil, name)
-		if err != nil {
-			return fmt.Errorf("create dind: %w", err)
-		}
-	case err != nil:
-		return err
-	case info.Config.Labels[LabelSpec] != slotSpecVersion && p.slotHasRunner(ctx, i):
-		// Outdated, but a job is running in it: upgrade once the job is done.
-		p.mu.Lock()
-		if s, ok := p.slots[i]; ok {
-			s.upgrade = true
-		}
-		p.mu.Unlock()
-		return p.waitDind(ctx, name)
-	case info.Config.Labels[LabelSpec] != slotSpecVersion:
-		// Slot created by an older Pitlane: recreate it, its volumes (and
-		// cache) are kept.
-		p.log.Info("recreating slot with the current definition", "slot", i)
-		if err := p.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true}); err != nil {
-			return err
-		}
-		return p.ensureSlot(ctx, i)
-	case info.State != nil && info.State.Running:
-		if cfg.Mirror {
-			p.connectMirror(ctx, i)
-		}
-		return p.waitDind(ctx, name)
-	}
-	if cfg.Mirror {
-		p.connectMirror(ctx, i)
-	}
-	if err := p.cli.ContainerStart(ctx, name, container.StartOptions{}); err != nil {
-		return fmt.Errorf("start dind: %w", err)
-	}
-	if err := p.waitDind(ctx, name); err != nil {
-		return err
-	}
-	// The work directory is shared with runner containers (uid 1001).
-	_, _, err = p.exec(ctx, name, "chown "+runnerUID+" "+workDir)
-	return err
-}
-
-// connectMirror attaches the mirror to the slot's own network so slots never
-// share a network with each other.
-func (p *Pool) connectMirror(ctx context.Context, i int) {
-	_ = p.cli.NetworkDisconnect(ctx, mirrorNetwork, slotName(i), true) // layout of older versions
-	err := p.cli.NetworkConnect(ctx, slotNetwork(i), mirrorName, &network.EndpointSettings{Aliases: []string{mirrorName}})
-	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
-		p.log.Warn("connect mirror to slot network", "slot", i, "error", err)
-	}
-}
-
-func (p *Pool) waitDind(ctx context.Context, name string) error {
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, code, err := p.exec(ctx, name, "docker info >/dev/null 2>&1"); err == nil && code == 0 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	return errors.New("docker daemon in " + name + " did not become ready")
 }
 
 func (p *Pool) removeSlot(ctx context.Context, i int) {
@@ -429,50 +306,6 @@ func (p *Pool) removeVolumeUsers(ctx context.Context, vol string) {
 		p.Remove(ctx, c.ID)
 	}
 }
-
-var externalsCopies = make(chan struct{}, 2)
-
-// slotHasRunner reports whether a runner container is running in a slot.
-func (p *Pool) slotHasRunner(ctx context.Context, i int) bool {
-	list, err := p.cli.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(
-		filters.Arg("label", LabelRole+"=runner"), filters.Arg("label", LabelSlot+"="+strconv.Itoa(i)))})
-	return err != nil || len(list) > 0 // when unsure, do not kill anything
-}
-
-// ensureExternals copies the runner image's externals into the slot volume.
-// The copy is redone when the runner image or the slot owner changes (tracked
-// in Pitlane's state file, never in the volume, which slot jobs can reach);
-// between jobs of the same owner it is shared like the other caches.
-func (p *Pool) ensureExternals(ctx context.Context, i int, img string) error {
-	id, err := p.ops().imageID(ctx, img)
-	if err != nil {
-		return err
-	}
-	id = externalsKey(id)
-	p.mu.Lock()
-	done := p.externals[i] == id
-	p.mu.Unlock()
-	if done {
-		return nil
-	}
-	// Copies are disk-heavy (~600 MB): never run many at once.
-	select {
-	case externalsCopies <- struct{}{}:
-		defer func() { <-externalsCopies }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	p.log.Info("copying runner externals into slot", "slot", i)
-	if err := p.ops().copyExternals(ctx, i, img); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	p.externals[i] = id
-	p.saveLocked()
-	p.mu.Unlock()
-	return nil
-}
-
 // MarkRunner records which runner occupies a slot (for the UI).
 func (p *Pool) MarkRunner(slotIdx int, runner string) {
 	p.mu.Lock()

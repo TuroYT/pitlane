@@ -368,3 +368,7 @@ func openOrMkdir(dir int, name string, uid, gid int) (int, error) {
 	}
 	return fd, nil
 }
+
+// pnpmStoreDir lives in the slot work volume (kept between jobs of the same
+// owner, wiped on owner change and for strict jobs).
+const pnpmStoreDir = ".pnpm-store"

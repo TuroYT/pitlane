@@ -157,22 +157,6 @@ func (p *Pool) removeAfterFailedStart(ctx context.Context, id string) {
 	p.Remove(cctx, id)
 }
 
-// Wait blocks until the container exits and returns its exit code.
-func (p *Pool) Wait(ctx context.Context, id string) int64 {
-	statusCh, errCh := p.cli.ContainerWait(ctx, id, container.WaitConditionNotRunning)
-	select {
-	case st := <-statusCh:
-		return st.StatusCode
-	case err := <-errCh:
-		if err != nil && ctx.Err() == nil {
-			p.log.Warn("wait for container", "container", id, "error", err)
-		}
-		return -1
-	case <-ctx.Done():
-		return -1
-	}
-}
-
 // Logs copies a container's combined output to w.
 func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) error {
 	rc, err := p.cli.ContainerLogs(ctx, id, container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: follow, Timestamps: false})
@@ -182,16 +166,6 @@ func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) er
 	defer rc.Close()
 	_, err = stdcopy.StdCopy(w, w, rc)
 	return err
-}
-
-// Remove deletes a container. A container already gone, or already being
-// removed (a scale-down and the runner's own exit race), is not an error;
-// any other failure is logged (the container stays until the next restart
-// finds it).
-func (p *Pool) Remove(ctx context.Context, id string) {
-	if err := p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
-		p.log.Warn("remove container", "container", id, "error", err)
-	}
 }
 
 // StopRunner stops a runner container; whoever waits on it then cleans up.
