@@ -1,8 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -11,10 +9,7 @@ import (
 // The job history feeds several metrics. A history that cannot be read is
 // not reported as "no job": the scrape fails, and the cause goes to the log.
 func TestMetricsFailWhenTheJobHistoryIsUnreadable(t *testing.T) {
-	st, dir := storeAt(t)
-	logs := &bytes.Buffer{}
-	s := New(Config{DataDir: dir, InsecureNoAuth: true}, st, nil, slog.New(slog.NewTextHandler(logs, nil)), nil)
-	s.pool = newFakePool()
+	s, _, dir, logs := serverAt(t)
 	h := s.Handler()
 	if w := get(h, "/metrics", ""); w.Code != http.StatusOK {
 		t.Fatalf("healthy store: %d %s", w.Code, w.Body)

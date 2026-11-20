@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -39,7 +41,8 @@ type fakePool struct {
 
 func newFakePool() *fakePool {
 	return &fakePool{
-		cfg:        pool.Config{Slots: 4, CacheScope: "owner", Mirror: true, KeepBuildGB: 20, MinFreeDiskGB: 20, StrictSlots: pool.AutoStrictSlots},
+		cfg: pool.Config{Slots: 4, CacheScope: "owner", Mirror: true, KeepBuildGB: 20, MinFreeDiskGB: 20, ActionsCacheGB: 20, ActionsCacheOwnerPct: 50,
+			MemoryAdmission: true, MemoryReserveMB: 2048, StrictSlots: pool.AutoStrictSlots},
 		configured: make(chan pool.Config, 8),
 		diskErr:    io.ErrUnexpectedEOF, // disk space unknown unless a test sets it
 	}
@@ -98,18 +101,24 @@ func apiServer(t *testing.T) (*Server, *store.Store, *fakePool, http.Handler) {
 	return s, st, fp, s.Handler()
 }
 
-// dropTable removes a table behind the store's back, so the queries reading
-// it fail while the rest of the store keeps working.
-func dropTable(t *testing.T, dataDir, table string) {
+// execSQL runs a statement on the store's database behind its back, to make
+// some of its queries fail while the rest keeps working.
+func execSQL(t *testing.T, dataDir, query string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "pitlane.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec("DROP TABLE " + table); err != nil {
-		t.Fatalf("drop %s: %v", table, err)
+	if _, err := db.Exec(query); err != nil {
+		t.Fatalf("%s: %v", query, err)
 	}
+}
+
+// dropTable removes a table behind the store's back.
+func dropTable(t *testing.T, dataDir, table string) {
+	t.Helper()
+	execSQL(t, dataDir, "DROP TABLE "+table)
 }
 
 // storeAt opens a store whose directory the test keeps (see dropTable).
@@ -135,4 +144,15 @@ func get(h http.Handler, target, who string) *httptest.ResponseRecorder {
 // bodyHas reports whether the response body contains want.
 func bodyHas(w *httptest.ResponseRecorder, want string) bool {
 	return strings.Contains(w.Body.String(), want)
+}
+
+// serverAt is an admin-less (InsecureNoAuth) server over a store whose
+// directory the test knows (see execSQL), with a fake pool and its log.
+func serverAt(t *testing.T) (*Server, *store.Store, string, *bytes.Buffer) {
+	t.Helper()
+	st, dir := storeAt(t)
+	logs := &bytes.Buffer{}
+	s := New(Config{DataDir: dir, InsecureNoAuth: true}, st, nil, slog.New(slog.NewTextHandler(logs, nil)), nil)
+	s.pool = newFakePool()
+	return s, st, dir, logs
 }
