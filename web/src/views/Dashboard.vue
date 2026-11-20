@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, live, bytes, duration, ago, jobWait, waitLabel, waitTitle, type Job, type Slot, type WaitReason } from '../api'
+import { api, live, bytes, duration, ago, jobWait, slowStorageTitle, waitLabel, waitTitle, type Job, type Slot, type WaitReason } from '../api'
 import { quantile } from '../charts'
 import JobTable from '../components/JobTable.vue'
 import JobStatus from '../components/JobStatus.vue'
@@ -201,7 +201,8 @@ function level(p: number) {
           <div class="slot-head">
             <span class="dot" :class="{ ready: 'ok', busy: 'busy', error: 'error' }[s.status as string] ?? ''" aria-hidden="true" />
             <span class="slot-name">#{{ s.index }}</span>
-            <span v-if="s.strictOnly" class="badge muted slot-strict" title="Reserved for strict jobs (public repositories): they run here instead of wiping another slot's warm cache.">strict</span>
+            <span v-if="slowStorageTitle(s.storageDriver)" class="badge warn slot-tag" :title="slowStorageTitle(s.storageDriver)">{{ s.storageDriver }}</span>
+            <span v-if="s.strictOnly" class="badge muted slot-tag" title="Reserved for strict jobs (public repositories): they run here instead of wiping another slot's warm cache.">strict</span>
             <span class="slot-state">{{ slotLabel[s.status] ?? s.status }}</span>
           </div>
           <div v-if="s.status === 'busy'" class="slot-body">

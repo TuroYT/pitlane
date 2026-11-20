@@ -21,6 +21,27 @@ Jobs still run normally. See [Resource usage per job](how-it-works.md#resource-u
 Usually privileged containers are not allowed. On Proxmox, the LXC needs
 `nesting=1,keyctl=1`. Check `journalctl -u pitlane` and `docker logs pitlane-slot-0`.
 
+**Jobs are slow: check the storage driver of the slots.**
+Each slot runs its own Docker daemon. Pitlane reads its storage driver when
+the slot starts and, when it is not `overlay2` (or `overlayfs`, the name the
+containerd snapshotter gives it), logs a warning and shows the driver as a
+badge on the slot in the dashboard. `/api/state` returns it as `storageDriver`.
+
+The two drivers you will usually see instead are `vfs` and `fuse-overlayfs`.
+`vfs` copies every layer each time a container starts, and `fuse-overlayfs`
+runs in user space. Both are much slower than `overlay2` for jobs that pull
+images, build them, or touch many files. A daemon falls back to them when the
+filesystem under its data directory does not support overlay, for example a
+Docker nested in an LXC container on ZFS.
+
+A slot's data lives in the `pitlane-slot-N-docker` volume, inside the data
+directory of the host's Docker (`/var/lib/docker` by default). Put that
+directory on a native ext4 or xfs filesystem. For a Proxmox LXC container on
+ZFS, add a mount point backed by ext4 or xfs storage (or a volume formatted as
+ext4/xfs) for `/var/lib/docker`. Then remove the slots' Docker volumes so they
+are recreated on the new filesystem (see **Disk fills up** below) and restart
+Pitlane.
+
 **`services:` or `container:` jobs fail.**
 Make sure you did not override `DOCKER_HOST` in the workflow. Service ports are
 reachable on `localhost`.

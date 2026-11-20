@@ -30,7 +30,7 @@ type stateBody struct {
 func TestStateEndpoint(t *testing.T) {
 	t.Parallel()
 	_, st, fp, h := apiServer(t)
-	fp.setSlots([]pool.SlotState{{Index: 0, Status: "busy", Runner: "pitlane-a"}})
+	fp.setSlots([]pool.SlotState{{Index: 0, Status: "busy", Runner: "pitlane-a", StorageDriver: "vfs"}})
 	fp.setMem(pool.MemoryState{Enabled: true, Budget: 123})
 	if _, err := st.CreateTarget(store.Target{Kind: "repo", Owner: "acme", Repo: "api", Enabled: true, MaxRunners: 1}); err != nil {
 		t.Fatal(err)
@@ -46,6 +46,9 @@ func TestStateEndpoint(t *testing.T) {
 	if len(got.Targets) != 1 || got.Targets[0].Owner != "acme" || len(got.Slots) != 1 || got.Slots[0].Runner != "pitlane-a" ||
 		got.Memory.Budget != 123 || got.Host.CPUs < 1 || got.Time == 0 {
 		t.Fatalf("state %+v", got)
+	}
+	if !strings.Contains(w.Body.String(), `"storageDriver":"vfs"`) {
+		t.Fatalf("the slot storage driver is missing: %s", w.Body)
 	}
 }
 

@@ -85,12 +85,12 @@ function snapshot() {
       ] : [],
     })),
     slots: [
-      { index: 0, status: 'ready', owner: 'acme', targetId: 1, runner: 'pitlane-idle', since: t - 900 },
-      { index: 1, status: 'busy', owner: 'acme', targetId: 1, runner: 'pitlane-run0', since: T0 - 214 },
-      { index: 2, status: 'ready', owner: '(strict)', targetId: 0, runner: '', since: t - 3000 },
-      { index: 3, status: 'busy', owner: 'acme', targetId: 1, runner: 'pitlane-run1', since: T0 - 48 },
-      { index: 4, status: 'cleaning', owner: 'acme', targetId: 0, runner: '', since: t - 5 },
-      { index: 5, status: 'ready', owner: '', targetId: 0, runner: '', since: t - 7200 },
+      { index: 0, status: 'ready', owner: 'acme', targetId: 1, runner: 'pitlane-idle', since: t - 900, storageDriver: 'overlay2' },
+      { index: 1, status: 'busy', owner: 'acme', targetId: 1, runner: 'pitlane-run0', since: T0 - 214, storageDriver: 'overlay2' },
+      { index: 2, status: 'ready', owner: '(strict)', targetId: 0, runner: '', since: t - 3000, storageDriver: 'overlay2' },
+      { index: 3, status: 'busy', owner: 'acme', targetId: 1, runner: 'pitlane-run1', since: T0 - 48, storageDriver: 'overlay2' },
+      { index: 4, status: 'cleaning', owner: 'acme', targetId: 0, runner: '', since: t - 5, storageDriver: 'overlay2' },
+      { index: 5, status: 'ready', owner: '', targetId: 0, runner: '', since: t - 7200, storageDriver: 'overlay2' },
     ],
     host: { cpus: 16, cpuPercent: 41, memTotal: 64 * 1073741824, memAvailable: 22 * 1073741824, diskTotal: 1000 * 1073741824, diskFree: 140 * 1073741824 },
   }

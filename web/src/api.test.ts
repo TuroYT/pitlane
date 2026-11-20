@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, hasRole, jobWait, live, onUnauthorized, post, targetName } from './api'
+import { ApiError, LIVE_RETRY_MS, ago, api, bytes, cacheSummary, connectLive, disconnectLive, duration, hasRole, jobWait, live, onUnauthorized, post, slowStorageTitle, targetName } from './api'
 
 function reply(status: number, body: unknown, statusText = '') {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText })
@@ -226,5 +226,15 @@ describe('jobWait', () => {
     expect(jobWait({ targetId: 7, startedAt: 0, finishedAt: 0 })).toBe('slot')
     live.snap = { targets: [{ ...target, waiting: 0, waitReason: 'memory' }], slots: [], time: 0 } as never
     expect(jobWait({ targetId: 7, startedAt: 0, finishedAt: 0 })).toBe('')
+  })
+})
+
+describe('slowStorageTitle', () => {
+  it('flags a slot daemon that is not on overlay', () => {
+    expect(slowStorageTitle('vfs')).toContain('vfs storage driver')
+    expect(slowStorageTitle('fuse-overlayfs')).toContain('fuse-overlayfs storage driver')
+  })
+  it('leaves overlay and unknown drivers alone', () => {
+    for (const d of ['overlay2', 'overlayfs', '', undefined]) expect(slowStorageTitle(d)).toBe('')
   })
 })
