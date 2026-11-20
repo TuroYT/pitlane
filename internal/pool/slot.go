@@ -3,6 +3,8 @@ package pool
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -360,28 +362,25 @@ func (p *Pool) MarkRunner(slotIdx int, runner string) {
 	p.mu.Unlock()
 }
 
-// slotIndexSlack is how far beyond the slot count Slots looks for slots
-// (retired ones, or adopted runners' slots with a higher index).
-const slotIndexSlack = 8
-
 // Slots returns a snapshot of every slot, by index.
 func (p *Pool) Slots() []SlotState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]SlotState, 0, len(p.slots))
 	reserved := p.reservedLocked()
-	for i := 0; i < len(p.slots)+slotIndexSlack; i++ {
-		if s, ok := p.slots[i]; ok {
-			st := s.SlotState
-			if s.retire {
-				st.Status = statusRetiring
-			}
-			st.StrictOnly = reserved[i]
-			if res, ok := p.reserved[i]; ok {
-				st.Predicted, st.Actual = res, p.meters[i].Current()
-			}
-			out = append(out, st)
+	// Every slot, whatever its index: retired ones and adopted runners'
+	// slots can sit far above the configured count.
+	for _, i := range slices.Sorted(maps.Keys(p.slots)) {
+		s := p.slots[i]
+		st := s.SlotState
+		if s.retire {
+			st.Status = statusRetiring
 		}
+		st.StrictOnly = reserved[i]
+		if res, ok := p.reserved[i]; ok {
+			st.Predicted, st.Actual = res, p.meters[i].Current()
+		}
+		out = append(out, st)
 	}
 	return out
 }
