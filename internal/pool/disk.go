@@ -74,15 +74,18 @@ func (p *Pool) EnsureFreeDisk(ctx context.Context) {
 }
 
 // slotPrunes are the slot prunes reclaimDisk runs on every idle slot, in
-// order.
+// order. The BuildKit state of buildx builders goes first: releaseScript keeps
+// it for named builders with no size limit, so it must not fill the disk.
 var slotPrunes = []struct{ what, script string }{
+	{"buildx builder state", removeBuildkitStateScript},
 	{"build cache", "docker builder prune -af >/dev/null"},
 	{"unused images", "docker image prune -af >/dev/null"},
 }
 
 // reclaimDisk frees space, cheapest loss first, until minFree bytes are
-// available: build caches of idle slots, then their images, then actions
-// cache entries, then the largest per-owner cache volumes no container uses.
+// available: the BuildKit state of buildx builders on idle slots, then their
+// build caches, then their images, then actions cache entries, then the
+// largest per-owner cache volumes no container uses.
 // Busy slots are never touched: an idle slot is marked "cleaning" while it is
 // pruned so it cannot be handed out meanwhile. It returns the bytes freed.
 func (p *Pool) reclaimDisk(ctx context.Context, minFree int64, ops diskOps) int64 {
