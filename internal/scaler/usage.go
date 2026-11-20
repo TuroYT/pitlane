@@ -32,7 +32,7 @@ func (m *Manager) recordUsage(runner string, u pool.JobUsage) {
 		return
 	}
 	go func() {
-		time.Sleep(m.usageRetry)
+		<-m.wait(m.usageRetry)
 		save() // still unknown: the runner never ran a job
 	}()
 }

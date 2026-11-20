@@ -58,6 +58,11 @@ type Manager struct {
 	// fetchQueueTime before they ask again (shortened by tests).
 	usageRetry       time.Duration
 	queueLookupRetry time.Duration
+	// now, after and tick are the time sources (nil: the real clock; see
+	// clock.go). Tests replace them to run without waiting.
+	now   func() time.Time
+	after func(d time.Duration) <-chan time.Time
+	tick  func(d time.Duration) (<-chan time.Time, func())
 
 	mu sync.Mutex
 	// targets are the running listeners, by target ID. Guarded by mu.
@@ -122,28 +127,28 @@ func enabledTargets(targets []store.Target) (map[int64]store.Target, bool) {
 
 // loop runs the manager's periodic work until ctx ends.
 func (m *Manager) loop(ctx context.Context) {
-	tick := time.NewTicker(reconcileInterval)
-	defer tick.Stop()
-	clean := time.NewTicker(housekeepingInterval)
-	defer clean.Stop()
-	timeouts := time.NewTicker(timeoutCheckInterval)
-	defer timeouts.Stop()
-	orphans := time.NewTicker(orphanInterval)
-	defer orphans.Stop()
+	tick, stop := m.ticker(reconcileInterval)
+	defer stop()
+	clean, stop := m.ticker(housekeepingInterval)
+	defer stop()
+	timeouts, stop := m.ticker(timeoutCheckInterval)
+	defer stop()
+	orphans, stop := m.ticker(orphanInterval)
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-m.pool.Released():
 			m.reconcileAll()
-		case <-tick.C:
+		case <-tick:
 			m.reconcileAll()
-		case <-clean.C:
+		case <-clean:
 			m.housekeeping()
 			go m.EnforceStrictAll(ctx)
-		case <-timeouts.C:
+		case <-timeouts:
 			m.enforceTimeouts()
-		case <-orphans.C:
+		case <-orphans:
 			go m.cleanupOrphansAll()
 		}
 	}
