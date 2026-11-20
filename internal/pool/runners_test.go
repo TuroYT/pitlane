@@ -153,3 +153,35 @@ func TestRemoveLogsFailuresOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerContainerSpec(t *testing.T) {
+	cfg := Config{RunnerImage: "runner:test", ImageOS: "ubuntu24", CacheScope: "owner", CPUShares: 512, MemoryMB: 1024}
+	spec := RunnerSpec{Name: "pitlane-r1", JITConfig: "jit", TargetID: 7, Owner: "Acme", Repo: "acme/app", Lease: Lease{Slot: 2}}
+	cacheVol, toolVol := runnerVolumes(cfg.CacheScope, spec)
+	if cacheVol != "pitlane-cache-acme" || toolVol != "pitlane-toolcache-acme" {
+		t.Fatalf("volumes: %s %s", cacheVol, toolVol)
+	}
+	env := runnerEnv(cfg, spec)
+	want := []string{
+		"ACTIONS_RUNNER_INPUT_JITCONFIG=jit", "DOCKER_HOST=tcp://127.0.0.1:2375",
+		"RUNNER_TOOL_CACHE=/opt/hostedtoolcache", "AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache", "ImageOS=ubuntu24",
+		"XDG_CACHE_HOME=/home/runner/.cache", "npm_config_cache=/home/runner/.cache/npm",
+		"npm_config_store_dir=/home/runner/_work/.pnpm-store", "YARN_CACHE_FOLDER=/home/runner/.cache/yarn",
+		"BUN_INSTALL_CACHE_DIR=/home/runner/.cache/bun", "GOMODCACHE=/home/runner/.cache/go-mod",
+		"PIP_CACHE_DIR=/home/runner/.cache/pip", "PITLANE_SLOT=2", "ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0",
+	}
+	if strings.Join(env, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("env:\n%s", strings.Join(env, "\n"))
+	}
+	cc, hc := runnerContainer(cfg, spec, env, cacheVol, toolVol)
+	if cc.Labels[LabelSlot] != "2" || cc.Labels[LabelStrict] != "false" || cc.Labels[LabelRepo] != "acme/app" || cc.Labels[LabelOwner] != "Acme" {
+		t.Fatalf("labels: %v", cc.Labels)
+	}
+	if string(hc.NetworkMode) != "container:pitlane-slot-2" || hc.Memory != 1024<<20 || hc.CPUShares != 512 || len(hc.Mounts) != 4 {
+		t.Fatalf("host config: %+v", hc)
+	}
+	spec.Lease.Strict = true
+	if c, tl := runnerVolumes(cfg.CacheScope, spec); c != "pitlane-strict-pitlane-r1-cache" || tl != "pitlane-strict-pitlane-r1-tools" {
+		t.Fatalf("strict volumes: %s %s", c, tl)
+	}
+}

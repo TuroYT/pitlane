@@ -16,11 +16,15 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
+// runnerFilter selects Pitlane's runner containers.
+func runnerFilter() filters.Args {
+	return filters.NewArgs(filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))
+}
+
 // RunnerNames returns the runner names of every Pitlane runner container
 // that still exists, running or not. It changes no slot state.
 func (p *Pool) RunnerNames(ctx context.Context) (map[string]bool, error) {
-	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
-		filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))})
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: runnerFilter()})
 	if err != nil {
 		return nil, err
 	}
@@ -61,63 +65,77 @@ func runnerLogConfig() container.LogConfig {
 	return container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "50m", "max-file": "2"}}
 }
 
+// Cache directories inside a runner container, each on its own volume.
+const (
+	runnerCacheDir = "/home/runner/.cache"
+	runnerToolDir  = "/opt/hostedtoolcache"
+)
+
 // StartRunner creates and starts an ephemeral runner container in a slot.
 func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error) {
 	// Cache volumes must not be pruned between their creation and their use.
 	p.volMu.RLock()
 	defer p.volMu.RUnlock()
 	cfg := p.Config()
-	cacheVol := cacheVolume(cfg.CacheScope, spec.Owner)
-	toolVol := strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
-	if spec.Lease.Strict {
-		// Throwaway caches, removed when the job ends.
-		cacheVol, toolVol = strictVolumes(spec.Name)
-	}
+	cacheVol, toolVol := runnerVolumes(cfg.CacheScope, spec)
 	for _, v := range []string{cacheVol, toolVol} {
 		if err := p.ensureVolume(ctx, v); err != nil {
 			return "", err
 		}
 	}
-	slotIdx := spec.Lease.Slot
-	env := []string{
+	env := runnerEnv(cfg, spec)
+	if e := p.cacheEnv(ctx, cfg, spec); e != "" {
+		env = append(env, e)
+	}
+	cc, hc := runnerContainer(cfg, spec, env, cacheVol, toolVol)
+	id, err := p.createRunner(ctx, spec.Name, cc, hc)
+	if err != nil {
+		return "", err
+	}
+	p.MarkRunner(spec.Lease.Slot, spec.Name)
+	return id, nil
+}
+
+// runnerVolumes returns the cache and tool cache volumes of a runner: its
+// owner's (or everyone's, in the shared scope), or throwaway ones for a
+// strict job, removed when the job ends.
+func runnerVolumes(scope string, spec RunnerSpec) (cacheVol, toolVol string) {
+	if spec.Lease.Strict {
+		return strictVolumes(spec.Name)
+	}
+	cacheVol = cacheVolume(scope, spec.Owner)
+	return cacheVol, strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
+}
+
+// runnerEnv is the environment of a runner container (without the actions
+// cache URL, see cacheEnv).
+func runnerEnv(cfg Config, spec RunnerSpec) []string {
+	return []string{
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=" + spec.JITConfig,
-		"DOCKER_HOST=tcp://127.0.0.1:2375",
-		"RUNNER_TOOL_CACHE=/opt/hostedtoolcache",
-		"AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache",
+		"DOCKER_HOST=" + dindAddr,
+		"RUNNER_TOOL_CACHE=" + runnerToolDir,
+		"AGENT_TOOLSDIRECTORY=" + runnerToolDir,
 		"ImageOS=" + cfg.ImageOS,
-		"XDG_CACHE_HOME=/home/runner/.cache",
-		"npm_config_cache=/home/runner/.cache/npm",
+		"XDG_CACHE_HOME=" + runnerCacheDir,
+		"npm_config_cache=" + runnerCacheDir + "/npm",
 		// Same filesystem as the workspace: pnpm hardlinks packages into
 		// node_modules instead of copying them (minutes saved per install).
 		"npm_config_store_dir=" + workDir + "/" + pnpmStoreDir,
-		"YARN_CACHE_FOLDER=/home/runner/.cache/yarn",
-		"BUN_INSTALL_CACHE_DIR=/home/runner/.cache/bun",
-		"GOMODCACHE=/home/runner/.cache/go-mod",
-		"PIP_CACHE_DIR=/home/runner/.cache/pip",
-		"PITLANE_SLOT=" + strconv.Itoa(slotIdx),
+		"YARN_CACHE_FOLDER=" + runnerCacheDir + "/yarn",
+		"BUN_INSTALL_CACHE_DIR=" + runnerCacheDir + "/bun",
+		"GOMODCACHE=" + runnerCacheDir + "/go-mod",
+		"PIP_CACHE_DIR=" + runnerCacheDir + "/pip",
+		"PITLANE_SLOT=" + strconv.Itoa(spec.Lease.Slot),
 		// The official image dumps the runner's internal debug traces to stdout
 		// (meant for Kubernetes); keep the runner output readable instead.
 		"ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0",
 	}
-	if e := p.cacheEnv(ctx, cfg, spec); e != "" {
-		env = append(env, e)
-	}
-	hc := &container.HostConfig{
-		Init: ptr(true),
-		// Share the slot daemon's network namespace (like a Kubernetes pod):
-		// ports published by `services:` are reachable on localhost.
-		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
-		Mounts: []mount.Mount{
-			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
-			{Type: mount.TypeVolume, Source: slotExternals(slotIdx), Target: externalsDir, ReadOnly: true},
-			{Type: mount.TypeVolume, Source: toolVol, Target: "/opt/hostedtoolcache"},
-			{Type: mount.TypeVolume, Source: cacheVol, Target: "/home/runner/.cache"},
-		},
-	}
-	hc.LogConfig = runnerLogConfig()
-	hc.CPUShares = cfg.CPUShares
-	hc.Memory = cfg.memoryBytes()
-	created, err := p.cli.ContainerCreate(ctx, &container.Config{
+}
+
+// runnerContainer is the definition of a runner container.
+func runnerContainer(cfg Config, spec RunnerSpec, env []string, cacheVol, toolVol string) (*container.Config, *container.HostConfig) {
+	slotIdx := spec.Lease.Slot
+	cc := &container.Config{
 		Image: cfg.RunnerImage,
 		User:  "runner",
 		Cmd:   []string{"/home/runner/run.sh"},
@@ -127,21 +145,43 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 			LabelTarget: strconv.FormatInt(spec.TargetID, 10), LabelRunner: spec.Name, LabelOwner: spec.Owner,
 			LabelStrict: strconv.FormatBool(spec.Lease.Strict), LabelRepo: spec.Repo,
 		},
-	}, hc, nil, nil, spec.Name)
+	}
+	hc := &container.HostConfig{
+		Init: ptr(true),
+		// Share the slot daemon's network namespace (like a Kubernetes pod):
+		// ports published by `services:` are reachable on localhost.
+		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
+		Mounts: []mount.Mount{
+			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
+			{Type: mount.TypeVolume, Source: slotExternals(slotIdx), Target: externalsDir, ReadOnly: true},
+			{Type: mount.TypeVolume, Source: toolVol, Target: runnerToolDir},
+			{Type: mount.TypeVolume, Source: cacheVol, Target: runnerCacheDir},
+		},
+		LogConfig: runnerLogConfig(),
+	}
+	hc.CPUShares = cfg.CPUShares
+	hc.Memory = cfg.memoryBytes()
+	return cc, hc
+}
+
+// createRunner creates and starts the runner container name. On failure
+// nothing is left behind: neither the container (it carries a JIT config)
+// nor the runner's actions cache token.
+func (p *Pool) createRunner(ctx context.Context, name string, cc *container.Config, hc *container.HostConfig) (string, error) {
+	created, err := p.cli.ContainerCreate(ctx, cc, hc, nil, nil, name)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Canceled while Docker may have created it: remove it by name.
-			p.removeAfterFailedStart(ctx, spec.Name)
+			p.removeAfterFailedStart(ctx, name)
 		}
-		p.revokeCache(spec.Name)
+		p.revokeCache(name)
 		return "", fmt.Errorf("create runner: %w", err)
 	}
 	if err := p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		p.removeAfterFailedStart(ctx, created.ID)
-		p.revokeCache(spec.Name)
+		p.revokeCache(name)
 		return "", fmt.Errorf("start runner: %w", err)
 	}
-	p.MarkRunner(slotIdx, spec.Name)
 	return created.ID, nil
 }
 
@@ -211,8 +251,7 @@ func (o Orphan) Lease() Lease {
 // RunnerContainers lists runner containers left by a previous run and marks
 // their slots as busy so they are not handed out twice.
 func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
-	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
-		filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))})
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: runnerFilter()})
 	if err != nil {
 		return nil, err
 	}
