@@ -15,11 +15,15 @@ func sessionKey(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// membershipSep separates the memberships of a session in its row. Neither
+// organization logins nor team slugs can contain it.
+const membershipSep = ","
+
 // CreateSession stores a session token for login. memberships are the
 // access rules ("org" or "org/team") the user matched at sign-in.
 func (s *Store) CreateSession(token, login string, ttl time.Duration, memberships ...string) error {
 	_, err := s.db.Exec(`INSERT INTO sessions (token, login, expires_at, memberships) VALUES (?, ?, ?, ?)`,
-		sessionKey(token), login, time.Now().Add(ttl).Unix(), strings.Join(memberships, ","))
+		sessionKey(token), login, time.Now().Add(ttl).Unix(), strings.Join(memberships, membershipSep))
 	return err
 }
 
@@ -29,7 +33,7 @@ type Session struct {
 	Memberships []string
 }
 
-// Session returns a valid session.
+// Session returns a valid session. An expired session is deleted on sight.
 func (s *Store) Session(token string) (Session, bool) {
 	if token == "" {
 		return Session{}, false
@@ -46,7 +50,7 @@ func (s *Store) Session(token string) (Session, bool) {
 	}
 	out := Session{Login: login}
 	if memberships != "" {
-		out.Memberships = strings.Split(memberships, ",")
+		out.Memberships = strings.Split(memberships, membershipSep)
 	}
 	return out, true
 }
