@@ -19,6 +19,9 @@ const (
 	dindReadyTimeout = 90 * time.Second       // how long a daemon may take to answer after its start
 	dindPollInterval = 500 * time.Millisecond // between two readiness checks
 	mirrorURL        = "http://" + mirrorName + ":5000"
+	// Docker pulls 3 layers at once by default; images with many layers
+	// (databases, large base images) pull faster with more.
+	maxConcurrentDownloads = 8
 )
 
 // ensureSlot makes slot i's daemon run with the current definition: its
@@ -75,7 +78,8 @@ func (p *Pool) createDind(ctx context.Context, cfg Config, i int) error {
 // bumping slotSpecVersion, so that existing slots are recreated.
 func dindSpec(cfg Config, i int) (*container.Config, *container.HostConfig, *network.NetworkingConfig) {
 	name := slotName(i)
-	cmd := []string{"--host=" + dindAddr, "--host=unix:///var/run/docker.sock", "--tls=false"}
+	cmd := []string{"--host=" + dindAddr, "--host=unix:///var/run/docker.sock", "--tls=false",
+		"--max-concurrent-downloads=" + strconv.Itoa(maxConcurrentDownloads)}
 	if cfg.Mirror {
 		cmd = append(cmd, "--registry-mirror="+mirrorURL)
 	}

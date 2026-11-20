@@ -41,7 +41,7 @@ const (
 	dindAddr = "tcp://127.0.0.1:2375"
 	// Bumped whenever the slot container definition changes: older slots are
 	// recreated (their volumes, hence their cache, are kept).
-	slotSpecVersion = "4"
+	slotSpecVersion = "5"
 	LabelSpec       = "dev.pitlane.spec"
 )
 

@@ -10,7 +10,8 @@
 - **Slots.** A slot is a long-lived `docker:dind` container with its own Docker
   data volume. It stays up between jobs, so images, layers and the buildx cache
   are already there when the next job starts. There are as many slots as
-  parallel jobs.
+  parallel jobs. The slot daemon pulls up to 8 image layers at once (Docker's
+  default is 3).
 - **Runners.** For each job, Pitlane asks GitHub for a just-in-time runner
   configuration and starts a fresh `actions-runner` container that shares the
   slot's network namespace (like a Kubernetes pod), with `DOCKER_HOST` pointing
