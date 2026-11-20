@@ -136,6 +136,36 @@ that has taken over the host can remove them.
   (`Secure` when the base URL is HTTPS). State-changing API calls require a custom
   header, which blocks cross-site requests.
 
+## Browser security headers
+
+Pitlane sets these headers on every response (the UI, the API, the event stream
+and error responses):
+
+| Header | Value | Why |
+| --- | --- | --- |
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self' https://github.com; base-uri 'none'; frame-ancestors 'none'` | Only the UI's own script and stylesheet run: no inline script or style, no `eval`, nothing loaded from another site. This limits what an injected piece of HTML can do. |
+| `X-Frame-Options` | `DENY` | The UI cannot be framed (clickjacking). Same as `frame-ancestors 'none'`, for older browsers. |
+| `X-Content-Type-Options` | `nosniff` | Browsers do not guess content types. |
+| `Referrer-Policy` | `same-origin` | Other sites do not see the UI's URLs. |
+| `Permissions-Policy` | camera, microphone, geolocation, USB, payment, sensors and screen capture are turned off | Pitlane uses none of them. |
+| `Strict-Transport-Security` | `max-age=31536000` | Only over HTTPS: see below. |
+
+`form-action` allows `https://github.com` because the setup posts the GitHub App
+manifest there. The OAuth sign-in and the links to GitHub are plain navigations,
+which the policy does not restrict. After the App is created, GitHub sends the
+browser back to Pitlane's address: open the setup from the same address you set
+as the base URL, or some browsers block that return.
+
+`Strict-Transport-Security` is only sent when the request arrived over HTTPS: TLS
+ending at Pitlane, or `X-Forwarded-Proto: https` from a reverse proxy that is
+loopback or listed in `PITLANE_TRUSTED_PROXIES` (any other client could claim
+it). Browsers ignore it over plain HTTP anyway, and it has no
+`includeSubDomains` or `preload`, so it only affects the host Pitlane is served
+from. A browser that has seen it refuses plain HTTP to that host for a year:
+check that HTTPS works before you rely on it. The reverse proxy can add its own
+headers; if it sets one of the above, make sure it does not contradict Pitlane's
+(a stricter proxy policy wins in browsers, which enforce every policy they receive).
+
 ## Access
 
 - The first setup is protected by a one-time token, available only on the host.

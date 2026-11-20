@@ -285,17 +285,17 @@ func (s *Server) handler(stub func(route) http.HandlerFunc) http.Handler {
 
 // csrf rejects state-changing API calls that do not carry the custom header
 // set by the UI (browsers cannot send it cross-site without a CORS preflight).
+// It is the outermost middleware: it also adds the security headers (see
+// securityHeaders) to every response, the rejected ones included.
 func (s *Server) csrf(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return s.securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/api/") &&
 			r.Header.Get("X-Pitlane") != "1" {
 			http.Error(w, "missing X-Pitlane header", http.StatusForbidden)
 			return
 		}
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "same-origin")
 		next.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // ------------------------------------------------------------------ compare
