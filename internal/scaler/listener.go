@@ -6,25 +6,32 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
+// Listener restarts: a failed listener is retried after a delay that doubles
+// up to maxListenBackoff, and starts over once a listener stayed up for
+// listenHealthy.
+const (
+	minListenBackoff = 5 * time.Second
+	maxListenBackoff = 2 * time.Minute
+	listenHealthy    = 5 * time.Minute
+)
+
+// run keeps the target's listener running until the target or parent is
+// canceled.
 func (t *target) run(parent context.Context) {
-	go func() {
-		select {
-		case <-parent.Done():
-			t.cancel()
-		case <-t.ctx.Done():
-		}
-	}()
-	backoff := 5 * time.Second
+	defer context.AfterFunc(parent, t.cancel)()
+	backoff := minListenBackoff
 	for t.ctx.Err() == nil {
 		start := time.Now()
 		err := t.listen()
 		if t.ctx.Err() != nil {
 			break
 		}
-		if time.Since(start) > 5*time.Minute {
-			backoff = 5 * time.Second
+		if time.Since(start) > listenHealthy {
+			backoff = minListenBackoff
 		}
 		msg := "listener stopped"
 		if err != nil {
@@ -36,29 +43,21 @@ func (t *target) run(parent context.Context) {
 		case <-t.ctx.Done():
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, 2*time.Minute)
+		backoff = min(backoff*2, maxListenBackoff)
 	}
 }
 
+// listen connects to the target's scale set and delivers its job messages
+// until the target is canceled (nil) or the session fails.
 func (t *target) listen() error {
 	cfg := t.cfg()
 	client, err := t.m.connect(t.m.creds(), cfg, t.m.Version)
 	if err != nil {
 		return err
 	}
-	id, created, err := client.ensureScaleSet(t.ctx, cfg.ScaleSetName)
+	id, err := t.resolveScaleSet(client, cfg)
 	if err != nil {
 		return err
-	}
-	if created {
-		t.log.Info("scale set created", "id", id, "label", cfg.ScaleSetName)
-	}
-	if cfg.ScaleSetID != id {
-		cfg.ScaleSetID = id
-		// Only that column: cfg may be stale (e.g. switched to strict since).
-		if err := t.m.store.SetScaleSetID(cfg.ID, id); err != nil {
-			t.log.Warn("save scale set id", "error", err)
-		}
 	}
 	host, _ := os.Hostname()
 	session, err := client.openSession(t.ctx, id, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
@@ -82,4 +81,23 @@ func (t *target) listen() error {
 		return nil
 	}
 	return err
+}
+
+// resolveScaleSet returns the ID of the target's scale set, creating the
+// scale set when missing, and records the ID.
+func (t *target) resolveScaleSet(client scaleSetAPI, cfg store.Target) (int, error) {
+	id, created, err := client.ensureScaleSet(t.ctx, cfg.ScaleSetName)
+	if err != nil {
+		return 0, err
+	}
+	if created {
+		t.log.Info("scale set created", "id", id, "label", cfg.ScaleSetName)
+	}
+	if cfg.ScaleSetID != id {
+		// Only that column: cfg may be stale (e.g. switched to strict since).
+		if err := t.m.store.SetScaleSetID(cfg.ID, id); err != nil {
+			t.log.Warn("save scale set id", "error", err)
+		}
+	}
+	return id, nil
 }

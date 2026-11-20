@@ -14,13 +14,15 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
+// runner is an ephemeral runner container. Once its target owns it, its
+// mutable fields are guarded by the target's mu.
 type runner struct {
 	name        string
 	containerID string
-	runnerID    int64
+	runnerID    int64 // GitHub registration, 0 when unknown
 	lease       pool.Lease
-	busy        bool
-	exited      bool
+	busy        bool      // running a job (set by JobStarted, never cleared)
+	exited      bool      // its container is gone
 	killed      bool      // killed for exceeding the job time limit
 	busySince   time.Time // when its job started
 	jobID       string    // GitHub job it runs, cleared on JobCompleted
@@ -31,6 +33,8 @@ type runner struct {
 	predicted   int64       // memory reserved for its job (bytes)
 }
 
+// launch prepares an admitted slot and starts a runner in it, releasing the
+// slot on failure.
 func (t *target) launch(lease pool.Lease) {
 	defer func() {
 		t.mu.Lock()
@@ -57,12 +61,15 @@ func (t *target) launch(lease pool.Lease) {
 	}
 }
 
+// randomSuffix makes runner names unique.
 func randomSuffix() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
+// startRunner registers a runner on GitHub and starts its container in the
+// prepared slot.
 func (t *target) startRunner(lease pool.Lease) error {
 	cfg := t.cfg()
 	t.mu.Lock()
@@ -99,6 +106,7 @@ func (t *target) startRunner(lease pool.Lease) error {
 	return nil
 }
 
+// watch waits for a runner's container to exit, then finishes the runner.
 func (t *target) watch(r *runner) {
 	code := t.m.pool.Wait(context.Background(), r.containerID)
 	t.log.Info("runner exited", "runner", r.name, "code", code)
