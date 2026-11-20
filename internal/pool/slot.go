@@ -31,6 +31,9 @@ func (p *Pool) localRunnerImage(ctx context.Context) (string, error) {
 	return best, nil
 }
 
+// retryInterval is how often slots in error are started (or rebuilt) again.
+const retryInterval = 30 * time.Second
+
 // Start pulls images, starts the mirror and every slot. Slots that already
 // exist (e.g. after a Pitlane restart) are reused with their warm cache.
 func (p *Pool) Start(ctx context.Context) error {
@@ -38,34 +41,17 @@ func (p *Pool) Start(ctx context.Context) error {
 	if err := p.EnsureImage(ctx, cfg.DindImage, false); err != nil {
 		return err
 	}
-	if err := p.EnsureImage(ctx, cfg.RunnerImage, false); err != nil {
-		if cfg.RunnerImage != DefaultRunnerImage {
-			return err
-		}
-		// Prefer any Pitlane runner image already on this host (another
-		// release, or one built locally): it has the tools the CIs use.
-		// GitHub's bare image is the last resort, and a loud one: jobs that
-		// expect Node, compilers… will fail on it.
-		fallback, lerr := p.localRunnerImage(ctx)
-		if lerr == nil && fallback != "" {
-			p.log.Warn("Pitlane runner image unavailable, using the Pitlane runner image already on this host",
-				"wanted", cfg.RunnerImage, "using", fallback, "error", err)
-		} else {
-			p.log.Error("no Pitlane runner image available: using GitHub's bare official image; jobs that need Node, compilers or other tools will fail. Pull or build a Pitlane runner image, or set one in Settings",
-				"wanted", cfg.RunnerImage, "error", err)
-			fallback = OfficialRunnerImage
-			if err := p.EnsureImage(ctx, fallback, false); err != nil {
-				return err
-			}
-		}
-		cfg.RunnerImage = fallback
-		p.mu.Lock()
-		p.cfg.RunnerImage = fallback
-		p.mu.Unlock()
+	img, err := p.ensureRunnerImage(ctx, cfg.RunnerImage)
+	if err != nil {
+		return err
 	}
 	p.mu.Lock()
+	if img != cfg.RunnerImage { // a fallback
+		p.cfg.RunnerImage = img
+	}
 	p.qemuWant = !cfg.NoQEMU
 	p.mu.Unlock()
+	cfg.RunnerImage = img
 	p.restoreBinfmt(ctx)
 	if err := p.ensureMirror(ctx, cfg); err != nil {
 		p.log.Warn("registry mirror unavailable, continuing without it", "error", err)
@@ -74,9 +60,37 @@ func (p *Pool) Start(ctx context.Context) error {
 	return p.Configure(ctx, cfg)
 }
 
-// retryFailed restarts slots in error every 30 seconds.
+// ensureRunnerImage pulls the configured runner image and returns the image
+// runners will use. When Pitlane's default image cannot be pulled, any
+// Pitlane runner image already on this host (another release, or one built
+// locally) is preferred: it has the tools the CIs use. GitHub's bare image is
+// the last resort, and a loud one: jobs that expect Node, compilers… will
+// fail on it. A runner image chosen in the settings has no fallback.
+func (p *Pool) ensureRunnerImage(ctx context.Context, want string) (string, error) {
+	err := p.EnsureImage(ctx, want, false)
+	if err == nil {
+		return want, nil
+	}
+	if want != DefaultRunnerImage {
+		return "", err
+	}
+	if local, lerr := p.localRunnerImage(ctx); lerr == nil && local != "" {
+		p.log.Warn("Pitlane runner image unavailable, using the Pitlane runner image already on this host",
+			"wanted", want, "using", local, "error", err)
+		return local, nil
+	}
+	p.log.Error("no Pitlane runner image available: using GitHub's bare official image; jobs that need Node, compilers or other tools will fail. Pull or build a Pitlane runner image, or set one in Settings",
+		"wanted", want, "error", err)
+	if err := p.EnsureImage(ctx, OfficialRunnerImage, false); err != nil {
+		return "", err
+	}
+	return OfficialRunnerImage, nil
+}
+
+// retryFailed restarts slots in error every retryInterval, after the
+// periodic binfmt_misc audit and a pending QEMU registration.
 func (p *Pool) retryFailed(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(retryInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -86,19 +100,7 @@ func (p *Pool) retryFailed(ctx context.Context) {
 		}
 		p.auditBinfmt(ctx)
 		p.maybeRegisterQEMU(ctx)
-		p.mu.Lock()
-		var failed, dirty []int
-		for i, s := range p.slots {
-			if s.Status == statusError && !s.retire {
-				s.Status = statusStarting
-				if s.dirty {
-					dirty = append(dirty, i)
-				} else {
-					failed = append(failed, i)
-				}
-			}
-		}
-		p.mu.Unlock()
+		failed, dirty := p.takeFailed()
 		for _, i := range failed {
 			p.log.Info("retrying slot", "slot", i)
 			go p.startSlot(ctx, i)
@@ -110,6 +112,25 @@ func (p *Pool) retryFailed(ctx context.Context) {
 	}
 }
 
+// takeFailed marks every slot in error (and not retired) as starting and
+// returns them: those to start again, and the dirty ones to rebuild.
+func (p *Pool) takeFailed() (failed, dirty []int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, s := range p.slots {
+		if s.Status != statusError || s.retire {
+			continue
+		}
+		s.Status = statusStarting
+		if s.dirty {
+			dirty = append(dirty, i)
+		} else {
+			failed = append(failed, i)
+		}
+	}
+	return failed, dirty
+}
+
 // Configure applies a new configuration: slots are added or retired, other
 // settings apply to the next runners.
 func (p *Pool) Configure(ctx context.Context, cfg Config) error {
@@ -117,8 +138,27 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	p.mu.Lock()
 	old := p.cfg
 	p.cfg = cfg
-	var toStart []int
-	for i := 0; i < cfg.Slots; i++ {
+	toStart, toRemove := p.resizeLocked(cfg.Slots)
+	p.mu.Unlock()
+
+	p.applyChanges(ctx, old, cfg)
+	for _, i := range toRemove {
+		p.removeSlot(ctx, i)
+	}
+	var wg sync.WaitGroup
+	for _, i := range toStart {
+		wg.Go(func() { p.startSlot(ctx, i) })
+	}
+	wg.Wait()
+	return nil
+}
+
+// resizeLocked adds the slots missing below n (from their persisted state)
+// and retires those at or beyond it. It returns the slots to start, and the
+// retired ones to remove now: a busy or cleaning slot is removed when its
+// job is released. Callers hold p.mu.
+func (p *Pool) resizeLocked(n int) (toStart, toRemove []int) {
+	for i := range n {
 		if s, ok := p.slots[i]; ok {
 			s.retire = false
 			continue
@@ -126,23 +166,29 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 		p.slots[i] = p.restoredSlotLocked(i)
 		toStart = append(toStart, i)
 	}
-	var toRemove []int
 	for i, s := range p.slots {
-		if i >= cfg.Slots {
-			s.retire = true
-			if s.Status != statusBusy && s.Status != statusCleaning {
-				toRemove = append(toRemove, i)
-			}
+		if i < n {
+			continue
+		}
+		s.retire = true
+		if s.Status != statusBusy && s.Status != statusCleaning {
+			toRemove = append(toRemove, i)
 		}
 	}
-	p.mu.Unlock()
+	return toStart, toRemove
+}
 
+// applyChanges applies the settings that changed from old to cfg outside
+// the slot table: cache limits, runner image (pulled in the background) and
+// registry mirror.
+func (p *Pool) applyChanges(ctx context.Context, old, cfg Config) {
 	if old.ActionsCacheGB != cfg.ActionsCacheGB || old.ActionsCacheOwnerPct != cfg.ActionsCacheOwnerPct {
 		p.applyCacheLimits()
 	}
 	if old.RunnerImage != cfg.RunnerImage {
+		pullCtx := context.WithoutCancel(ctx)
 		go func() {
-			if err := p.EnsureImage(context.Background(), cfg.RunnerImage, false); err != nil {
+			if err := p.EnsureImage(pullCtx, cfg.RunnerImage, false); err != nil {
 				p.log.Error("pull runner image", "error", err)
 			}
 		}()
@@ -152,19 +198,6 @@ func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 			p.log.Warn("registry mirror", "error", err)
 		}
 	}
-	for _, i := range toRemove {
-		p.removeSlot(ctx, i)
-	}
-	var wg sync.WaitGroup
-	for _, i := range toStart {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			p.startSlot(ctx, i)
-		}(i)
-	}
-	wg.Wait()
-	return nil
 }
 
 // restoredSlotLocked builds a new slot from its persisted state. Callers
