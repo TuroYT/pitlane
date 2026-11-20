@@ -5,15 +5,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
 
+// writeJSON answers v as JSON with status 200.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeErr answers {"error": msg} with the status code.
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -57,6 +60,18 @@ func requestID(r *http.Request) string {
 // badJSON answers a request body that is not the JSON expected.
 func badJSON(w http.ResponseWriter) { writeErr(w, http.StatusBadRequest, "invalid JSON body") }
 
+// readJSON decodes the JSON body into v. When it cannot, it answers 400
+// "invalid JSON body" and returns false. Bound body with http.MaxBytesReader
+// where it matters.
+func readJSON(w http.ResponseWriter, body io.Reader, v any) bool {
+	if err := json.NewDecoder(body).Decode(v); err != nil {
+		badJSON(w)
+		return false
+	}
+	return true
+}
+
+// randomHex returns n random bytes, hex encoded.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)

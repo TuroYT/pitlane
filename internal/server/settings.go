@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -76,6 +76,7 @@ func LoadPoolConfig(st *store.Store, dataDir string) pool.Config {
 // DefaultSlots is half the CPUs, between 1 and 8.
 func DefaultSlots() int { return min(8, max(1, runtime.NumCPU()/2)) }
 
+// settings returns the current settings, as GET /api/settings shows them.
 func (s *Server) settings(r *http.Request) Settings {
 	c := s.pool.Config()
 	return Settings{
@@ -121,6 +122,8 @@ func settingValues(in Settings) map[string]string {
 	return kv
 }
 
+// actionsCacheStats returns the actions cache statistics, nil when the cache
+// is not serving.
 func (s *Server) actionsCacheStats() *cache.Stats {
 	if s.cache == nil {
 		return nil
@@ -129,66 +132,116 @@ func (s *Server) actionsCacheStats() *cache.Stats {
 	return &st
 }
 
+const (
+	// maxSlots is the most parallel jobs the settings accept.
+	maxSlots = 64
+	// minMetricsToken is the shortest metrics token accepted.
+	minMetricsToken = 16
+)
+
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
-	// Fields missing from the request keep their current value.
-	cur := s.pool.Config()
-	in := Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB,
-		ActionsCacheOwnerPct: cur.ActionsCacheOwnerPct, MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB,
-		StrictSlots: cur.StrictSlots}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		badJSON(w)
+	in := s.settingsBase()
+	if !readJSON(w, r.Body, &in) {
 		return
 	}
-	if in.Slots < 1 || in.Slots > 64 {
-		writeErr(w, http.StatusBadRequest, "parallel jobs must be between 1 and 64")
-		return
-	}
-	if in.StrictSlots < pool.AutoStrictSlots || in.StrictSlots >= in.Slots {
-		writeErr(w, http.StatusBadRequest, "slots reserved for strict jobs must be -1 (auto) or between 0 and the number of parallel jobs minus one")
-		return
-	}
-	if in.MemoryReserveMB < 0 {
-		writeErr(w, http.StatusBadRequest, "the memory reserve cannot be negative")
+	if msg := validateSettings(in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 	before := settingValues(s.settings(r))
-	var metricsAudit string
-	if in.MetricsToken != nil {
-		tok := strings.TrimSpace(*in.MetricsToken)
-		if tok != "" && len(tok) < 16 {
-			writeErr(w, http.StatusBadRequest, "the metrics token must be at least 16 characters")
-			return
-		}
-		var err error
-		if tok == "" {
-			if s.store.Get(metricsTokenKey, "") != "" {
-				metricsAudit = "metrics_token removed"
-			}
-			err = s.store.Set(metricsTokenKey, "")
-		} else {
-			err = s.store.SetSecret(metricsTokenKey, tok)
-			metricsAudit = "metrics_token changed"
-		}
-		if err != nil {
-			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
-			return
-		}
+	metricsAudit, err := s.saveMetricsToken(in.MetricsToken)
+	if err != nil {
+		s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
+		return
 	}
 	kv := settingValues(in)
-	for k, v := range kv {
-		if err := s.store.Set(k, v); err != nil {
-			s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
-			return
-		}
+	if err := s.saveSettings(kv); err != nil {
+		s.internalErr(w, r, http.StatusInternalServerError, "settings_save", "cannot save the settings", err)
+		return
 	}
-	if detail := strings.Join(slices.DeleteFunc([]string{changes(settingKeys, before, kv), metricsAudit}, func(x string) bool { return x == "" }), "; "); detail != "" {
+	if detail := joinNonEmpty("; ", changes(settingKeys, before, kv), metricsAudit); detail != "" {
 		s.audit(r, "settings.update", "", detail)
 	}
-	go func() {
-		if err := s.pool.Configure(context.Background(), LoadPoolConfig(s.store, s.cfg.DataDir)); err != nil {
-			s.log.Error("apply settings", "error", err)
-		}
-		s.Notify()
-	}()
+	// Applying may rebuild slots: it must not be cut short with the request.
+	go s.applyPoolConfig(context.WithoutCancel(r.Context()))
 	s.handleGetSettings(w, r)
+}
+
+// settingsBase is what a PUT /api/settings body is decoded into: the fields
+// added after the first release keep their current value when left out, so
+// an older UI does not reset them.
+func (s *Server) settingsBase() Settings {
+	cur := s.pool.Config()
+	return Settings{MinFreeDiskGB: cur.MinFreeDiskGB, ActionsCache: cur.ActionsCache, ActionsCacheGB: cur.ActionsCacheGB,
+		ActionsCacheOwnerPct: cur.ActionsCacheOwnerPct, MemoryAdmission: cur.MemoryAdmission, MemoryReserveMB: cur.MemoryReserveMB,
+		StrictSlots: cur.StrictSlots}
+}
+
+// validateSettings returns why in cannot be saved, or "". Other values out
+// of range are clamped by settingValues.
+func validateSettings(in Settings) string {
+	switch {
+	case in.Slots < 1 || in.Slots > maxSlots:
+		return fmt.Sprintf("parallel jobs must be between 1 and %d", maxSlots)
+	case in.StrictSlots < pool.AutoStrictSlots || in.StrictSlots >= in.Slots:
+		return "slots reserved for strict jobs must be -1 (auto) or between 0 and the number of parallel jobs minus one"
+	case in.MemoryReserveMB < 0:
+		return "the memory reserve cannot be negative"
+	}
+	if in.MetricsToken != nil {
+		if tok := strings.TrimSpace(*in.MetricsToken); tok != "" && len(tok) < minMetricsToken {
+			return fmt.Sprintf("the metrics token must be at least %d characters", minMetricsToken)
+		}
+	}
+	return ""
+}
+
+// saveMetricsToken saves the metrics token of a settings request: nil keeps
+// it, "" removes it. It returns what the audit log should say ("" for
+// nothing).
+func (s *Server) saveMetricsToken(tok *string) (string, error) {
+	if tok == nil {
+		return "", nil
+	}
+	if t := strings.TrimSpace(*tok); t != "" {
+		if err := s.store.SetSecret(metricsTokenKey, t); err != nil {
+			return "", fmt.Errorf("save the metrics token: %w", err)
+		}
+		return "metrics_token changed", nil
+	}
+	audit := ""
+	if s.store.Get(metricsTokenKey, "") != "" {
+		audit = "metrics_token removed"
+	}
+	if err := s.store.Set(metricsTokenKey, ""); err != nil {
+		return "", fmt.Errorf("remove the metrics token: %w", err)
+	}
+	return audit, nil
+}
+
+// saveSettings stores the settings values kv, in settingKeys order.
+func (s *Server) saveSettings(kv map[string]string) error {
+	for _, k := range settingKeys {
+		v, ok := kv[k]
+		if !ok {
+			continue
+		}
+		if err := s.store.Set(k, v); err != nil {
+			return fmt.Errorf("save %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
+// applyPoolConfig applies the stored settings to the pool and tells the UI.
+func (s *Server) applyPoolConfig(ctx context.Context) {
+	if err := s.pool.Configure(ctx, LoadPoolConfig(s.store, s.cfg.DataDir)); err != nil {
+		s.log.Error("apply settings", "error", err)
+	}
+	s.Notify()
+}
+
+// joinNonEmpty joins the non-empty parts with sep.
+func joinNonEmpty(sep string, parts ...string) string {
+	return strings.Join(slices.DeleteFunc(parts, func(x string) bool { return x == "" }), sep)
 }
