@@ -87,6 +87,12 @@ func TestPutSettingsSavesAndApplies(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("%d %s", code, body)
 	}
+	// The response shows what was saved, not what the pool still runs with
+	// while it applies it.
+	if got := decodeSettings(t, body); got.Slots != 6 || got.RunnerImage != "runner:2" || got.CacheScope != "owner" || got.KeepBuildGB != 1 ||
+		got.HistoryDays != 14 || got.ActionsCacheGB != 50 || got.ActionsCacheOwnerPct != 100 || got.MemoryReserveMB != 1024 || got.StrictSlots != 2 {
+		t.Fatalf("the response does not show the saved settings: %s", body)
+	}
 	for k, want := range map[string]string{
 		"slots": "6", "runner_image": "runner:2", "cache_scope": "owner", "mirror": "true", "qemu": "true", "keep_build_gb": "1",
 		"history_days": "14", "base_url": "https://p.example", "memory_admission": "true", "memory_reserve_mb": "1024",
