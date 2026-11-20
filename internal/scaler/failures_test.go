@@ -477,24 +477,32 @@ func TestApplyStrictRequirement(t *testing.T) {
 		}
 		return tg
 	}
+	pub := store.StrictPublicRepo
 	for _, tc := range []struct {
 		name   string
 		target store.Target
 		reason string
 		want   bool
+		// strict and required are the stored state afterwards.
+		strict   bool
+		required string
 	}{
-		{"nothing required, nothing recorded", mk(false, ""), "", false},
-		{"already strict for that reason", mk(true, store.StrictPublicRepo), store.StrictPublicRepo, false},
-		{"newly required", mk(false, ""), store.StrictPublicRepo, true},
-		{"requirement lifted", mk(true, store.StrictPublicRepo), "", true},
-		{"required but not strict yet", mk(false, store.StrictPublicRepo), store.StrictPublicRepo, true},
+		{"nothing required, nothing recorded", mk(false, ""), "", false, false, ""},
+		{"already strict for that reason", mk(true, pub), pub, false, true, pub},
+		{"newly required", mk(false, ""), pub, true, true, pub},
+		{"requirement lifted keeps strict", mk(true, pub), "", true, true, ""},
+		{"required but not strict yet", mk(false, pub), pub, true, true, pub},
 	} {
 		if got := m.ApplyStrictRequirement(tc.target, tc.reason); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
-	}
-	if got, _ := st.Target(mk(false, "").ID); got.Strict {
-		t.Error("a fresh target must stay non-strict")
+		stored, err := st.Target(tc.target.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Strict != tc.strict || stored.StrictRequired != tc.required {
+			t.Errorf("%s: stored strict=%v required=%q, want strict=%v required=%q", tc.name, stored.Strict, stored.StrictRequired, tc.strict, tc.required)
+		}
 	}
 
 	_ = st.Close()
