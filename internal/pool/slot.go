@@ -406,11 +406,28 @@ func (p *Pool) resetSlot(ctx context.Context, i int) error {
 // DropSlotCache deletes a retired slot's volumes (frees disk).
 func (p *Pool) DropSlotCache(ctx context.Context, i int) error {
 	for _, v := range []string{slotDocker(i), slotWork(i), slotExternals(i)} {
+		// Runner and init containers mount these volumes too (even when
+		// stopped): Docker refuses to delete a volume while any container
+		// still references it.
+		p.removeVolumeUsers(ctx, v)
 		if err := p.cli.VolumeRemove(ctx, v, true); err != nil && !cerrdefs.IsNotFound(err) {
 			return fmt.Errorf("remove volume %s: %w", v, err)
 		}
 	}
 	return nil
+}
+
+// removeVolumeUsers force-removes every container, in any state, that mounts
+// the volume.
+func (p *Pool) removeVolumeUsers(ctx context.Context, vol string) {
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(filters.Arg("volume", vol))})
+	if err != nil {
+		p.log.Warn("list containers using volume", "volume", vol, "error", err)
+		return
+	}
+	for _, c := range list {
+		p.Remove(ctx, c.ID)
+	}
 }
 
 var externalsCopies = make(chan struct{}, 2)
