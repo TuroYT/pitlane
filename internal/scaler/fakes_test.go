@@ -36,6 +36,7 @@ type fakePool struct {
 	prepErr   error
 	startErr  error
 	logs      string
+	logsErr   error // Logs fails after writing logs
 	exits     map[string]chan struct{}
 	signal    chan struct{}
 	nextID    int
@@ -172,8 +173,13 @@ func (f *fakePool) Logs(_ context.Context, _ string, _ bool, w io.Writer) error 
 	f.mu.Lock()
 	logs := f.logs
 	f.mu.Unlock()
-	_, err := io.WriteString(w, logs)
-	return err
+	f.mu.Lock()
+	logsErr := f.logsErr
+	f.mu.Unlock()
+	if _, err := io.WriteString(w, logs); err != nil {
+		return err
+	}
+	return logsErr
 }
 
 func (f *fakePool) Remove(_ context.Context, id string) {

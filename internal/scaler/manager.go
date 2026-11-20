@@ -52,8 +52,10 @@ type Manager struct {
 	log     *slog.Logger
 	predict *predictor
 	logDir  string
-	creds   func() Credentials
-	changed func()
+	// logLimit caps an archived runner log (0: maxArchivedLog).
+	logLimit int64
+	creds    func() Credentials
+	changed  func()
 	// usageRetry and queueLookupRetry are the waits of recordUsage and
 	// fetchQueueTime before they ask again (shortened by tests).
 	usageRetry       time.Duration
