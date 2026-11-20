@@ -312,7 +312,7 @@ func (f *flakyFree) freeBytes() (int64, error) {
 	if f.asked > 1 {
 		return 0, errors.New("statfs failed")
 	}
-	return f.fakeDisk.free, nil
+	return f.free, nil
 }
 
 func TestEnsureFreeDisk(t *testing.T) {
