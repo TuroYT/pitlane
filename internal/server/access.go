@@ -330,3 +330,12 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "rule.remove", rule.Subject(), "was "+rule.Role)
 	s.handleUsers(w, r)
 }
+
+func containsFold(list []string, v string) bool {
+	for _, x := range list {
+		if strings.EqualFold(strings.TrimSpace(x), v) {
+			return true
+		}
+	}
+	return false
+}
