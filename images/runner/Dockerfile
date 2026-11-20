@@ -13,7 +13,7 @@ ARG TARGETARCH
 # project publishes with that release. The apt signing keys have no version:
 # their hash is pinned here and must be updated by hand when they rotate.
 # renovate: datasource=node-version depName=node versioning=node
-ARG NODE_VERSION=24.22.3
+ARG NODE_VERSION=26.13.1
 # renovate: datasource=github-releases depName=docker/compose
 ARG COMPOSE_VERSION=v5.7.1
 # renovate: datasource=github-releases depName=mikefarah/yq
