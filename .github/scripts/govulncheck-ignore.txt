@@ -1,0 +1,12 @@
+# Advisories govulncheck reports and the code does not suffer from. One ID per
+# line, then the reason. Remove a line when its reason stops being true: the
+# script warns about lines that no longer match anything.
+
+# github.com/docker/docker is the Docker client library here. These two are
+# bugs of the Docker daemon (AuthZ plugins, plugin privileges) that live in the
+# same Go module, which the advisories flag as a whole ("introduced: 0"); no
+# version of github.com/docker/docker fixes them, only the new module path
+# github.com/moby/moby/v2 does (2.0.0-beta.8). Pitlane does not run a daemon
+# or manage plugins. Move to moby/moby/v2 once its client is stable.
+GO-2026-4883 daemon plugin privilege validation (moby)
+GO-2026-4887 daemon AuthZ plugin bypass (moby)
