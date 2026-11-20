@@ -299,3 +299,19 @@ func TestMemoryLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestStrictSlotsCount(t *testing.T) {
+	p := newTestPool("owner", SlotState{Index: 0, Status: statusReady}, SlotState{Index: 1, Status: statusReady})
+	p.cfg.StrictSlots = AutoStrictSlots
+	if p.StrictSlots() != 0 {
+		t.Fatal("no strict target: no reserved slot")
+	}
+	p.SetStrictDemand(true)
+	if p.StrictSlots() != 1 {
+		t.Fatal("a strict target reserves one slot")
+	}
+	p.cfg.StrictSlots = 5
+	if p.StrictSlots() != 1 {
+		t.Fatal("non-strict jobs always keep a slot")
+	}
+}

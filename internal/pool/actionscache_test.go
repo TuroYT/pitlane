@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -467,5 +468,31 @@ func TestForwarderNetwork(t *testing.T) {
 	delete(nets, "bridge")
 	if n, target := forwarderNetwork("pitlane", nets); n != "zeta" || target != "pitlane" {
 		t.Fatalf("named network: %s %s", n, target)
+	}
+}
+
+// stageShim copies the running binary (here a fake one, through hostEnv)
+// into a created container as a tar archive.
+func TestStageShim(t *testing.T) {
+	p := newTestPool("owner")
+	p.env = testHost(t)
+	write(t, p.env.selfExe, "#!pitlane")
+	var name, body string
+	newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"PUT /containers/c1/archive": func(w http.ResponseWriter, r *http.Request) {
+			tr := tar.NewReader(r.Body)
+			if h, err := tr.Next(); err == nil {
+				name = h.Name
+				b, _ := io.ReadAll(tr)
+				body = string(b)
+			}
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+	if err := p.stageShim(context.Background(), "c1"); err != nil {
+		t.Fatal(err)
+	}
+	if name != "pitlane-node-shim" || body != "#!pitlane" {
+		t.Fatalf("archive: %q %q", name, body)
 	}
 }
