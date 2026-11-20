@@ -13,7 +13,11 @@ import (
 
 const externalsDir = "/home/runner/externals"
 
-var externalsCopies = make(chan struct{}, 2)
+// maxExternalsCopies bounds the externals copies running at once: each one
+// writes about 600 MB.
+const maxExternalsCopies = 2
+
+var externalsCopies = make(chan struct{}, maxExternalsCopies)
 
 // ensureExternals copies the runner image's externals into the slot volume.
 // The copy is redone when the runner image or the slot owner changes (tracked

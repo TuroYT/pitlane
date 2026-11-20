@@ -185,3 +185,13 @@ func TestRunnerContainerSpec(t *testing.T) {
 		t.Fatalf("strict volumes: %s %s", c, tl)
 	}
 }
+
+func TestParsePages(t *testing.T) {
+	got := parsePages("1.0 10 a.log\n2.0 5 b'c.log\n3.0 7 d.txt\nbad\n4.0 3 e.log\n")
+	if len(got) != 2 || got[0] != (page{"a.log", 10}) || got[1] != (page{"e.log", 3}) {
+		t.Fatalf("pages: %+v", got)
+	}
+	if parsePages("") != nil {
+		t.Fatal("empty listing")
+	}
+}

@@ -295,58 +295,99 @@ func (p *Pool) adoptContainer(id string, labels map[string]string, state string,
 	return o
 }
 
-// TailJobOutput streams the step output of a running job. The runner writes
-// it to _diag/pages/*.log (4 KB pages) before uploading it to GitHub; pages
-// are read as they grow, oldest first, until the runner exits.
+// Job output pages: the runner writes a job's step output to
+// _diag/pages/*.log (4 KB pages) before uploading it to GitHub.
+const (
+	pagesDir         = "/home/runner/_diag/pages"
+	pageChunkMax     = 64 << 10 // bytes read per file and per poll
+	tailTotalMax     = 64 << 20 // bytes streamed per request
+	tailPollInterval = time.Second
+	// listPagesScript lists the regular files (no symlinks), oldest first, as
+	// "mtime size name".
+	listPagesScript = `cd ` + pagesDir + ` 2>/dev/null && find . -maxdepth 1 -type f -name '*.log' -printf '%T@ %s %f\n' | sort -n | head -n 500`
+)
+
+// TailJobOutput streams the step output of a running job. Pages are read as
+// they grow, oldest first, until the runner exits.
 func (p *Pool) TailJobOutput(ctx context.Context, id string, w io.Writer) error {
-	const (
-		dir      = "/home/runner/_diag/pages"
-		chunkMax = 64 << 10 // bytes read per file and per poll
-		totalMax = 64 << 20 // bytes streamed per request
-	)
-	offsets := map[string]int{}
-	total := 0
+	t := &jobTail{p: p, id: id, w: w, offsets: map[string]int{}}
 	for {
-		// Regular files only (no symlinks), oldest first.
-		listing, code, err := p.exec(ctx, id, `cd `+dir+` 2>/dev/null && find . -maxdepth 1 -type f -name '*.log' -printf '%T@ %s %f\n' | sort -n | head -n 500`)
-		if err != nil || code != 0 {
-			if info, ierr := p.cli.ContainerInspect(ctx, id); ierr != nil || info.State == nil || !info.State.Running {
-				return nil // runner finished
-			}
+		listing, code, err := p.exec(ctx, id, listPagesScript)
+		if (err != nil || code != 0) && !p.running(ctx, id) {
+			return nil // runner finished
 		}
-		for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 3 || !strings.HasSuffix(f[2], ".log") || strings.ContainsAny(f[2], "/'\"$`\\") {
-				continue
-			}
-			name := f[2]
-			size, _ := strconv.Atoi(f[1])
-			off := offsets[name]
-			if size <= off {
-				continue
-			}
-			n := min(size-off, chunkMax)
-			chunk, _, err := p.exec(ctx, id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, dir, name, n))
-			if err != nil {
-				continue
-			}
-			if len(chunk) > n {
-				chunk = chunk[:n]
-			}
-			offsets[name] = off + len(chunk)
-			total += len(chunk)
-			if _, err := io.WriteString(w, chunk); err != nil {
-				return err
-			}
-			if total >= totalMax {
-				_, _ = io.WriteString(w, "\n[pitlane] output truncated: open the GitHub run page for the full log\n")
-				return nil
-			}
+		if done, err := t.copyPages(ctx, parsePages(listing)); done || err != nil {
+			return err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(tailPollInterval):
 		}
 	}
+}
+
+// running reports whether container id is known to be running.
+func (p *Pool) running(ctx context.Context, id string) bool {
+	info, err := p.cli.ContainerInspect(ctx, id)
+	return err == nil && info.State != nil && info.State.Running
+}
+
+// page is a job output page file.
+type page struct {
+	name string
+	size int
+}
+
+// parsePages parses the output of listPagesScript, skipping any line that is
+// not a plain page name (a job controls that directory).
+func parsePages(listing string) []page {
+	var out []page
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || !strings.HasSuffix(f[2], ".log") || strings.ContainsAny(f[2], "/'\"$`\\") {
+			continue
+		}
+		size, _ := strconv.Atoi(f[1])
+		out = append(out, page{name: f[2], size: size})
+	}
+	return out
+}
+
+// jobTail is the state of one TailJobOutput stream.
+type jobTail struct {
+	p       *Pool
+	id      string
+	w       io.Writer
+	offsets map[string]int // bytes of each page already streamed
+	total   int            // bytes streamed
+}
+
+// copyPages streams what each page gained since the last poll. done is set
+// once tailTotalMax bytes were streamed.
+func (t *jobTail) copyPages(ctx context.Context, pages []page) (done bool, err error) {
+	for _, pg := range pages {
+		off := t.offsets[pg.name]
+		if pg.size <= off {
+			continue
+		}
+		n := min(pg.size-off, pageChunkMax)
+		chunk, _, err := t.p.exec(ctx, t.id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, pagesDir, pg.name, n))
+		if err != nil {
+			continue
+		}
+		if len(chunk) > n {
+			chunk = chunk[:n]
+		}
+		t.offsets[pg.name] = off + len(chunk)
+		t.total += len(chunk)
+		if _, err := io.WriteString(t.w, chunk); err != nil {
+			return true, err
+		}
+		if t.total >= tailTotalMax {
+			_, _ = io.WriteString(t.w, "\n[pitlane] output truncated: open the GitHub run page for the full log\n")
+			return true, nil
+		}
+	}
+	return false, nil
 }

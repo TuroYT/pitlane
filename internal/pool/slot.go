@@ -360,13 +360,17 @@ func (p *Pool) MarkRunner(slotIdx int, runner string) {
 	p.mu.Unlock()
 }
 
-// Slots returns a snapshot of every slot.
+// slotIndexSlack is how far beyond the slot count Slots looks for slots
+// (retired ones, or adopted runners' slots with a higher index).
+const slotIndexSlack = 8
+
+// Slots returns a snapshot of every slot, by index.
 func (p *Pool) Slots() []SlotState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]SlotState, 0, len(p.slots))
 	reserved := p.reservedLocked()
-	for i := 0; i < len(p.slots)+8; i++ {
+	for i := 0; i < len(p.slots)+slotIndexSlack; i++ {
 		if s, ok := p.slots[i]; ok {
 			st := s.SlotState
 			if s.retire {

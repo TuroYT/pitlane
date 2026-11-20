@@ -148,59 +148,82 @@ func sacrifice(s *slot, keeps int) (tier int, lastUsed int64) {
 // Strict jobs also wait (WaitStrictSlot) rather than wipe a warm slot while
 // a slot is being rebuilt after a strict job, for at most strictWait. It
 // returns the reason when no slot can be handed out. Callers hold p.mu.
-func (p *Pool) chooseLocked(r Request) (c choice, reason string) {
-	owner, targetID, strict := r.Owner, r.TargetID, r.Strict
+func (p *Pool) chooseLocked(r Request) (choice, string) {
 	reserved := p.reservedLocked()
-	var clean, dirty *slot
-	bestAff, bestTier, bestKeeps := 0, 0, 0
-	var bestUsed int64
-	skipped := false // a free slot a strict job may not wipe
+	var c candidates
 	for _, s := range p.slots {
 		if s.Status != statusReady || s.retire || s.dirty {
 			continue
 		}
-		res := reserved[s.Index]
-		if res && !strict {
-			continue
-		}
-		if !p.needsWipe(s, owner, strict) {
-			a := affinity(s, owner, targetID, strict, res)
-			if clean == nil || a < bestAff || (a == bestAff && warmer(s, clean, a, r.Predicted)) {
-				clean, bestAff = s, a
-			}
-			continue
-		}
-		keeps := p.othersWarmLocked(s)
-		if strict && len(reserved) > 0 && !res && !worthless(s.Owner) && keeps == 0 {
-			skipped = true // the owner's last warm cache: wait for a reserved slot
-			continue
-		}
-		tier, used := sacrifice(s, keeps)
-		if strict && res {
-			tier = -1 // a strict job wipes its reserved slot first
-		}
-		if dirty == nil || tier < bestTier || (tier == bestTier && (used < bestUsed || (used == bestUsed && s.Index < dirty.Index))) {
-			dirty, bestTier, bestUsed, bestKeeps = s, tier, used, keeps
-		}
+		p.considerLocked(&c, s, r, reserved[s.Index], len(reserved) > 0)
 	}
 	switch {
-	case clean != nil:
-		return choice{s: clean}, ""
-	case dirty == nil && skipped:
+	case c.clean != nil:
+		return choice{s: c.clean}, ""
+	case c.dirty == nil && c.skipped:
 		return choice{}, WaitStrictSlot
-	case dirty == nil:
+	case c.dirty == nil:
 		return choice{}, WaitSlot
 	}
-	if strict && !worthless(dirty.Owner) && p.strictCleaningLocked() {
-		now := p.clock()
-		if p.strictWaitSince.IsZero() {
-			p.strictWaitSince = now
-		}
-		if now.Sub(p.strictWaitSince) < strictWait {
-			return choice{}, WaitStrictSlot
-		}
+	if r.Strict && !worthless(c.dirty.Owner) && p.strictWaitLocked() {
+		return choice{}, WaitStrictSlot
 	}
-	return choice{s: dirty, wipe: true, keeps: bestKeeps}, ""
+	return choice{s: c.dirty, wipe: true, keeps: c.keeps}, ""
+}
+
+// candidates are the best free slots chooseLocked has seen so far.
+type candidates struct {
+	clean *slot // best slot needing no wipe
+	aff   int   // its affinity
+
+	dirty *slot // best slot to wipe
+	tier  int   // its sacrifice tier
+	used  int64 // its LastUsed
+	keeps int   // other warm slots its owner keeps
+
+	skipped bool // a free slot a strict job may not wipe
+}
+
+// considerLocked ranks free slot s for r. reserved tells whether s is
+// reserved for strict jobs, anyReserved whether any slot is. Callers hold
+// p.mu.
+func (p *Pool) considerLocked(c *candidates, s *slot, r Request, reserved, anyReserved bool) {
+	if reserved && !r.Strict {
+		return
+	}
+	if !p.needsWipe(s, r.Owner, r.Strict) {
+		a := affinity(s, r.Owner, r.TargetID, r.Strict, reserved)
+		if c.clean == nil || a < c.aff || (a == c.aff && warmer(s, c.clean, a, r.Predicted)) {
+			c.clean, c.aff = s, a
+		}
+		return
+	}
+	keeps := p.othersWarmLocked(s)
+	if r.Strict && anyReserved && !reserved && !worthless(s.Owner) && keeps == 0 {
+		c.skipped = true // the owner's last warm cache: wait for a reserved slot
+		return
+	}
+	tier, used := sacrifice(s, keeps)
+	if r.Strict && reserved {
+		tier = -1 // a strict job wipes its reserved slot first
+	}
+	if c.dirty == nil || tier < c.tier || (tier == c.tier && (used < c.used || (used == c.used && s.Index < c.dirty.Index))) {
+		c.dirty, c.tier, c.used, c.keeps = s, tier, used, keeps
+	}
+}
+
+// strictWaitLocked reports whether a strict job should wait for a slot being
+// rebuilt after a strict job rather than wipe a warm one, for at most
+// strictWait since it started waiting. Callers hold p.mu.
+func (p *Pool) strictWaitLocked() bool {
+	if !p.strictCleaningLocked() {
+		return false
+	}
+	now := p.clock()
+	if p.strictWaitSince.IsZero() {
+		p.strictWaitSince = now
+	}
+	return now.Sub(p.strictWaitSince) < strictWait
 }
 
 // wipeReason is the metric label of a wipe before a job.

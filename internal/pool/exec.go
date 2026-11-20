@@ -38,8 +38,13 @@ func (p *Pool) exec(ctx context.Context, name, script string) (string, int, erro
 }
 
 // execExitWait bounds how long exec waits for a process whose output has
-// ended to be reported as exited.
-const execExitWait = 30 * time.Second
+// ended to be reported as exited; it is polled with a delay doubling from
+// execPollMin up to execPollMax.
+const (
+	execExitWait = 30 * time.Second
+	execPollMin  = 10 * time.Millisecond
+	execPollMax  = 500 * time.Millisecond
+)
 
 // waitExec polls an exec until Docker reports it finished and returns its
 // exit code. Its output stream ending is not enough: the exit code is only
@@ -47,7 +52,7 @@ const execExitWait = 30 * time.Second
 func waitExec(ctx context.Context, inspect func(context.Context) (container.ExecInspect, error)) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, execExitWait)
 	defer cancel()
-	delay := 10 * time.Millisecond
+	delay := execPollMin
 	for {
 		ins, err := inspect(ctx)
 		if err != nil {
@@ -61,7 +66,7 @@ func waitExec(ctx context.Context, inspect func(context.Context) (container.Exec
 			return -1, fmt.Errorf("exec still running: %w", ctx.Err())
 		case <-time.After(delay):
 		}
-		delay = min(delay*2, 500*time.Millisecond)
+		delay = min(delay*2, execPollMax)
 	}
 }
 

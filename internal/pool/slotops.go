@@ -87,7 +87,7 @@ func (d dockerSlotOps) copyExternals(ctx context.Context, i int, img string) err
 	if err != nil {
 		return err
 	}
-	defer p.Remove(context.Background(), c.ID)
+	defer p.Remove(context.WithoutCancel(ctx), c.ID)
 	if err := p.stageShim(ctx, c.ID); err != nil {
 		p.log.Warn("cannot install the Node shim: this slot's jobs use GitHub's actions cache", "slot", i, "error", err)
 	}
