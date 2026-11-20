@@ -54,6 +54,15 @@ type client struct {
 	t    *testing.T
 	base string // .../<token>/<owner>/<repo>/
 	job  string
+	hc   *http.Client // its own transport: closing another test's server must not reset our connections
+}
+
+// newHTTP returns a client with a private transport.
+func newHTTP(t *testing.T) *http.Client {
+	t.Helper()
+	tr := &http.Transport{}
+	t.Cleanup(tr.CloseIdleConnections)
+	return &http.Client{Transport: tr}
 }
 
 func (c client) do(method, path string, body io.Reader, hdr ...string) *http.Response {
@@ -68,7 +77,7 @@ func (c client) do(method, path string, body io.Reader, hdr ...string) *http.Res
 	for i := 0; i+1 < len(hdr); i += 2 {
 		req.Header.Set(hdr[i], hdr[i+1])
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := c.hc.Do(req)
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -114,7 +123,7 @@ func (c client) restore(version string, keys ...string) (string, string) {
 	}
 	var e cacheEntry
 	_ = json.NewDecoder(res.Body).Decode(&e)
-	dl, err := http.Get(e.ArchiveLocation) // no Authorization header, like the client
+	dl, err := c.hc.Get(e.ArchiveLocation) // no Authorization header, like the client
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -128,7 +137,7 @@ func (c client) restore(version string, keys ...string) (string, string) {
 
 func newClient(t *testing.T, s *Server, ts *httptest.Server, runner string, id Identity, repo string, scopes ...string) client {
 	tok := s.Register(runner, id)
-	c := client{t: t, base: ts.URL + "/" + tok + "/" + repo + "/"}
+	c := client{t: t, base: ts.URL + "/" + tok + "/" + repo + "/", hc: newHTTP(t)}
 	if len(scopes) > 0 {
 		c.job = jobToken(scopes...)
 	}

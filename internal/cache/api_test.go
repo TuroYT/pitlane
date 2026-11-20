@@ -100,7 +100,16 @@ func TestAuthFailures(t *testing.T) {
 	repoTarget := s.Register("pitlane-r", Identity{Owner: "acme", Repo: "web"})
 	other, _ := newServer(t, "") // another key: its tokens are forged here
 	forged := other.Register("pitlane-a", Identity{Owner: "acme"})
+	hc := newHTTP(t)
 	noOwner := s.Register("pitlane-n", Identity{})
+	// Change one character in the middle of the signature, to a different one.
+	flip := []byte(good)
+	if i := len(flip) - 10; flip[i] == 'A' {
+		flip[i] = 'B'
+	} else {
+		flip[i] = 'A'
+	}
+	tampered := string(flip)
 
 	tests := []struct {
 		name string
@@ -117,14 +126,14 @@ func TestAuthFailures(t *testing.T) {
 		{"identity without owner", noOwner + "/acme/api", http.StatusForbidden},
 		{"token of another server", forged + "/acme/api", http.StatusUnauthorized},
 		{"unknown runner", "ghost." + strings.Split(good, ".")[1] + "/acme/api", http.StatusUnauthorized},
-		{"tampered signature", good[:len(good)-2] + "AA/acme/api", http.StatusUnauthorized},
+		{"tampered signature", tampered + "/acme/api", http.StatusUnauthorized},
 		{"no signature", "pitlane-a/acme/api", http.StatusUnauthorized},
 		{"empty token", "x/acme/api", http.StatusUnauthorized},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			res, err := http.Get(ts.URL + "/" + tc.path + "/_apis/artifactcache/cache?keys=k&version=v")
+			res, err := hc.Get(ts.URL + "/" + tc.path + "/_apis/artifactcache/cache?keys=k&version=v")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,12 +151,13 @@ func TestAuthGuardsEveryRoute(t *testing.T) {
 	s, ts := newServer(t, "")
 	tok := s.Register("pitlane-a", Identity{Owner: "acme"})
 	base := ts.URL + "/" + tok + "/evil/api/_apis/artifactcache/"
+	hc := newHTTP(t)
 	for _, r := range []struct{ method, path string }{
 		{"GET", "cache?keys=k&version=v"}, {"GET", "caches?key=k"}, {"POST", "caches"},
 		{"PATCH", "caches/1"}, {"POST", "caches/1"}, {"GET", "artifacts/1"},
 	} {
 		req, _ := http.NewRequest(r.method, base+r.path, strings.NewReader(`{}`))
-		res, err := http.DefaultClient.Do(req)
+		res, err := hc.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}

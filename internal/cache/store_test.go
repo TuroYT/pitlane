@@ -279,12 +279,9 @@ func TestForwardListenError(t *testing.T) {
 // When the target is down the client's connection is closed, not left hanging.
 func TestForwardTargetUnreachable(t *testing.T) {
 	t.Parallel()
-	dead, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := dead.Addr().String()
-	_ = dead.Close()
+	// An address that cannot be dialled: a freed port could be taken by a
+	// parallel test before relay connects to it.
+	const target = "unreachable-target-without-a-port"
 
 	front, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
