@@ -191,6 +191,19 @@ func reexec(log *slog.Logger) {
 	os.Exit(1)
 }
 
+// logSetupToken tells the operator how to get the setup token. The token
+// itself only goes to the log when it could not be saved: logs are often
+// shipped elsewhere, the data directory is not.
+func logSetupToken(log *slog.Logger, tok server.SetupToken) {
+	switch {
+	case tok.Value == "":
+	case tok.Saved:
+		log.Info("first-time setup: open the web UI and enter the setup token saved in this file", "file", tok.File)
+	default:
+		log.Info("first-time setup: open the web UI and enter this setup token", "token", tok.Value)
+	}
+}
+
 // startActionsCache opens the actions cache and starts its listener. On any
 // failure Pitlane runs without it: jobs use GitHub's cache.
 func startActionsCache(log *slog.Logger, dataDir, listen string) (*cache.Server, *http.Server, int) {
@@ -293,9 +306,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 			stop()
 		}
 	}()
-	if tok := srv.EnsureSetupToken(); tok != "" {
-		log.Info("first-time setup: open the web UI and enter this setup token", "token", tok)
-	}
+	logSetupToken(log, srv.EnsureSetupToken())
 
 	log.Info("starting warm slots (first start pulls images and may take a minute)")
 	if err := p.Start(ctx); err != nil {

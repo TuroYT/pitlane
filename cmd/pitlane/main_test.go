@@ -1,10 +1,44 @@
 package main
 
 import (
+	"bytes"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/TuroYT/pitlane/internal/server"
 )
+
+func TestLogSetupToken(t *testing.T) {
+	const secret = "0123456789abcdef01234567"
+	for _, tc := range []struct {
+		name         string
+		tok          server.SetupToken
+		wantToken    bool
+		wantFile     bool
+		wantNoOutput bool
+	}{
+		{"saved", server.SetupToken{Value: secret, File: "/data/setup-token", Saved: true}, false, true, false},
+		{"not saved", server.SetupToken{Value: secret, File: "/data/setup-token"}, true, false, false},
+		{"setup complete", server.SetupToken{}, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logSetupToken(slog.New(slog.NewTextHandler(&buf, nil)), tc.tok)
+			out := buf.String()
+			if got := strings.Contains(out, secret); got != tc.wantToken {
+				t.Errorf("token in the log = %v, want %v: %s", got, tc.wantToken, out)
+			}
+			if got := strings.Contains(out, "/data/setup-token"); got != tc.wantFile {
+				t.Errorf("file in the log = %v, want %v: %s", got, tc.wantFile, out)
+			}
+			if tc.wantNoOutput && out != "" {
+				t.Errorf("unexpected log: %s", out)
+			}
+		})
+	}
+}
 
 func TestNewHTTPServerTimeouts(t *testing.T) {
 	srv := newHTTPServer(":0", http.NotFoundHandler())

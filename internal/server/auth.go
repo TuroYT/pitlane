@@ -18,24 +18,38 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
-// EnsureSetupToken creates the one-time token protecting the first setup.
-func (s *Server) EnsureSetupToken() string {
+// SetupToken is the one-time token protecting the first setup, and where the
+// operator can read it.
+type SetupToken struct {
+	// Value is the token; empty once the first admin exists.
+	Value string
+	// File is where the token is saved.
+	File string
+	// Saved reports whether File holds the token. When it does not (the data
+	// directory is not writable), the log is the only place left to show it.
+	Saved bool
+}
+
+// EnsureSetupToken creates the one-time token protecting the first setup, or
+// reuses the one saved by a previous start.
+func (s *Server) EnsureSetupToken() SetupToken {
 	file := filepath.Join(s.cfg.DataDir, "setup-token")
 	if s.store.HasUsers() {
 		_ = os.Remove(file)
-		return ""
+		return SetupToken{}
 	}
 	if b, err := os.ReadFile(file); err == nil && len(strings.TrimSpace(string(b))) > 0 {
 		tok := strings.TrimSpace(string(b))
 		s.setSetupToken(tok)
-		return tok
+		return SetupToken{Value: tok, File: file, Saved: true}
 	}
 	tok := randomHex(12)
 	s.setSetupToken(tok)
-	if err := os.WriteFile(file, []byte(tok+"\n"), 0o600); err != nil {
-		s.log.Warn("cannot write the setup token file (the token is in this log)", "file", file, "error", err)
+	err := os.WriteFile(file, []byte(tok+"\n"), 0o600)
+	if err != nil {
+		s.log.Warn("cannot write the setup token file, the token will be logged instead", "file", file, "error", err)
 	}
-	return tok
+	return SetupToken{Value: tok, File: file, Saved: err == nil}
 }
 
 // The setup token is read by request handlers and cleared by the first

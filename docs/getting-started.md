@@ -26,12 +26,14 @@ a private LAN address.
 
 ## 2. Create the GitHub App
 
-Open Pitlane in your browser. It asks for the **setup token**, printed in the logs
-and available with:
+Open Pitlane in your browser. It asks for the **setup token**. Pitlane saves it
+in the `setup-token` file of its data directory (it is not printed in the logs,
+unless that file cannot be written) and removes the file once the first admin
+has signed in. Read it with:
 
 ```sh
-pitlane setup-token          # systemd install
-docker compose logs pitlane | grep token   # Compose
+pitlane setup-token                          # systemd install, Proxmox
+docker compose exec pitlane /pitlane setup-token   # Compose
 ```
 
 Click **Create GitHub App on github.com**. GitHub shows the App that will be
