@@ -245,8 +245,7 @@ func (p *Pool) unclaim(ctx context.Context, i int) {
 		return
 	}
 	if retire {
-		p.removeSlot(ctx, i)
-		p.signal()
+		p.removeRetired(ctx, i)
 		return
 	}
 	p.setStatus(i, statusReady, "")

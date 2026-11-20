@@ -241,6 +241,13 @@ func (p *Pool) removeSlot(ctx context.Context, i int) {
 	p.mu.Unlock()
 }
 
+// removeRetired removes a slot retired while it was in use, now that it is
+// free, and wakes up whoever waits for a slot.
+func (p *Pool) removeRetired(ctx context.Context, i int) {
+	p.removeSlot(ctx, i)
+	p.signal()
+}
+
 // rebuildSlot deletes a slot with all its volumes and starts it again empty.
 func (p *Pool) rebuildSlot(ctx context.Context, i int) {
 	if err := p.resetSlot(ctx, i); err != nil {
