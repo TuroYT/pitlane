@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+const (
+	// eventsHeartbeat is how often the event stream sends the state even
+	// when nothing changed (it refreshes the host stats).
+	eventsHeartbeat = 5 * time.Second
+	// eventsCoalesce is how long the event stream waits after a change, so
+	// a burst of changes sends one state.
+	eventsCoalesce = 150 * time.Millisecond
+)
+
+// snapshot is the state the dashboard shows.
 func (s *Server) snapshot() map[string]any {
 	return map[string]any{
 		"targets": s.mgr.Snapshot(),
@@ -19,6 +29,8 @@ func (s *Server) snapshot() map[string]any {
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.snapshot()) }
 
+// handleEvents streams the state as server-sent events: on connection,
+// after every change and every eventsHeartbeat.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -41,14 +53,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if !send() {
 		return
 	}
-	heartbeat := time.NewTicker(5 * time.Second) // also refreshes host stats
+	heartbeat := time.NewTicker(eventsHeartbeat)
 	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ch:
-			time.Sleep(150 * time.Millisecond) // coalesce bursts
+			time.Sleep(eventsCoalesce)
 			if !send() {
 				return
 			}
@@ -60,13 +72,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// hub tells the event streams that the state changed. A subscriber's channel
+// holds at most one pending signal, so notify never blocks and a slow stream
+// still sees the latest change.
 type hub struct {
-	mu   sync.Mutex
+	mu   sync.Mutex // guards subs
 	subs map[chan struct{}]bool
 }
 
 func newHub() *hub { return &hub{subs: map[chan struct{}]bool{}} }
 
+// subscribe returns a channel signalled after each change.
 func (h *hub) subscribe() chan struct{} {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()
@@ -81,6 +97,7 @@ func (h *hub) unsubscribe(ch chan struct{}) {
 	h.mu.Unlock()
 }
 
+// notify signals every subscriber without blocking.
 func (h *hub) notify() {
 	h.mu.Lock()
 	defer h.mu.Unlock()

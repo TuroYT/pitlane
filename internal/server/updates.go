@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// maxUpdatesAudit bounds the request body of an update mutation kept for the
+// audit log.
+const maxUpdatesAudit = 4096
+
+// handleUpdates serves the update API (internal/update) and records its
+// successful mutations, with their JSON body, in the audit log.
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	if s.upd == nil {
 		writeErr(w, http.StatusNotFound, "updates are not available")
@@ -20,7 +26,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	// Mutations go to the audit log, with the preferences saved.
 	var detail string
 	if r.Body != nil {
-		b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		b, err := io.ReadAll(io.LimitReader(r.Body, maxUpdatesAudit))
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "cannot read the request body")
 			return
@@ -43,6 +49,7 @@ type statusWriter struct {
 	code int
 }
 
+// WriteHeader records code and sends it.
 func (w *statusWriter) WriteHeader(code int) {
 	w.code = code
 	w.ResponseWriter.WriteHeader(code)

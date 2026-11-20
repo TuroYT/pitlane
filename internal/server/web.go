@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+// handleWeb serves the embedded UI. Unknown paths get index.html (the UI
+// routes them), except under /api/; hashed assets are cached for good.
 func (s *Server) handleWeb(w http.ResponseWriter, r *http.Request) {
 	if s.web == nil {
 		http.Error(w, "UI not built", http.StatusNotFound)
