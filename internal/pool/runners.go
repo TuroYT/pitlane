@@ -16,11 +16,15 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
+// runnerFilter selects Pitlane's runner containers.
+func runnerFilter() filters.Args {
+	return filters.NewArgs(filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))
+}
+
 // RunnerNames returns the runner names of every Pitlane runner container
 // that still exists, running or not. It changes no slot state.
 func (p *Pool) RunnerNames(ctx context.Context) (map[string]bool, error) {
-	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
-		filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))})
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: runnerFilter()})
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +53,7 @@ type RunnerSpec struct {
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 
 func cacheVolume(scope, owner string) string {
-	if scope == "shared" {
+	if scope == scopeShared {
 		return "pitlane-cache"
 	}
 	return "pitlane-cache-" + strings.ToLower(unsafeChars.ReplaceAllString(owner, "_"))
@@ -61,65 +65,77 @@ func runnerLogConfig() container.LogConfig {
 	return container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "50m", "max-file": "2"}}
 }
 
+// Cache directories inside a runner container, each on its own volume.
+const (
+	runnerCacheDir = "/home/runner/.cache"
+	runnerToolDir  = "/opt/hostedtoolcache"
+)
+
 // StartRunner creates and starts an ephemeral runner container in a slot.
 func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error) {
 	// Cache volumes must not be pruned between their creation and their use.
 	p.volMu.RLock()
 	defer p.volMu.RUnlock()
 	cfg := p.Config()
-	cacheVol := cacheVolume(cfg.CacheScope, spec.Owner)
-	toolVol := strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
-	if spec.Lease.Strict {
-		// Throwaway caches, removed when the job ends.
-		cacheVol, toolVol = strictVolumes(spec.Name)
-	}
+	cacheVol, toolVol := runnerVolumes(cfg.CacheScope, spec)
 	for _, v := range []string{cacheVol, toolVol} {
 		if err := p.ensureVolume(ctx, v); err != nil {
 			return "", err
 		}
 	}
-	slotIdx := spec.Lease.Slot
-	env := []string{
+	env := runnerEnv(cfg, spec)
+	if e := p.cacheEnv(ctx, cfg, spec); e != "" {
+		env = append(env, e)
+	}
+	cc, hc := runnerContainer(cfg, spec, env, cacheVol, toolVol)
+	id, err := p.createRunner(ctx, spec.Name, cc, hc)
+	if err != nil {
+		return "", err
+	}
+	p.MarkRunner(spec.Lease.Slot, spec.Name)
+	return id, nil
+}
+
+// runnerVolumes returns the cache and tool cache volumes of a runner: its
+// owner's (or everyone's, in the shared scope), or throwaway ones for a
+// strict job, removed when the job ends.
+func runnerVolumes(scope string, spec RunnerSpec) (cacheVol, toolVol string) {
+	if spec.Lease.Strict {
+		return strictVolumes(spec.Name)
+	}
+	cacheVol = cacheVolume(scope, spec.Owner)
+	return cacheVol, strings.Replace(cacheVol, "pitlane-cache", "pitlane-toolcache", 1)
+}
+
+// runnerEnv is the environment of a runner container (without the actions
+// cache URL, see cacheEnv).
+func runnerEnv(cfg Config, spec RunnerSpec) []string {
+	return []string{
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=" + spec.JITConfig,
-		"DOCKER_HOST=tcp://127.0.0.1:2375",
-		"RUNNER_TOOL_CACHE=/opt/hostedtoolcache",
-		"AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache",
+		"DOCKER_HOST=" + dindAddr,
+		"RUNNER_TOOL_CACHE=" + runnerToolDir,
+		"AGENT_TOOLSDIRECTORY=" + runnerToolDir,
 		"ImageOS=" + cfg.ImageOS,
-		"XDG_CACHE_HOME=/home/runner/.cache",
-		"npm_config_cache=/home/runner/.cache/npm",
+		"XDG_CACHE_HOME=" + runnerCacheDir,
+		"npm_config_cache=" + runnerCacheDir + "/npm",
 		// Same filesystem as the workspace: pnpm hardlinks packages into
 		// node_modules instead of copying them (minutes saved per install).
 		"npm_config_store_dir=" + workDir + "/" + pnpmStoreDir,
-		"YARN_CACHE_FOLDER=/home/runner/.cache/yarn",
-		"BUN_INSTALL_CACHE_DIR=/home/runner/.cache/bun",
-		"GOMODCACHE=/home/runner/.cache/go-mod",
-		"PIP_CACHE_DIR=/home/runner/.cache/pip",
-		"PITLANE_SLOT=" + strconv.Itoa(slotIdx),
+		"YARN_CACHE_FOLDER=" + runnerCacheDir + "/yarn",
+		"BUN_INSTALL_CACHE_DIR=" + runnerCacheDir + "/bun",
+		"GOMODCACHE=" + runnerCacheDir + "/go-mod",
+		"PIP_CACHE_DIR=" + runnerCacheDir + "/pip",
+		"PITLANE_SLOT=" + strconv.Itoa(spec.Lease.Slot),
 		// The official image dumps the runner's internal debug traces to stdout
 		// (meant for Kubernetes); keep the runner output readable instead.
 		"ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=0",
 	}
-	if e := p.cacheEnv(ctx, cfg, spec); e != "" {
-		env = append(env, e)
-	}
-	hc := &container.HostConfig{
-		Init: ptr(true),
-		// Share the slot daemon's network namespace (like a Kubernetes pod):
-		// ports published by `services:` are reachable on localhost.
-		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
-		Mounts: []mount.Mount{
-			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
-			{Type: mount.TypeVolume, Source: slotExternals(slotIdx), Target: externalsDir, ReadOnly: true},
-			{Type: mount.TypeVolume, Source: toolVol, Target: "/opt/hostedtoolcache"},
-			{Type: mount.TypeVolume, Source: cacheVol, Target: "/home/runner/.cache"},
-		},
-	}
-	hc.LogConfig = runnerLogConfig()
-	hc.CPUShares = cfg.CPUShares
-	if cfg.MemoryMB > 0 {
-		hc.Memory = cfg.MemoryMB * 1024 * 1024
-	}
-	created, err := p.cli.ContainerCreate(ctx, &container.Config{
+}
+
+// runnerContainer is the definition of a runner container.
+func runnerContainer(cfg Config, spec RunnerSpec, env []string, cacheVol, toolVol string) (*container.Config, *container.HostConfig) {
+	slotIdx := spec.Lease.Slot
+	cc := &container.Config{
 		Image: cfg.RunnerImage,
 		User:  "runner",
 		Cmd:   []string{"/home/runner/run.sh"},
@@ -129,21 +145,43 @@ func (p *Pool) StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
 			LabelTarget: strconv.FormatInt(spec.TargetID, 10), LabelRunner: spec.Name, LabelOwner: spec.Owner,
 			LabelStrict: strconv.FormatBool(spec.Lease.Strict), LabelRepo: spec.Repo,
 		},
-	}, hc, nil, nil, spec.Name)
+	}
+	hc := &container.HostConfig{
+		Init: ptr(true),
+		// Share the slot daemon's network namespace (like a Kubernetes pod):
+		// ports published by `services:` are reachable on localhost.
+		NetworkMode: container.NetworkMode("container:" + slotName(slotIdx)),
+		Mounts: []mount.Mount{
+			{Type: mount.TypeVolume, Source: slotWork(slotIdx), Target: workDir},
+			{Type: mount.TypeVolume, Source: slotExternals(slotIdx), Target: externalsDir, ReadOnly: true},
+			{Type: mount.TypeVolume, Source: toolVol, Target: runnerToolDir},
+			{Type: mount.TypeVolume, Source: cacheVol, Target: runnerCacheDir},
+		},
+		LogConfig: runnerLogConfig(),
+	}
+	hc.CPUShares = cfg.CPUShares
+	hc.Memory = cfg.memoryBytes()
+	return cc, hc
+}
+
+// createRunner creates and starts the runner container name. On failure
+// nothing is left behind: neither the container (it carries a JIT config)
+// nor the runner's actions cache token.
+func (p *Pool) createRunner(ctx context.Context, name string, cc *container.Config, hc *container.HostConfig) (string, error) {
+	created, err := p.cli.ContainerCreate(ctx, cc, hc, nil, nil, name)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Canceled while Docker may have created it: remove it by name.
-			p.removeAfterFailedStart(ctx, spec.Name)
+			p.removeAfterFailedStart(ctx, name)
 		}
-		p.revokeCache(spec.Name)
+		p.revokeCache(name)
 		return "", fmt.Errorf("create runner: %w", err)
 	}
 	if err := p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		p.removeAfterFailedStart(ctx, created.ID)
-		p.revokeCache(spec.Name)
+		p.revokeCache(name)
 		return "", fmt.Errorf("start runner: %w", err)
 	}
-	p.MarkRunner(slotIdx, spec.Name)
 	return created.ID, nil
 }
 
@@ -157,22 +195,6 @@ func (p *Pool) removeAfterFailedStart(ctx context.Context, id string) {
 	p.Remove(cctx, id)
 }
 
-// Wait blocks until the container exits and returns its exit code.
-func (p *Pool) Wait(ctx context.Context, id string) int64 {
-	statusCh, errCh := p.cli.ContainerWait(ctx, id, container.WaitConditionNotRunning)
-	select {
-	case st := <-statusCh:
-		return st.StatusCode
-	case err := <-errCh:
-		if err != nil && ctx.Err() == nil {
-			p.log.Warn("wait for container", "container", id, "error", err)
-		}
-		return -1
-	case <-ctx.Done():
-		return -1
-	}
-}
-
 // Logs copies a container's combined output to w.
 func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) error {
 	rc, err := p.cli.ContainerLogs(ctx, id, container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: follow, Timestamps: false})
@@ -182,16 +204,6 @@ func (p *Pool) Logs(ctx context.Context, id string, follow bool, w io.Writer) er
 	defer rc.Close()
 	_, err = stdcopy.StdCopy(w, w, rc)
 	return err
-}
-
-// Remove deletes a container. A container already gone, or already being
-// removed (a scale-down and the runner's own exit race), is not an error;
-// any other failure is logged (the container stays until the next restart
-// finds it).
-func (p *Pool) Remove(ctx context.Context, id string) {
-	if err := p.cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) && !cerrdefs.IsConflict(err) {
-		p.log.Warn("remove container", "container", id, "error", err)
-	}
 }
 
 // StopRunner stops a runner container; whoever waits on it then cleans up.
@@ -239,8 +251,7 @@ func (o Orphan) Lease() Lease {
 // RunnerContainers lists runner containers left by a previous run and marks
 // their slots as busy so they are not handed out twice.
 func (p *Pool) RunnerContainers(ctx context.Context) ([]Orphan, error) {
-	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
-		filters.Arg("label", LabelManaged+"=true"), filters.Arg("label", LabelRole+"=runner"))})
+	list, err := p.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: runnerFilter()})
 	if err != nil {
 		return nil, err
 	}
@@ -277,65 +288,106 @@ func (p *Pool) adoptContainer(id string, labels map[string]string, state string,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if s, ok := p.slots[slotIdx]; ok {
-		s.Status, s.Owner, s.TargetID, s.Runner = "busy", owner, tid, o.Name
+		s.Status, s.Owner, s.TargetID, s.Runner = statusBusy, owner, tid, o.Name
 	} else {
-		p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: "busy", Owner: owner, TargetID: tid, Runner: o.Name, Since: time.Now().Unix()}}
+		p.slots[slotIdx] = &slot{SlotState: SlotState{Index: slotIdx, Status: statusBusy, Owner: owner, TargetID: tid, Runner: o.Name, Since: p.clock().Unix()}}
 	}
 	return o
 }
 
-// TailJobOutput streams the step output of a running job. The runner writes
-// it to _diag/pages/*.log (4 KB pages) before uploading it to GitHub; pages
-// are read as they grow, oldest first, until the runner exits.
+// Job output pages: the runner writes a job's step output to
+// _diag/pages/*.log (4 KB pages) before uploading it to GitHub.
+const (
+	pagesDir         = "/home/runner/_diag/pages"
+	pageChunkMax     = 64 << 10 // bytes read per file and per poll
+	tailTotalMax     = 64 << 20 // bytes streamed per request
+	tailPollInterval = time.Second
+	// listPagesScript lists the regular files (no symlinks), oldest first, as
+	// "mtime size name".
+	listPagesScript = `cd ` + pagesDir + ` 2>/dev/null && find . -maxdepth 1 -type f -name '*.log' -printf '%T@ %s %f\n' | sort -n | head -n 500`
+)
+
+// TailJobOutput streams the step output of a running job. Pages are read as
+// they grow, oldest first, until the runner exits.
 func (p *Pool) TailJobOutput(ctx context.Context, id string, w io.Writer) error {
-	const (
-		dir      = "/home/runner/_diag/pages"
-		chunkMax = 64 << 10 // bytes read per file and per poll
-		totalMax = 64 << 20 // bytes streamed per request
-	)
-	offsets := map[string]int{}
-	total := 0
+	t := &jobTail{p: p, id: id, w: w, offsets: map[string]int{}}
 	for {
-		// Regular files only (no symlinks), oldest first.
-		listing, code, err := p.exec(ctx, id, `cd `+dir+` 2>/dev/null && find . -maxdepth 1 -type f -name '*.log' -printf '%T@ %s %f\n' | sort -n | head -n 500`)
-		if err != nil || code != 0 {
-			if info, ierr := p.cli.ContainerInspect(ctx, id); ierr != nil || info.State == nil || !info.State.Running {
-				return nil // runner finished
-			}
+		listing, code, err := p.exec(ctx, id, listPagesScript)
+		if (err != nil || code != 0) && !p.running(ctx, id) {
+			return nil // runner finished
 		}
-		for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
-			f := strings.Fields(line)
-			if len(f) != 3 || !strings.HasSuffix(f[2], ".log") || strings.ContainsAny(f[2], "/'\"$`\\") {
-				continue
-			}
-			name := f[2]
-			size, _ := strconv.Atoi(f[1])
-			off := offsets[name]
-			if size <= off {
-				continue
-			}
-			n := min(size-off, chunkMax)
-			chunk, _, err := p.exec(ctx, id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, dir, name, n))
-			if err != nil {
-				continue
-			}
-			if len(chunk) > n {
-				chunk = chunk[:n]
-			}
-			offsets[name] = off + len(chunk)
-			total += len(chunk)
-			if _, err := io.WriteString(w, chunk); err != nil {
-				return err
-			}
-			if total >= totalMax {
-				_, _ = io.WriteString(w, "\n[pitlane] output truncated: open the GitHub run page for the full log\n")
-				return nil
-			}
+		if done, err := t.copyPages(ctx, parsePages(listing)); done || err != nil {
+			return err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(tailPollInterval):
 		}
 	}
+}
+
+// running reports whether container id is known to be running.
+func (p *Pool) running(ctx context.Context, id string) bool {
+	info, err := p.cli.ContainerInspect(ctx, id)
+	return err == nil && info.State != nil && info.State.Running
+}
+
+// page is a job output page file.
+type page struct {
+	name string
+	size int
+}
+
+// parsePages parses the output of listPagesScript, skipping any line that is
+// not a plain page name (a job controls that directory).
+func parsePages(listing string) []page {
+	var out []page
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || !strings.HasSuffix(f[2], ".log") || strings.ContainsAny(f[2], "/'\"$`\\") {
+			continue
+		}
+		size, _ := strconv.Atoi(f[1])
+		out = append(out, page{name: f[2], size: size})
+	}
+	return out
+}
+
+// jobTail is the state of one TailJobOutput stream.
+type jobTail struct {
+	p       *Pool
+	id      string
+	w       io.Writer
+	offsets map[string]int // bytes of each page already streamed
+	total   int            // bytes streamed
+}
+
+// copyPages streams what each page gained since the last poll. done is set
+// once tailTotalMax bytes were streamed.
+func (t *jobTail) copyPages(ctx context.Context, pages []page) (done bool, err error) {
+	for _, pg := range pages {
+		off := t.offsets[pg.name]
+		if pg.size <= off {
+			continue
+		}
+		n := min(pg.size-off, pageChunkMax)
+		chunk, _, err := t.p.exec(ctx, t.id, fmt.Sprintf("tail -c +%d '%s/%s' | head -c %d", off+1, pagesDir, pg.name, n))
+		if err != nil {
+			continue
+		}
+		if len(chunk) > n {
+			chunk = chunk[:n]
+		}
+		t.offsets[pg.name] = off + len(chunk)
+		t.total += len(chunk)
+		if _, err := io.WriteString(t.w, chunk); err != nil {
+			return true, err
+		}
+		if t.total >= tailTotalMax {
+			_, _ = io.WriteString(t.w, "\n[pitlane] output truncated: open the GitHub run page for the full log\n")
+			return true, nil
+		}
+	}
+	return false, nil
 }

@@ -271,3 +271,22 @@ func TestStateFileDropsRetiredSlots(t *testing.T) {
 		t.Fatal("retired slot still known")
 	}
 }
+
+func TestResizeLocked(t *testing.T) {
+	p := newTestPool("owner",
+		SlotState{Index: 0, Status: statusReady},
+		SlotState{Index: 2, Status: statusBusy},
+		SlotState{Index: 3, Status: statusReady},
+	)
+	p.slots[0].retire = true
+	toStart, toRemove := p.resizeLocked(2)
+	if len(toStart) != 1 || toStart[0] != 1 || p.slots[1].Owner != UnknownOwner {
+		t.Fatalf("slot 1 must start with an unknown owner: %v %+v", toStart, p.slots[1])
+	}
+	if p.slots[0].retire || !p.slots[2].retire || !p.slots[3].retire {
+		t.Fatal("retire flags")
+	}
+	if len(toRemove) != 1 || toRemove[0] != 3 {
+		t.Fatalf("only the idle retired slot is removed now: %v", toRemove)
+	}
+}

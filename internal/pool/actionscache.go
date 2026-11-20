@@ -1,22 +1,17 @@
 package pool
 
 import (
-	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 
 	"github.com/TuroYT/pitlane/internal/cache"
-	"github.com/TuroYT/pitlane/internal/nodeshim"
 )
 
 // CacheBroker is the actions cache server (internal/cache) as the pool sees
@@ -67,80 +62,6 @@ func (p *Pool) cacheBroker() (CacheBroker, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cache, p.cachePort
-}
-
-// externalsKey identifies what a slot's externals volume holds: the runner
-// image's externals with this version of the Node shim.
-func externalsKey(imageID string) string { return imageID + "+shim" + nodeshim.Version }
-
-// shimInContainer is where copyExternals puts Pitlane's own binary, the Node
-// shim (internal/nodeshim), in the container that copies the externals.
-const shimInContainer = "/pitlane-node-shim"
-
-// shimScript installs the shim binary in front of every Node runtime of the
-// externals copied to dir, the real binary kept next to it as node.pitlane.
-// It is best effort and never leaves a runtime without a working node: when
-// the shim is missing or does not work in this image (checked by running it
-// in front of itself, which prints Pitlane's version), nothing is installed;
-// a runtime whose shim cannot be written keeps its original binary. Jobs then
-// use GitHub's cache. The runtimes share one copy of the binary (hard links).
-func shimScript(dir, shim string) string {
-	return `(s='` + shim + `'
-t=$(mktemp -d) && cp "$s" "$t/node" && ln -s "$s" "$t/node.pitlane" && v=$("$t/node" version 2>/dev/null)
-[ -n "$t" ] && rm -rf "$t"
-case "$v" in pitlane\ *) ;; *) false ;; esac || { echo "pitlane: no working node shim, the runner externals keep their node" >&2; exit 0; }
-f=
-for n in ` + dir + `/node*/bin/node; do
-  [ -f "$n" ] && [ ! -L "$n" ] && [ ! -e "$n.pitlane" ] || continue
-  { { [ -n "$f" ] && ln "$f" "$n.tmp" 2>/dev/null; } || cp "$s" "$n.tmp"; } && chmod 755 "$n.tmp" && mv "$n" "$n.pitlane" && mv "$n.tmp" "$n" && f=$n ||
-    { [ -e "$n" ] || mv "$n.pitlane" "$n"; rm -f "$n.tmp"; }
-done); true`
-}
-
-// openShim opens the binary to install as the Node shim: the running
-// Pitlane, through /proc/self/exe so that it is still the right file after a
-// self-update replaced it on disk.
-func (p *Pool) openShim() (*os.File, error) {
-	if p.shimExe != "" {
-		return os.Open(p.shimExe)
-	}
-	f, err := os.Open("/proc/self/exe")
-	if err == nil {
-		return f, nil
-	}
-	exe, eerr := os.Executable()
-	if eerr != nil {
-		return nil, err
-	}
-	return os.Open(exe)
-}
-
-// stageShim copies Pitlane's running binary to shimInContainer in a created
-// (not yet started) container.
-func (p *Pool) stageShim(ctx context.Context, id string) error {
-	f, err := p.openShim()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		tw := tar.NewWriter(pw)
-		err := tw.WriteHeader(&tar.Header{Name: strings.TrimPrefix(shimInContainer, "/"), Mode: 0o755, Size: st.Size(), Typeflag: tar.TypeReg})
-		if err == nil {
-			_, err = io.Copy(tw, f)
-		}
-		if err == nil {
-			err = tw.Close()
-		}
-		pw.CloseWithError(err)
-	}()
-	defer func() { _ = pr.Close() }() // stops the writer if the copy fails
-	return p.cli.CopyToContainer(ctx, id, "/", pr, container.CopyToContainerOptions{})
 }
 
 // cacheEnv registers a runner with the actions cache and returns the
@@ -202,12 +123,12 @@ func (p *Pool) cacheHost(ctx context.Context, slot int) (string, error) {
 		return "", err
 	}
 	err := p.cli.NetworkConnect(ctx, slotNetwork(slot), cacheForwarder, nil)
-	if err != nil && !cerrdefs.IsConflict(err) && !strings.Contains(err.Error(), "already exists") {
-		return "", err
+	if err != nil && !alreadyConnected(err) {
+		return "", fmt.Errorf("connect the actions cache forwarder to %s: %w", slotNetwork(slot), err)
 	}
 	info, err := p.cli.ContainerInspect(ctx, cacheForwarder)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("inspect the actions cache forwarder: %w", err)
 	}
 	if info.NetworkSettings != nil {
 		if n := info.NetworkSettings.Networks[slotNetwork(slot)]; n != nil && n.IPAddress != "" {
@@ -227,43 +148,57 @@ type selfInfo struct {
 // selfContainer returns the container Pitlane runs in, nil when it runs on
 // the host. It is looked up once.
 func (p *Pool) selfContainer(ctx context.Context) *selfInfo {
-	p.selfOnce.Do(func() {
-		if _, err := os.Stat("/.dockerenv"); err != nil {
-			return
-		}
-		host, err := os.Hostname()
-		if err != nil {
-			return
-		}
-		exe, err := os.Executable()
-		if err != nil {
-			return
-		}
-		info, err := p.cli.ContainerInspect(ctx, host)
-		if err != nil || info.NetworkSettings == nil || info.Config == nil {
-			p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
-			return
-		}
-		self := &selfInfo{ID: info.ID, Image: info.Image, Exe: exe}
-		for name, n := range info.NetworkSettings.Networks {
-			if n == nil || n.IPAddress == "" || strings.HasPrefix(name, "pitlane-") {
-				continue
-			}
-			target := strings.TrimPrefix(info.Name, "/")
-			if name == "bridge" { // no name resolution on the default bridge
-				target = n.IPAddress
-			}
-			if self.Network == "" || name < self.Network {
-				self.Network, self.Target = name, target
-			}
-		}
-		if self.Network == "" {
-			p.log.Warn("Pitlane's container has no network the actions cache forwarder can join: runners reach it through the slot gateway")
-			return
-		}
-		p.self = self
-	})
+	p.selfOnce.Do(func() { p.self = p.lookupSelf(ctx) })
 	return p.self
+}
+
+// lookupSelf finds the container Pitlane runs in by its host name, nil when
+// Pitlane runs on the host or the container cannot be used.
+func (p *Pool) lookupSelf(ctx context.Context) *selfInfo {
+	env := p.host()
+	if !env.inDocker() {
+		return nil
+	}
+	host, err := env.hostname()
+	if err != nil {
+		return nil
+	}
+	exe, err := env.executable()
+	if err != nil {
+		return nil
+	}
+	info, err := p.cli.ContainerInspect(ctx, host)
+	if err != nil || info.NetworkSettings == nil || info.Config == nil {
+		p.log.Warn("running in a container that Docker does not know by its host name: runners reach the actions cache through the slot gateway", "hostname", host, "error", err)
+		return nil
+	}
+	self := &selfInfo{ID: info.ID, Image: info.Image, Exe: exe}
+	self.Network, self.Target = forwarderNetwork(strings.TrimPrefix(info.Name, "/"), info.NetworkSettings.Networks)
+	if self.Network == "" {
+		p.log.Warn("Pitlane's container has no network the actions cache forwarder can join: runners reach it through the slot gateway")
+		return nil
+	}
+	return self
+}
+
+// forwarderNetwork picks the network of Pitlane's container (named name)
+// that the cache forwarder joins, the first by name except Pitlane's own,
+// and Pitlane's address on it: its name, or its IP on the default bridge
+// (no name resolution there). "" when there is none.
+func forwarderNetwork(name string, nets map[string]*network.EndpointSettings) (netName, target string) {
+	for n, ep := range nets {
+		if ep == nil || ep.IPAddress == "" || strings.HasPrefix(n, "pitlane-") {
+			continue
+		}
+		if netName != "" && n >= netName {
+			continue
+		}
+		netName, target = n, name
+		if n == "bridge" {
+			target = ep.IPAddress
+		}
+	}
+	return netName, target
 }
 
 // ensureForwarder (re)creates the forwarder for this Pitlane container.
@@ -300,7 +235,7 @@ func (p *Pool) ensureForwarder(ctx context.Context, self selfInfo, port int) err
 func (p *Pool) slotGateway(ctx context.Context, slot int) (string, error) {
 	n, err := p.cli.NetworkInspect(ctx, slotNetwork(slot), network.InspectOptions{})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("inspect network %s: %w", slotNetwork(slot), err)
 	}
 	var v6 string
 	for _, c := range n.IPAM.Config {

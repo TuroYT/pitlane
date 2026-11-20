@@ -1,14 +1,8 @@
 package pool
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"os"
 	"sort"
-	"strconv"
-	"strings"
-	"sync"
 	"time"
 )
 
@@ -104,7 +98,7 @@ func (p *Pool) Admit(ctx context.Context, r Request) (Lease, string) {
 	}
 	best := c.s
 	l := Lease{Slot: best.Index, Owner: r.Owner, TargetID: r.TargetID, Strict: r.Strict, wipe: c.wipe, Predicted: r.Predicted}
-	best.Status, best.Since = "busy", time.Now().Unix()
+	best.Status, best.Since = statusBusy, p.clock().Unix()
 	if p.reserved == nil {
 		p.reserved = map[int]int64{}
 	}
@@ -234,7 +228,7 @@ func (p *Pool) SetPrediction(slot int, bytes int64) {
 	}
 	// A runner adopted after a restart: its slot is busy but was never
 	// leased by this process.
-	if s, ok := p.slots[slot]; ok && s.Status == "busy" {
+	if s, ok := p.slots[slot]; ok && s.Status == statusBusy {
 		if p.reserved == nil {
 			p.reserved = map[int]int64{}
 		}
@@ -303,56 +297,4 @@ func (p *Pool) reservedLocked() map[int]bool {
 		out[i] = true
 	}
 	return out
-}
-
-// ------------------------------------------------------------- host memory
-
-var (
-	hostMemMu   sync.Mutex
-	hostMemAt   time.Time
-	hostMemLast int64
-)
-
-// hostMemory returns the memory Pitlane's jobs share, cached for 30 s: the
-// MemTotal of /proc/meminfo (the LXC container's under lxcfs), lowered to
-// the memory.max of Pitlane's cgroup when Pitlane runs on the host or in an
-// LXC container (inside a Docker container, that limit is Pitlane's own,
-// not its slots'). 0 when unknown.
-func hostMemory() int64 {
-	hostMemMu.Lock()
-	defer hostMemMu.Unlock()
-	if time.Since(hostMemAt) < 30*time.Second {
-		return hostMemLast
-	}
-	_, docker := os.Stat("/.dockerenv")
-	hostMemLast = memoryLimit(readFile("/proc/meminfo"), readFile("/sys/fs/cgroup/memory.max"), docker == nil)
-	hostMemAt = time.Now()
-	return hostMemLast
-}
-
-func readFile(name string) []byte {
-	b, _ := os.ReadFile(name) //nolint:gosec // G304: fixed system files
-	return b
-}
-
-// memoryLimit combines /proc/meminfo and a cgroup memory.max into the
-// memory available to jobs (0 when unknown).
-func memoryLimit(meminfo, cgroupMax []byte, inDocker bool) int64 {
-	var total int64
-	sc := bufio.NewScanner(bytes.NewReader(meminfo))
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) >= 2 && f[0] == "MemTotal:" {
-			if v, err := strconv.ParseInt(f[1], 10, 64); err == nil && v > 0 {
-				total = v << 10
-			}
-		}
-	}
-	if inDocker {
-		return total
-	}
-	if v, err := strconv.ParseInt(strings.TrimSpace(string(cgroupMax)), 10, 64); err == nil && v > 0 && (total == 0 || v < total) {
-		total = v
-	}
-	return total
 }

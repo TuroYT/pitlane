@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -21,8 +22,9 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 	if p.Config().NoQEMU {
 		return
 	}
-	if _, err := os.Stat(binfmtDir + "/register"); err != nil {
-		if err := syscall.Mount("binfmt_misc", binfmtDir, "binfmt_misc", 0, ""); err != nil {
+	dir := p.host().binfmtDir
+	if !binfmtMounted(dir) {
+		if err := syscall.Mount("binfmt_misc", dir, "binfmt_misc", 0, ""); err != nil {
 			p.log.Info("binfmt_misc not mountable, multi-arch builds (QEMU) unavailable", "error", err)
 			return
 		}
@@ -39,9 +41,9 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 		p.log.Warn("QEMU emulators", "error", err)
 		return
 	}
-	defer p.Remove(context.Background(), c.ID)
+	defer p.Remove(context.WithoutCancel(ctx), c.ID)
 	if err := p.cli.ContainerStart(ctx, c.ID, container.StartOptions{}); err == nil && p.Wait(ctx, c.ID) == 0 {
-		base := trustedQEMU(readBinfmt())
+		base := trustedQEMU(readBinfmt(dir))
 		p.mu.Lock()
 		p.binfmt = base
 		p.mu.Unlock()
@@ -50,12 +52,17 @@ func (p *Pool) ensureQEMU(ctx context.Context) {
 	}
 }
 
-const binfmtDir = "/proc/sys/fs/binfmt_misc"
+// binfmtMounted reports whether binfmt_misc is mounted at dir.
+func binfmtMounted(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "register"))
+	return err == nil
+}
 
-// readBinfmt returns the registered binfmt_misc handlers (name -> definition).
-func readBinfmt() map[string]string {
+// readBinfmt returns the binfmt_misc handlers registered in dir (name ->
+// definition).
+func readBinfmt(dir string) map[string]string {
 	out := map[string]string{}
-	entries, err := os.ReadDir(binfmtDir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return out
 	}
@@ -63,11 +70,23 @@ func readBinfmt() map[string]string {
 		if e.Name() == "register" || e.Name() == "status" {
 			continue
 		}
-		if b, err := os.ReadFile(binfmtDir + "/" + e.Name()); err == nil {
+		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil { //nolint:gosec // G304: an entry of the binfmt_misc mount
 			out[e.Name()] = string(b)
 		}
 	}
 	return out
+}
+
+// unregisterBinfmt removes handler name (best effort).
+func unregisterBinfmt(dir, name string) {
+	_ = os.WriteFile(filepath.Join(dir, name), []byte("-1"), 0)
+}
+
+// clearBinfmt removes every handler (best effort).
+func clearBinfmt(dir string) {
+	for name := range readBinfmt(dir) {
+		unregisterBinfmt(dir, name)
+	}
 }
 
 // hostMachine returns the ELF e_machine of the host as hex bytes, the way it
@@ -108,7 +127,7 @@ func (p *Pool) maybeRegisterQEMU(ctx context.Context) {
 	p.mu.Lock()
 	idle := true
 	for _, s := range p.slots {
-		if s.Status == "busy" || s.Status == "cleaning" {
+		if s.Status == statusBusy || s.Status == statusCleaning {
 			idle = false
 		}
 	}
@@ -134,9 +153,7 @@ func (p *Pool) maybeRegisterQEMU(ctx context.Context) {
 		return
 	}
 	// Remove whatever is there (nothing should be), then register.
-	for name := range readBinfmt() {
-		_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
-	}
+	clearBinfmt(p.host().binfmtDir)
 	p.ensureQEMU(ctx)
 }
 
@@ -145,7 +162,8 @@ func (p *Pool) maybeRegisterQEMU(ctx context.Context) {
 // later job. Unknown or modified handlers are removed, and Pitlane's QEMU
 // handlers are registered again if they were tampered with.
 func (p *Pool) auditBinfmt(ctx context.Context) {
-	if _, err := os.Stat(binfmtDir + "/register"); err != nil {
+	dir := p.host().binfmtDir
+	if !binfmtMounted(dir) {
 		return // not mounted: registrations cannot outlive the job's own mount
 	}
 	p.mu.Lock()
@@ -154,14 +172,14 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 	if base == nil || p.Config().NoQEMU {
 		base = map[string]string{} // fail closed: nothing is trusted
 	}
-	cur := readBinfmt()
+	cur := readBinfmt(dir)
 	tampered := false
 	for name, def := range cur {
 		if want, ok := base[name]; ok && want == def {
 			continue
 		}
 		p.log.Warn("removing unexpected binfmt_misc handler", "handler", name)
-		_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
+		unregisterBinfmt(dir, name)
 		if _, ok := base[name]; ok {
 			tampered = true
 		}
@@ -175,9 +193,7 @@ func (p *Pool) auditBinfmt(ctx context.Context) {
 		// Fail closed: drop every handler now; they are registered again
 		// only once no job runs (registration must not race with jobs).
 		p.log.Warn("QEMU handlers were modified by a job: removed, re-registering when idle")
-		for name := range readBinfmt() {
-			_ = os.WriteFile(binfmtDir+"/"+name, []byte("-1"), 0)
-		}
+		clearBinfmt(dir)
 		p.mu.Lock()
 		p.binfmt = nil
 		p.qemuWant = !p.cfg.NoQEMU

@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -304,5 +306,26 @@ func TestMeterAnonPeakAndCurrent(t *testing.T) {
 	var nilMeter *Meter
 	if nilMeter.Current() != 0 {
 		t.Error("nil meter must use nothing")
+	}
+}
+
+// MeasureJob finds both cgroups through a fake Docker API and registers the
+// meter for admission.
+func TestMeasureJob(t *testing.T) {
+	p := newTestPool("owner", SlotState{Index: 1, Status: statusBusy})
+	p.cgroups = fakeRoot(t)
+	fakeCgroup(t, filepath.Join(p.cgroups.root, "docker", runnerCID), 100, 100, 0, 0, 0, 0)
+	fakeCgroup(t, filepath.Join(p.cgroups.root, "docker", slotCID), 1000, 1000, 0, 0, 0, 0)
+	newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"GET /containers/runner/json":         reply(map[string]any{"Id": runnerCID}),
+		"GET /containers/pitlane-slot-1/json": reply(map[string]any{"Id": slotCID}),
+	})
+	m := p.MeasureJob(context.Background(), "runner", 1)
+	if m == nil || p.meters[1] != m {
+		t.Fatal("meter not registered")
+	}
+	defer m.Stop()
+	if got := m.Current(); got != 1100 {
+		t.Fatalf("current: %d", got)
 	}
 }

@@ -68,7 +68,8 @@ func (p *Pool) restoreBinfmt(ctx context.Context) {
 		p.saveBinfmt(nil)
 		return
 	}
-	if _, err := os.Stat(binfmtDir + "/register"); err != nil {
+	dir := p.host().binfmtDir
+	if !binfmtMounted(dir) {
 		return // not mounted: ensureQEMU mounts it and registers
 	}
 	b, err := os.ReadFile(file) //nolint:gosec // G304: path derived from Pitlane's own data directory
@@ -80,7 +81,7 @@ func (p *Pool) restoreBinfmt(ctx context.Context) {
 		p.log.Warn("QEMU handler state unreadable, registering the handlers again", "file", file, "error", err)
 		return
 	}
-	base, ok := restorableBinfmt(persisted, readBinfmt())
+	base, ok := restorableBinfmt(persisted, readBinfmt(dir))
 	if !ok {
 		p.log.Warn("QEMU handlers changed while Pitlane was stopped: removing and registering them again")
 		return

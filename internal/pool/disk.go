@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,8 +42,10 @@ type diskOps interface {
 // DiskPath returns the filesystem whose free space Pitlane watches: Docker's
 // data directory when visible, else Pitlane's own data directory.
 func (p *Pool) DiskPath() string {
-	if _, err := os.Stat("/var/lib/docker"); err == nil {
-		return "/var/lib/docker"
+	if root := p.host().dockerRoot; root != "" {
+		if _, err := os.Stat(root); err == nil {
+			return root
+		}
 	}
 	if f := p.Config().StateFile; f != "" {
 		return filepath.Dir(f)
@@ -52,11 +55,7 @@ func (p *Pool) DiskPath() string {
 
 // DiskSpace returns the total and available bytes of DiskPath.
 func (p *Pool) DiskSpace() (total, free int64, err error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(p.DiskPath(), &st); err != nil {
-		return 0, 0, err
-	}
-	return int64(st.Blocks) * st.Bsize, int64(st.Bavail) * st.Bsize, nil //nolint:gosec // G115: block counts of a real filesystem fit in int64
+	return p.host().statfs(p.DiskPath())
 }
 
 // EnsureFreeDisk frees disk space when less than the configured minimum is
@@ -74,89 +73,121 @@ func (p *Pool) EnsureFreeDisk(ctx context.Context) {
 	p.reclaimDisk(ctx, int64(minGB)<<30, dockerDiskOps{p})
 }
 
+// slotPrunes are the slot prunes reclaimDisk runs on every idle slot, in
+// order.
+var slotPrunes = []struct{ what, script string }{
+	{"build cache", "docker builder prune -af >/dev/null"},
+	{"unused images", "docker image prune -af >/dev/null"},
+}
+
 // reclaimDisk frees space, cheapest loss first, until minFree bytes are
-// available: build caches of idle slots, then their images, then the largest
-// per-owner cache volumes no container uses. Busy slots are never touched:
-// an idle slot is marked "cleaning" while it is pruned so it cannot be handed
-// out meanwhile. It returns the bytes freed.
+// available: build caches of idle slots, then their images, then actions
+// cache entries, then the largest per-owner cache volumes no container uses.
+// Busy slots are never touched: an idle slot is marked "cleaning" while it is
+// pruned so it cannot be handed out meanwhile. It returns the bytes freed.
 func (p *Pool) reclaimDisk(ctx context.Context, minFree int64, ops diskOps) int64 {
 	free, err := ops.freeBytes()
 	if err != nil || free >= minFree {
 		return 0
 	}
-	start := free
 	p.log.Warn("low disk space, pruning caches", "freeGB", gb(free), "minGB", gb(minFree))
-	// measure refreshes free; false means "stop" (enough space, or unknown).
-	measure := func(what string, before int64) bool {
-		f, err := ops.freeBytes()
-		if err != nil {
-			p.log.Error("disk space unknown, pruning stopped", "error", err)
-			return false
-		}
-		free = f
-		p.log.Info("pruned", "what", what, "freedMB", (f-before)>>20, "freeGB", gb(f))
-		return f < minFree
+	r := &reclaim{p: p, ops: ops, minFree: minFree, start: free, free: free}
+	if r.pruneIdleSlots(ctx) && r.evictActionsCache() {
+		r.removeCacheVolumes(ctx)
 	}
-	done := func() int64 {
-		if free < minFree {
-			p.log.Warn("disk space still low after pruning every idle cache", "freeGB", gb(free), "minGB", gb(minFree))
-		}
-		return free - start
-	}
+	return r.done()
+}
 
-	steps := []struct{ what, script string }{
-		{"build cache", "docker builder prune -af >/dev/null"},
-		{"unused images", "docker image prune -af >/dev/null"},
+// reclaim is one run of reclaimDisk. Each step returns whether to go on:
+// false once enough space is free, or when free space became unknown.
+type reclaim struct {
+	p       *Pool
+	ops     diskOps
+	minFree int64
+	start   int64 // free bytes when the run started
+	free    int64 // free bytes after the last step
+}
+
+// measure refreshes free after what was pruned (free was before then).
+func (r *reclaim) measure(what string, before int64) bool {
+	f, err := r.ops.freeBytes()
+	if err != nil {
+		r.p.log.Error("disk space unknown, pruning stopped", "error", err)
+		return false
 	}
-	for _, st := range steps {
-		for _, i := range p.idleSlots() {
-			if !p.claimIdle(i) {
+	r.free = f
+	r.p.log.Info("pruned", "what", what, "freedMB", (f-before)>>20, "freeGB", gb(f))
+	return f < r.minFree
+}
+
+// done ends the run and returns the bytes freed.
+func (r *reclaim) done() int64 {
+	if r.free < r.minFree {
+		r.p.log.Warn("disk space still low after pruning every idle cache", "freeGB", gb(r.free), "minGB", gb(r.minFree))
+	}
+	return r.free - r.start
+}
+
+// pruneIdleSlots runs every slot prune on every idle slot.
+func (r *reclaim) pruneIdleSlots(ctx context.Context) bool {
+	for _, st := range slotPrunes {
+		for _, i := range r.p.idleSlots() {
+			if !r.p.claimIdle(i) {
 				continue
 			}
-			before := free
-			err := ops.execSlot(ctx, i, st.script)
-			p.unclaim(ctx, i)
+			before := r.free
+			err := r.ops.execSlot(ctx, i, st.script)
+			r.p.unclaim(ctx, i)
 			if err != nil {
-				p.log.Warn("prune slot", "slot", i, "what", st.what, "error", err)
+				r.p.log.Warn("prune slot", "slot", i, "what", st.what, "error", err)
 			}
-			if !measure(st.what+" of slot "+strconv.Itoa(i), before) {
-				return done()
+			if !r.measure(st.what+" of slot "+strconv.Itoa(i), before) {
+				return false
 			}
 		}
 	}
+	return true
+}
 
-	// Actions cache entries, least recently used first: they cost one
-	// download each, less than a per-owner volume.
-	if b, _ := p.cacheBroker(); b != nil && ops.onDisk(b.Dir()) {
-		before := free
-		if b.Evict(minFree-free) > 0 && !measure("actions cache entries", before) {
-			return done()
-		}
+// evictActionsCache evicts actions cache entries, least recently used first:
+// they cost one download each, less than a per-owner volume. Entries on
+// another filesystem would free nothing here.
+func (r *reclaim) evictActionsCache() bool {
+	b, _ := r.p.cacheBroker()
+	if b == nil || !r.ops.onDisk(b.Dir()) {
+		return true
 	}
+	before := r.free
+	if b.Evict(r.minFree-r.free) > 0 {
+		return r.measure("actions cache entries", before)
+	}
+	return true
+}
 
-	// Volumes: no runner may be created while they are inspected and removed
-	// (StartRunner holds the read side), so "unused" stays true.
-	p.volMu.Lock()
-	defer p.volMu.Unlock()
-	vols, err := ops.volumes(ctx)
+// removeCacheVolumes removes the per-owner cache volumes no container uses,
+// largest first. No runner may be created meanwhile (StartRunner holds the
+// read side of volMu), so "unused" stays true.
+func (r *reclaim) removeCacheVolumes(ctx context.Context) {
+	r.p.volMu.Lock()
+	defer r.p.volMu.Unlock()
+	vols, err := r.ops.volumes(ctx)
 	if err != nil {
-		p.log.Error("list volumes", "error", err)
-		return done()
+		r.p.log.Error("list volumes", "error", err)
+		return
 	}
 	for _, v := range prunableVolumes(vols) {
-		before := free
-		if err := ops.removeVolume(ctx, v.Name); err != nil {
-			p.log.Warn("remove cache volume", "volume", v.Name, "error", err)
+		before := r.free
+		if err := r.ops.removeVolume(ctx, v.Name); err != nil {
+			r.p.log.Warn("remove cache volume", "volume", v.Name, "error", err)
 			continue
 		}
-		p.mu.Lock()
-		delete(p.chowned, v.Name) // recreated (and chowned) by the next runner
-		p.mu.Unlock()
-		if !measure("cache volume "+v.Name, before) {
-			return done()
+		r.p.mu.Lock()
+		delete(r.p.chowned, v.Name) // recreated (and chowned) by the next runner
+		r.p.mu.Unlock()
+		if !r.measure("cache volume "+v.Name, before) {
+			return
 		}
 	}
-	return done()
 }
 
 // prunableVolumes returns the per-owner cache volumes no container uses,
@@ -184,7 +215,7 @@ func (p *Pool) idleSlots() []int {
 	defer p.mu.Unlock()
 	var out []int
 	for i, s := range p.slots {
-		if s.Status == "ready" && !s.retire && !s.dirty {
+		if s.Status == statusReady && !s.retire && !s.dirty {
 			out = append(out, i)
 		}
 	}
@@ -197,10 +228,10 @@ func (p *Pool) claimIdle(i int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	s, ok := p.slots[i]
-	if !ok || s.Status != "ready" || s.retire || s.dirty {
+	if !ok || s.Status != statusReady || s.retire || s.dirty {
 		return false
 	}
-	s.Status = "cleaning"
+	s.Status = statusCleaning
 	return true
 }
 
@@ -215,11 +246,10 @@ func (p *Pool) unclaim(ctx context.Context, i int) {
 		return
 	}
 	if retire {
-		p.removeSlot(ctx, i)
-		p.signal()
+		p.removeRetired(ctx, i)
 		return
 	}
-	p.setStatus(i, "ready", "")
+	p.setStatus(i, statusReady, "")
 }
 
 func gb(b int64) float64 { return float64(b*10>>30) / 10 }
@@ -243,12 +273,12 @@ func (d dockerDiskOps) execSlot(ctx context.Context, slot int, script string) er
 func (d dockerDiskOps) volumes(ctx context.Context) ([]volInfo, error) {
 	du, err := d.p.cli.DiskUsage(ctx, types.DiskUsageOptions{Types: []types.DiskUsageObject{types.VolumeObject}})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("volume disk usage: %w", err)
 	}
 	// Any container referencing a volume counts, running or not.
 	list, err := d.p.cli.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	used := map[string]bool{}
 	for _, c := range list {

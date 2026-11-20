@@ -7,11 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types/volume"
 	"golang.org/x/sys/unix"
 )
 
@@ -139,18 +139,16 @@ var errNoHostAccess = errors.New("Docker volumes are not reachable from Pitlane'
 
 func (d dockerSlotOps) mergeStore(ctx context.Context, slot int, vol string) (mergeStats, error) {
 	p := d.p
-	if _, err := p.cli.VolumeInspect(ctx, vol); err != nil {
-		if _, err := p.cli.VolumeCreate(ctx, volume.CreateOptions{Name: vol, Labels: map[string]string{LabelManaged: "true"}}); err != nil {
-			return mergeStats{}, fmt.Errorf("create volume %s: %w", vol, err)
-		}
+	if err := p.createVolume(ctx, vol); err != nil {
+		return mergeStats{}, err
 	}
 	canon, err := p.cli.VolumeInspect(ctx, vol)
 	if err != nil {
-		return mergeStats{}, err
+		return mergeStats{}, fmt.Errorf("inspect volume %s: %w", vol, err)
 	}
 	work, err := p.cli.VolumeInspect(ctx, slotWork(slot))
 	if err != nil {
-		return mergeStats{}, err
+		return mergeStats{}, fmt.Errorf("inspect volume %s: %w", slotWork(slot), err)
 	}
 	var a, b syscall.Stat_t
 	if syscall.Stat(canon.Mountpoint, &a) != nil || syscall.Stat(work.Mountpoint, &b) != nil {
@@ -173,6 +171,10 @@ func runnerIDs() (int, int) {
 
 type mergeStats struct{ up, down, dedup int }
 
+// storeTmpPrefix names the temporary links of a dedup. Leftovers (a crash
+// in between) are removed when the directory is next read.
+const storeTmpPrefix = ".pitlane-tmp-"
+
 // mergeStoreDirs merges the store at slotRoot (created if missing, owned by
 // uid:gid) with the canonical store at canonRoot.
 func mergeStoreDirs(slotRoot, canonRoot string, uid, gid int) (mergeStats, error) {
@@ -193,45 +195,66 @@ func mergeStoreDirs(slotRoot, canonRoot string, uid, gid int) (mergeStats, error
 	}
 	defer unix.Close(slot)
 
-	// Top level: one directory per store layout version (v3, v10…).
+	versions, err := storeVersions(slot, canon)
+	if err != nil {
+		return st, err
+	}
+	for v := range versions {
+		if err := mergeVersion(slot, canon, v, uid, gid, &st); err != nil {
+			return st, err
+		}
+	}
+	return st, nil
+}
+
+// storeVersions returns the store layout versions (v3, v10…: one directory
+// each at the top of a store) found on either side.
+func storeVersions(slot, canon int) (map[string]bool, error) {
 	versions := map[string]bool{}
 	for _, side := range []int{slot, canon} {
 		names, err := readDir(side)
 		if err != nil {
-			return st, err
+			return nil, err
 		}
 		for _, n := range names {
-			if n.dir {
+			if n.dir && isStoreVersion(n.name) {
 				versions[n.name] = true
 			}
 		}
 	}
-	for v := range versions {
-		if len(v) < 2 || v[0] != 'v' {
-			continue
-		}
-		if _, err := strconv.Atoi(v[1:]); err != nil {
-			continue
-		}
-		sv, err := openOrMkdir(slot, v, uid, gid)
-		if err != nil {
-			return st, err
-		}
-		cv, err := openOrMkdir(canon, v, -1, -1)
-		if err != nil {
-			unix.Close(sv)
-			return st, err
-		}
-		for d := range sharedStoreDirs {
-			if !exists(sv, d) && !exists(cv, d) {
-				continue
-			}
-			_ = mergeSub(sv, cv, d, uid, gid, &st)
-		}
-		unix.Close(sv)
-		unix.Close(cv)
+	return versions, nil
+}
+
+// isStoreVersion reports whether name is a store layout version ("v" and a
+// number).
+func isStoreVersion(name string) bool {
+	if len(name) < 2 || name[0] != 'v' {
+		return false
 	}
-	return st, nil
+	_, err := strconv.Atoi(name[1:])
+	return err == nil
+}
+
+// mergeVersion merges the content-addressed parts of version directory v.
+// Failures inside them are skipped: whatever merged is still shared.
+func mergeVersion(slot, canon int, v string, uid, gid int, st *mergeStats) error {
+	sv, err := openOrMkdir(slot, v, uid, gid)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(sv)
+	cv, err := openOrMkdir(canon, v, -1, -1)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(cv)
+	for d := range sharedStoreDirs {
+		if !exists(sv, d) && !exists(cv, d) {
+			continue
+		}
+		_ = mergeSub(sv, cv, d, uid, gid, st)
+	}
+	return nil
 }
 
 // mergeSub merges directory name of slotParent and canonParent recursively.
@@ -249,6 +272,9 @@ func mergeSub(slotParent, canonParent int, name string, uid, gid int, st *mergeS
 	return mergeDir(s, c, uid, gid, st)
 }
 
+// mergeDir merges the slot directory s with the canonical directory c: new
+// files go up, missing ones come down, separate copies are replaced by the
+// canonical inode. Only regular files are shared; subdirectories recurse.
 func mergeDir(s, c int, uid, gid int, st *mergeStats) error {
 	sNames, err := readDir(s)
 	if err != nil {
@@ -265,34 +291,7 @@ func mergeDir(s, c int, uid, gid int, st *mergeStats) error {
 			_ = mergeSub(s, c, n.name, uid, gid, st) // odd entry: skip it
 			continue
 		}
-		var ss unix.Stat_t
-		if unix.Fstatat(s, n.name, &ss, unix.AT_SYMLINK_NOFOLLOW) != nil || ss.Mode&unix.S_IFMT != unix.S_IFREG {
-			continue // symlinks, sockets…: never shared
-		}
-		var cs unix.Stat_t
-		switch err := unix.Fstatat(c, n.name, &cs, unix.AT_SYMLINK_NOFOLLOW); {
-		case errors.Is(err, unix.ENOENT):
-			// New package downloaded by the job: publish it.
-			if unix.Linkat(s, n.name, c, n.name, 0) == nil {
-				st.up++
-			}
-		case err != nil:
-			continue
-		case cs.Mode&unix.S_IFMT != unix.S_IFREG || (cs.Dev == ss.Dev && cs.Ino == ss.Ino):
-			continue
-		case cs.Size == ss.Size:
-			// Same content-addressed name, separate copy: use the canonical
-			// inode so the page cache holds it once.
-			tmp := ".pitlane-tmp-" + n.name
-			_ = unix.Unlinkat(s, tmp, 0)
-			if unix.Linkat(c, n.name, s, tmp, 0) == nil {
-				if unix.Renameat(s, tmp, s, n.name) == nil {
-					st.dedup++
-				} else {
-					_ = unix.Unlinkat(s, tmp, 0)
-				}
-			}
-		}
+		mergeUp(s, c, n.name, st)
 	}
 	for _, n := range cNames {
 		if inSlot[n.name] {
@@ -302,15 +301,51 @@ func mergeDir(s, c int, uid, gid int, st *mergeStats) error {
 			_ = mergeSub(s, c, n.name, uid, gid, st) // odd entry: skip it
 			continue
 		}
-		var cs unix.Stat_t
-		if unix.Fstatat(c, n.name, &cs, unix.AT_SYMLINK_NOFOLLOW) != nil || cs.Mode&unix.S_IFMT != unix.S_IFREG {
-			continue
-		}
-		if unix.Linkat(c, n.name, s, n.name, 0) == nil {
-			st.down++
-		}
+		mergeDown(s, c, n.name, st)
 	}
 	return nil
+}
+
+// mergeUp shares the slot's file name: it is published to the canonical
+// store when missing there (a package the job downloaded), or replaced by
+// the canonical inode when both hold a separate copy of the same
+// content-addressed name, so that the page cache holds it once.
+func mergeUp(s, c int, name string, st *mergeStats) {
+	var ss unix.Stat_t
+	if unix.Fstatat(s, name, &ss, unix.AT_SYMLINK_NOFOLLOW) != nil || ss.Mode&unix.S_IFMT != unix.S_IFREG {
+		return // symlinks, sockets…: never shared
+	}
+	var cs unix.Stat_t
+	switch err := unix.Fstatat(c, name, &cs, unix.AT_SYMLINK_NOFOLLOW); {
+	case errors.Is(err, unix.ENOENT):
+		if unix.Linkat(s, name, c, name, 0) == nil {
+			st.up++
+		}
+	case err != nil:
+	case cs.Mode&unix.S_IFMT != unix.S_IFREG || (cs.Dev == ss.Dev && cs.Ino == ss.Ino):
+	case cs.Size == ss.Size:
+		tmp := storeTmpPrefix + name
+		_ = unix.Unlinkat(s, tmp, 0)
+		if unix.Linkat(c, name, s, tmp, 0) != nil {
+			return
+		}
+		if unix.Renameat(s, tmp, s, name) == nil {
+			st.dedup++
+		} else {
+			_ = unix.Unlinkat(s, tmp, 0)
+		}
+	}
+}
+
+// mergeDown links the canonical file name, missing in the slot, into it.
+func mergeDown(s, c int, name string, st *mergeStats) {
+	var cs unix.Stat_t
+	if unix.Fstatat(c, name, &cs, unix.AT_SYMLINK_NOFOLLOW) != nil || cs.Mode&unix.S_IFMT != unix.S_IFREG {
+		return
+	}
+	if unix.Linkat(c, name, s, name, 0) == nil {
+		st.down++
+	}
 }
 
 type dirEntry struct {
@@ -335,7 +370,7 @@ func readDir(fd int) ([]dirEntry, error) {
 	}
 	out := make([]dirEntry, 0, len(list))
 	for _, e := range list {
-		if len(e.Name()) > 13 && e.Name()[:13] == ".pitlane-tmp-" {
+		if len(e.Name()) > len(storeTmpPrefix) && strings.HasPrefix(e.Name(), storeTmpPrefix) {
 			_ = unix.Unlinkat(fd, e.Name(), 0)
 			continue
 		}
@@ -368,3 +403,7 @@ func openOrMkdir(dir int, name string, uid, gid int) (int, error) {
 	}
 	return fd, nil
 }
+
+// pnpmStoreDir lives in the slot work volume (kept between jobs of the same
+// owner, wiped on owner change and for strict jobs).
+const pnpmStoreDir = ".pnpm-store"
