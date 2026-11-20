@@ -23,6 +23,7 @@ import (
 
 const lostJobTTL = 30 * time.Minute
 
+// lostJob is a job bound to a runner whose container is gone.
 type lostJob struct {
 	runner string
 	at     time.Time

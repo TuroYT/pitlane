@@ -110,3 +110,96 @@ func TestJobKeepsWorkflowRef(t *testing.T) {
 		t.Fatalf("unexpected job: %+v", j)
 	}
 }
+
+func TestEnabledTargets(t *testing.T) {
+	got, strict := enabledTargets([]store.Target{{ID: 1, Enabled: true}, {ID: 2, Strict: true}, {ID: 3, Enabled: true}})
+	if len(got) != 2 || got[1].ID != 1 || got[3].ID != 3 || strict {
+		t.Fatalf("enabled %v strict %v", got, strict)
+	}
+	if _, strict := enabledTargets([]store.Target{{ID: 1, Enabled: true, Strict: true}}); !strict {
+		t.Fatal("an enabled strict target sets the strict demand")
+	}
+}
+
+func TestNeedsNewListener(t *testing.T) {
+	cur := store.Target{ScaleSetName: "pitlane", InstallationID: 7, MaxRunners: 2}
+	for _, tc := range []struct {
+		name string
+		next store.Target
+		want bool
+	}{
+		{"capacity only", store.Target{ScaleSetName: "pitlane", InstallationID: 7, MaxRunners: 5, Strict: true}, false},
+		{"renamed scale set", store.Target{ScaleSetName: "other", InstallationID: 7}, true},
+		{"other installation", store.Target{ScaleSetName: "pitlane", InstallationID: 8}, true},
+	} {
+		if got := needsNewListener(cur, tc.next); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUnix(t *testing.T) {
+	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if unix(at) != at.Unix() || unix(time.Time{}) != 0 || unix(time.Unix(0, 0)) != 0 {
+		t.Fatal("unix: set times convert, zero and epoch are unset")
+	}
+	if unixOrNow(at) != at.Unix() {
+		t.Fatal("unixOrNow kept a set time")
+	}
+	before := time.Now().Unix()
+	got := unixOrNow(time.Time{})
+	if after := time.Now().Unix(); got < before || got > after {
+		t.Fatalf("unixOrNow: an unset time becomes now, got %d not in [%d, %d]", got, before, after)
+	}
+}
+
+func TestByWaitTurn(t *testing.T) {
+	now := time.Now()
+	idle := &target{}
+	old := &target{waiting: 1, waitSince: now.Add(-time.Minute)}
+	recent := &target{waiting: 2, waitSince: now}
+	got := byWaitTurn([]*target{idle, recent, old})
+	if got[0] != old || got[1] != recent || got[2] != idle {
+		t.Fatal("waiting targets go first, oldest turn first; idle ones last")
+	}
+}
+
+func TestDeleteScaleSetWhenDrained(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// drainAt is how long after the start the last runner exits, during
+		// the sleep that brings the clock there.
+		drainAt time.Duration
+		deleted bool
+	}{
+		{"drained before the cutoff", time.Hour, true},
+		// The last runner exits as the clock reaches the cutoff, before the
+		// next poll: too late, the scale set stays.
+		{"drained at the cutoff", drainTimeout, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4}, 0)
+			h.addRunner("busy", 0, time.Minute, true, false)
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			clock := start
+			sleep := func(d time.Duration) {
+				clock = clock.Add(d)
+				if clock.Sub(start) >= tc.drainAt {
+					h.t.mu.Lock()
+					delete(h.t.runners, "busy")
+					h.t.mu.Unlock()
+				}
+			}
+			h.t.deleteScaleSetWhenDrained(func() time.Time { return clock }, sleep)
+			h.api.mu.Lock()
+			deleted := len(h.api.deleted) > 0
+			h.api.mu.Unlock()
+			if h.runnerCount() != 0 {
+				t.Fatal("the last runner never exited: the cutoff was not reached by sleeping")
+			}
+			if deleted != tc.deleted {
+				t.Fatalf("scale set deleted: %v, want %v", deleted, tc.deleted)
+			}
+		})
+	}
+}

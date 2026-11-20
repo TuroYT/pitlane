@@ -5,42 +5,33 @@ package scaler
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/actions/scaleset"
-
 	"github.com/TuroYT/pitlane/internal/gh"
-	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
-// Credentials used to talk to GitHub. Either the App fields or PAT is set.
-type Credentials struct {
-	AppClientID string
-	AppPEM      string
-	PAT         string
-}
-
-// RunnerGroupID is the runner group of every scale set Pitlane creates: the
-// default group (for an organisation, its "Allow public repositories"
-// setting decides whether public repositories can use the runners).
-const RunnerGroupID = 1
-
-// Valid reports whether credentials are usable.
-func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" && c.AppPEM != "") }
+// Periods of the manager's loop.
+const (
+	// reconcileInterval also catches demand the pool's release signal and
+	// the listener did not report.
+	reconcileInterval    = 3 * time.Second
+	housekeepingInterval = time.Hour
+	// timeoutCheckInterval is short: the check reads memory only.
+	timeoutCheckInterval = 10 * time.Second
+)
 
 // Manager runs one listener per target.
+//
+// Lock order: m.mu before t.mu. Neither is held across GitHub or Docker
+// calls.
 type Manager struct {
 	Version string
 	// ListRunners lists a target's self-hosted runners through the REST API
@@ -63,14 +54,21 @@ type Manager struct {
 	logDir  string
 	creds   func() Credentials
 	changed func()
+	// usageRetry and queueLookupRetry are the waits of recordUsage and
+	// fetchQueueTime before they ask again (shortened by tests).
+	usageRetry       time.Duration
+	queueLookupRetry time.Duration
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// targets are the running listeners, by target ID. Guarded by mu.
 	targets map[int64]*target
+	// adopted and lost are found at startup and handed to each target's
+	// listener by Sync. Guarded by mu.
 	adopted map[int64][]*runner
-	lost    map[int64]map[string]lostJob // found at startup, handed to targets by Sync
+	lost    map[int64]map[string]lostJob
 	// ctx is set by Start; until then Sync does nothing (the UI is served
 	// while slots start, and runners left by a previous run are not adopted
-	// yet).
+	// yet). Guarded by mu.
 	ctx context.Context
 }
 
@@ -79,54 +77,23 @@ func New(st *store.Store, p Pool, dataDir string, creds func() Credentials, chan
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
 	return &Manager{store: st, pool: p, connect: newScaleSetAPI, log: log, logDir: logDir, creds: creds, changed: changed,
-		predict: newPredictor(st.MemoryHistory),
+		predict:    newPredictor(st.MemoryHistory),
+		usageRetry: defaultUsageRetry, queueLookupRetry: defaultQueueLookupRetry,
 		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
 // Start adopts runners left by a previous process and starts every enabled target.
 func (m *Manager) Start(ctx context.Context) error {
-	orphans, err := m.pool.RunnerContainers(ctx)
+	containers, err := m.pool.RunnerContainers(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("list runner containers: %w", err)
 	}
 	targets, err := m.store.Targets()
 	if err != nil {
 		return fmt.Errorf("load targets: %w", err)
 	}
-	enabled := map[int64]bool{}
-	for _, t := range targets {
-		enabled[t.ID] = t.Enabled
-	}
-	running := map[string]*runner{}
-	for _, o := range orphans {
-		// Assume busy since the container was created: the job timeout then
-		// still applies after a restart.
-		// The lease comes from the container's labels: a strict runner is
-		// released (slot rebuilt, throwaway caches removed) as strict.
-		r := &runner{name: o.Name, containerID: o.ID, lease: o.Lease(), busy: true, startedAt: time.Now(), busySince: o.Created}
-		if o.Created.Year() < 2000 {
-			r.busySince = time.Now()
-		}
-		r.runnerID = m.store.RunnerIDByName(o.Name)
-		if o.Untrusted || !enabled[o.TargetID] {
-			// No listener would ever watch it: stop it now. Its owner cannot
-			// be trusted, so its slot is rebuilt.
-			r.lease = untrustedLease(r.lease)
-			m.log.Warn("runner container from a previous run has no known enabled target, stopping it",
-				"container", o.Name, "id", o.ID, "target", o.TargetID, "slot", o.Slot, "running", o.Running)
-			go m.stopUntracked(r, o.Running)
-			continue
-		}
-		if !o.Running {
-			go m.finishRunner(nil, r)
-			continue
-		}
-		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot, "strict", o.Strict)
-		m.mu.Lock()
-		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
-		m.mu.Unlock()
-		running[o.Name] = r
-	}
+	enabled, _ := enabledTargets(targets)
+	running := m.adoptContainers(containers, enabled)
 	m.findLostJobs(ctx, running)
 	// Only now may Sync start listeners: adopted runners and lost jobs are
 	// known, so they are handed to their target.
@@ -139,35 +106,27 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// untrustedLease turns the lease of a runner whose target is unknown into a
-// strict one: its slot is rebuilt and handed to nobody before that.
-func untrustedLease(l pool.Lease) pool.Lease {
-	l.Strict, l.Owner, l.TargetID = true, pool.StrictOwner, 0
-	return l
-}
-
-// stopUntracked stops a runner container left by a previous run that no
-// target will adopt (target label missing or invalid, target deleted or
-// disabled), the same way as a job over its time limit, then finishes it:
-// logs archived, container removed (forcibly if the graceful stop failed),
-// slot released as strict.
-func (m *Manager) stopUntracked(r *runner, running bool) {
-	if running {
-		ctx, cancel := context.WithTimeout(context.Background(), timeoutStopGrace+time.Minute)
-		if err := m.pool.StopRunner(ctx, r.containerID, timeoutStopGrace); err != nil {
-			m.log.Error("stop untracked runner, removing it forcibly", "container", r.name, "id", r.containerID, "error", err)
+// enabledTargets returns the enabled targets by ID, and whether one of them
+// is strict.
+func enabledTargets(targets []store.Target) (map[int64]store.Target, bool) {
+	enabled := map[int64]store.Target{}
+	strict := false
+	for _, t := range targets {
+		if t.Enabled {
+			enabled[t.ID] = t
+			strict = strict || t.Strict
 		}
-		cancel()
 	}
-	m.finishRunner(nil, r)
+	return enabled, strict
 }
 
+// loop runs the manager's periodic work until ctx ends.
 func (m *Manager) loop(ctx context.Context) {
-	tick := time.NewTicker(3 * time.Second)
+	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
-	clean := time.NewTicker(time.Hour)
+	clean := time.NewTicker(housekeepingInterval)
 	defer clean.Stop()
-	timeouts := time.NewTicker(10 * time.Second) // in memory only: cheap
+	timeouts := time.NewTicker(timeoutCheckInterval)
 	defer timeouts.Stop()
 	orphans := time.NewTicker(orphanInterval)
 	defer orphans.Stop()
@@ -190,85 +149,52 @@ func (m *Manager) loop(ctx context.Context) {
 	}
 }
 
-func (m *Manager) reconcileAll() {
+// liveTargets returns the running targets, to work on them without holding
+// m.mu.
+func (m *Manager) liveTargets() []*target {
 	m.mu.Lock()
-	ts := make([]*target, 0, len(m.targets))
-	for _, t := range m.targets {
-		ts = append(ts, t)
-	}
-	m.mu.Unlock()
-	// Oldest demand first so a busy target cannot starve the others.
-	sort.Slice(ts, func(i, j int) bool { return ts[i].waitingSince().Before(ts[j].waitingSince()) })
-	for _, t := range ts {
+	defer m.mu.Unlock()
+	return slices.Collect(maps.Values(m.targets))
+}
+
+// reconcileAll reconciles every target, the one waiting longest first.
+func (m *Manager) reconcileAll() {
+	for _, t := range byWaitTurn(m.liveTargets()) {
 		t.reconcile()
 	}
 }
 
-func (m *Manager) housekeeping() {
-	retention := time.Duration(m.store.GetInt("history_days", 30)) * 24 * time.Hour
-	if err := m.store.PruneJobs(retention); err != nil {
-		m.log.Warn("prune job history", "error", err)
+// byWaitTurn orders targets oldest demand first, so a busy target cannot
+// starve the others; targets that wait for nothing go last. Each target's
+// state is read once, so the order is consistent while targets change.
+func byWaitTurn(ts []*target) []*target {
+	type turn struct {
+		t       *target
+		waiting bool
+		since   time.Time
 	}
-	if err := m.store.PruneAudit(retention); err != nil {
-		m.log.Warn("prune audit log", "error", err)
+	turns := make([]turn, len(ts))
+	for i, t := range ts {
+		waiting, since := t.waitTurn()
+		turns[i] = turn{t: t, waiting: waiting, since: since}
 	}
-	if err := m.store.PruneSessions(); err != nil {
-		m.log.Warn("prune expired sessions", "error", err)
-	}
-	entries, _ := os.ReadDir(m.logDir)
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {
-			_ = os.Remove(filepath.Join(m.logDir, e.Name()))
+	slices.SortStableFunc(turns, func(a, b turn) int {
+		if a.waiting != b.waiting {
+			if a.waiting {
+				return -1
+			}
+			return 1
 		}
-	}
-}
-
-// ApplyStrictRequirement records why a target must run strict (reason, ""
-// when it need not, as GitHub just reported it) and switches it to strict if
-// needed. It reports whether the stored target changed; the caller syncs.
-func (m *Manager) ApplyStrictRequirement(t store.Target, reason string) bool {
-	if reason == t.StrictRequired && (reason == "" || t.Strict) {
-		return false
-	}
-	flipped, err := m.store.SetStrictRequirement(t.ID, reason)
-	if err != nil {
-		m.log.Error("record strict requirement", "target", t.FullName(), "reason", reason, "error", err)
-		return false
-	}
-	if flipped {
-		m.log.Warn("target switched to strict mode", "target", t.FullName(), "reason", reason)
-	}
-	return true
-}
-
-// EnforceStrictAll asks GitHub, for every target, whether it must run strict
-// (at start, then hourly) and switches the ones that must. When GitHub
-// cannot be asked, a target keeps its current mode.
-func (m *Manager) EnforceStrictAll(ctx context.Context) {
-	if m.StrictReason == nil {
-		return
-	}
-	targets, err := m.store.Targets()
-	if err != nil {
-		m.log.Error("load targets", "error", err)
-		return
-	}
-	changed := false
-	for _, t := range targets {
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		reason, err := m.StrictReason(cctx, t)
-		cancel()
-		if err != nil {
-			m.log.Warn("cannot check whether the target must run strict, its mode is left unchanged", "target", t.FullName(), "strict", t.Strict, "error", err)
-			continue
+		if !a.waiting {
+			return 0
 		}
-		if m.ApplyStrictRequirement(t, reason) {
-			changed = true
-		}
+		return a.since.Compare(b.since)
+	})
+	out := make([]*target, len(turns))
+	for i, tn := range turns {
+		out[i] = tn.t
 	}
-	if changed {
-		m.Sync()
-	}
+	return out
 }
 
 // Sync starts, restarts or stops listeners so they match the stored targets.
@@ -286,52 +212,54 @@ func (m *Manager) Sync() {
 		m.log.Error("load targets", "error", err)
 		return
 	}
-	want := map[int64]store.Target{}
-	strict := false
-	for _, t := range targets {
-		if t.Enabled {
-			want[t.ID] = t
-			strict = strict || t.Strict
-		}
-	}
+	want, strict := enabledTargets(targets)
 	m.pool.SetStrictDemand(strict)
 	m.mu.Lock()
+	m.syncRunningLocked(want)
+	m.startMissingLocked(want)
+	m.mu.Unlock()
+	m.changed()
+}
+
+// syncRunningLocked updates the running listeners to their stored target,
+// and stops those whose target was disabled, deleted or moved to another
+// scale set or installation. Callers hold m.mu.
+func (m *Manager) syncRunningLocked(want map[int64]store.Target) {
 	for id, t := range m.targets {
 		w, ok := want[id]
-		if !ok || w.ScaleSetName != t.cfg().ScaleSetName || w.InstallationID != t.cfg().InstallationID {
-			delete(m.targets, id)
-			if ok {
-				m.keepLostLocked(id, t)
-			}
-			go t.stop(!ok)
+		if ok && !needsNewListener(t.cfg(), w) {
+			t.update(w)
 			continue
 		}
-		t.update(w)
+		delete(m.targets, id)
+		if ok {
+			m.keepLostLocked(id, t)
+		}
+		go t.stop(!ok)
 	}
-	creds := m.creds()
+}
+
+// needsNewListener reports whether a target changed in a way its running
+// listener cannot follow.
+func needsNewListener(cur, next store.Target) bool {
+	return next.ScaleSetName != cur.ScaleSetName || next.InstallationID != cur.InstallationID
+}
+
+// startMissingLocked starts a listener for every wanted target that has
+// none, when there are credentials to start it with. Callers hold m.mu.
+func (m *Manager) startMissingLocked(want map[int64]store.Target) {
+	if !m.creds().Valid() {
+		return
+	}
 	for id, w := range want {
-		if _, ok := m.targets[id]; ok || !creds.Valid() {
+		if _, ok := m.targets[id]; ok {
 			continue
 		}
 		t := newTarget(m, w)
-		for _, r := range m.adopted[id] {
-			// Adopted after a restart: its job is unknown, reserve what the
-			// target's jobs usually need.
-			r.predicted, _ = m.predict.predict(m.ctx, jobKey{owner: w.Owner, repo: w.Repo})
-			m.pool.SetPrediction(r.lease.Slot, r.predicted)
-			t.runners[r.name] = r
-			go t.watch(r)
-		}
-		delete(m.adopted, id)
-		for jobID, l := range m.lost[id] {
-			t.lost[jobID] = l
-		}
-		delete(m.lost, id)
+		m.handOverLocked(t)
 		m.targets[id] = t
 		go t.run(m.ctx)
 	}
-	m.mu.Unlock()
-	m.changed()
 }
 
 // Restart restarts every listener (e.g. after credentials change).
@@ -368,897 +296,4 @@ func (m *Manager) RunnerContainer(name string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// LogFile returns the path of a finished runner's log.
-func (m *Manager) LogFile(name string) string {
-	return filepath.Join(m.logDir, filepath.Base(name)+".log")
-}
-
-// ----------------------------------------------------------------- snapshot
-
-// RunnerState is shown in the UI.
-type RunnerState struct {
-	Name      string `json:"name"`
-	Slot      int    `json:"slot"`
-	Busy      bool   `json:"busy"`
-	JobName   string `json:"jobName"`
-	Repo      string `json:"repo"`
-	StartedAt int64  `json:"startedAt"`
-	// Predicted is the memory reserved for its job (bytes).
-	Predicted int64 `json:"predicted"`
-}
-
-// TargetState is shown in the UI.
-type TargetState struct {
-	store.Target
-	Status  string `json:"status"`
-	Error   string `json:"error,omitempty"`
-	Desired int    `json:"desired"`
-	Waiting int    `json:"waiting"`
-	// WaitReason says why jobs wait (pool.WaitSlot, WaitMemory,
-	// WaitStrictSlot), "" when none does.
-	WaitReason string        `json:"waitReason,omitempty"`
-	Runners    []RunnerState `json:"runners"`
-}
-
-// Snapshot returns the live state of every target.
-func (m *Manager) Snapshot() []TargetState {
-	targets, _ := m.store.Targets()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]TargetState, 0, len(targets))
-	for _, st := range targets {
-		ts := TargetState{Target: st, Status: "disabled", Runners: []RunnerState{}}
-		if t, ok := m.targets[st.ID]; ok {
-			t.mu.Lock()
-			ts.Status, ts.Error, ts.Desired, ts.Waiting, ts.WaitReason = t.status, t.err, t.desired, t.waiting, t.waitReason
-			ts.ScaleSetID = t.scaleSetID
-			for _, r := range t.runners {
-				ts.Runners = append(ts.Runners, RunnerState{Name: r.name, Slot: r.lease.Slot, Busy: r.busy, JobName: r.jobName, Repo: r.repo, StartedAt: r.startedAt.Unix(), Predicted: r.predicted})
-			}
-			t.mu.Unlock()
-			sort.Slice(ts.Runners, func(i, j int) bool { return ts.Runners[i].Slot < ts.Runners[j].Slot })
-		} else if st.Enabled && !m.creds().Valid() {
-			ts.Status = "no-credentials"
-		}
-		out = append(out, ts)
-	}
-	return out
-}
-
-// ------------------------------------------------------------------ target
-
-type runner struct {
-	name        string
-	containerID string
-	runnerID    int64
-	lease       pool.Lease
-	busy        bool
-	exited      bool
-	killed      bool      // killed for exceeding the job time limit
-	busySince   time.Time // when its job started
-	jobID       string    // GitHub job it runs, cleared on JobCompleted
-	jobName     string
-	repo        string
-	startedAt   time.Time
-	meter       *pool.Meter // resources used by its job (nil: not measured)
-	predicted   int64       // memory reserved for its job (bytes)
-}
-
-// pendingJob is a job GitHub assigned to the scale set that no runner has
-// started yet.
-type pendingJob struct {
-	key       jobKey
-	predicted int64
-	at        time.Time
-}
-
-// pendingTTL forgets a pending job whose start or completion was never seen.
-const pendingTTL = 24 * time.Hour
-
-type target struct {
-	m      *Manager
-	log    *slog.Logger
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	mu          sync.Mutex
-	t           store.Target
-	client      scaleSetAPI
-	session     jobSession
-	scaleSetID  int
-	status      string
-	err         string
-	desired     int
-	waiting     int
-	waitReason  string
-	waitSince   time.Time
-	pending     map[string]pendingJob // by GitHub job ID
-	runners     map[string]*runner
-	lost        map[string]lostJob // jobs bound to dead runners, by job ID
-	starting    int                // runners being prepared/started in the background
-	reconcileMu sync.Mutex
-	orphanMu    sync.Mutex
-	orphanAt    time.Time // last orphan cleanup
-}
-
-func newTarget(m *Manager, t store.Target) *target {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &target{m: m, t: t, ctx: ctx, cancel: cancel, status: "starting", runners: map[string]*runner{}, lost: map[string]lostJob{}, pending: map[string]pendingJob{},
-		log: m.log.With("target", t.FullName())}
-}
-
-func (t *target) cfg() store.Target {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.t
-}
-
-func (t *target) update(n store.Target) {
-	t.mu.Lock()
-	t.t = n
-	session := t.session
-	t.mu.Unlock()
-	if session != nil {
-		session.setMaxRunners(n.MaxRunners)
-	}
-	go t.reconcile()
-}
-
-// staleForStrict reports whether an idle runner was started without strict
-// isolation for a target that is strict now: reconcile replaces it.
-func staleForStrict(r *runner, strict bool) bool {
-	return strict && !r.lease.Strict && !r.busy && !r.exited
-}
-
-func (t *target) waitingSince() time.Time {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.waiting == 0 {
-		return time.Now()
-	}
-	return t.waitSince
-}
-
-func (t *target) setStatus(status, errMsg string) {
-	t.mu.Lock()
-	t.status, t.err = status, errMsg
-	t.mu.Unlock()
-	t.m.changed()
-}
-
-func (t *target) run(parent context.Context) {
-	go func() {
-		select {
-		case <-parent.Done():
-			t.cancel()
-		case <-t.ctx.Done():
-		}
-	}()
-	backoff := 5 * time.Second
-	for t.ctx.Err() == nil {
-		start := time.Now()
-		err := t.listen()
-		if t.ctx.Err() != nil {
-			break
-		}
-		if time.Since(start) > 5*time.Minute {
-			backoff = 5 * time.Second
-		}
-		msg := "listener stopped"
-		if err != nil {
-			msg = err.Error()
-		}
-		t.log.Error("listener failed, retrying", "error", msg, "in", backoff)
-		t.setStatus("error", msg)
-		select {
-		case <-t.ctx.Done():
-		case <-time.After(backoff):
-		}
-		backoff = min(backoff*2, 2*time.Minute)
-	}
-}
-
-func (t *target) listen() error {
-	cfg := t.cfg()
-	client, err := t.m.connect(t.m.creds(), cfg, t.m.Version)
-	if err != nil {
-		return err
-	}
-	id, created, err := client.ensureScaleSet(t.ctx, cfg.ScaleSetName)
-	if err != nil {
-		return err
-	}
-	if created {
-		t.log.Info("scale set created", "id", id, "label", cfg.ScaleSetName)
-	}
-	if cfg.ScaleSetID != id {
-		cfg.ScaleSetID = id
-		// Only that column: cfg may be stale (e.g. switched to strict since).
-		if err := t.m.store.SetScaleSetID(cfg.ID, id); err != nil {
-			t.log.Warn("save scale set id", "error", err)
-		}
-	}
-	host, _ := os.Hostname()
-	session, err := client.openSession(t.ctx, id, fmt.Sprintf("pitlane-%s-%d", host, cfg.ID))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := session.close(context.Background()); err != nil {
-			t.log.Warn("close message session", "error", err)
-		}
-	}()
-	t.mu.Lock()
-	t.client, t.session, t.scaleSetID = client, session, id
-	t.t.ScaleSetID = id
-	t.mu.Unlock()
-	t.setStatus("listening", "")
-	t.log.Info("listening for jobs", "scaleSet", id, "label", cfg.ScaleSetName)
-	go t.cleanupOrphans()
-	err = session.run(t.ctx, id, cfg.MaxRunners, t.log.WithGroup("listener"), &scaler{t: t, session: session})
-	if errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
-}
-
-// stop cancels the listener. When remove is set the scale set is deleted on
-// GitHub once its busy runners are done.
-func (t *target) stop(remove bool) {
-	t.cancel()
-	// Removed outside the lock: each removal is a Docker call, and the
-	// runners' watch goroutines need the lock to finish.
-	t.mu.Lock()
-	var idle []string
-	for _, r := range t.runners {
-		if !r.busy {
-			idle = append(idle, r.containerID)
-		}
-	}
-	t.mu.Unlock()
-	for _, id := range idle {
-		t.m.pool.Remove(context.Background(), id)
-	}
-	if !remove {
-		return
-	}
-	deadline := time.Now().Add(6 * time.Hour)
-	for time.Now().Before(deadline) {
-		t.mu.Lock()
-		n := len(t.runners)
-		client, id := t.client, t.scaleSetID
-		t.mu.Unlock()
-		if n == 0 {
-			if client != nil && id != 0 {
-				if err := client.deleteScaleSet(context.Background(), id); err != nil {
-					t.log.Warn("delete scale set", "error", err)
-				} else {
-					t.log.Info("scale set deleted", "id", id)
-				}
-			}
-			return
-		}
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// reconcile starts runners until the target has what GitHub asked for (or
-// no slot is free), and removes idle runners that are no longer needed.
-func (t *target) reconcile() {
-	if t.ctx.Err() != nil {
-		return
-	}
-	t.reconcileMu.Lock()
-	defer t.reconcileMu.Unlock()
-
-	t.mu.Lock()
-	client := t.client // replaced by listen(): read under the lock only
-	if client == nil {
-		t.mu.Unlock()
-		return
-	}
-	cfg := t.t
-	now := time.Now()
-	want := min(cfg.MaxRunners, cfg.MinRunners+effectiveDesired(t.desired, pruneLostJobs(t.lost, now)))
-	have := t.starting
-	waiting := t.starting // runners not running a job yet
-	var idle, stale []*runner
-	for _, r := range t.runners {
-		if r.exited {
-			continue
-		}
-		if staleForStrict(r, cfg.Strict) {
-			stale = append(stale, r) // not counted: replaced right away
-			continue
-		}
-		have++
-		if !r.busy {
-			waiting++
-			if time.Since(r.startedAt) > 30*time.Second {
-				idle = append(idle, r)
-			}
-		}
-	}
-	preds := pendingPredictions(t.pending, now)
-	since := now
-	if t.waiting > 0 {
-		since = t.waitSince
-	}
-	t.mu.Unlock()
-
-	// Runners are prepared and started in parallel, in the background: the
-	// listener is never blocked and a slow start does not delay the others.
-	// Runners not running a job yet cover the heaviest pending jobs; each
-	// new one reserves the memory of the next (GitHub picks which runner
-	// runs which job, so this is the safe bet), or of a typical job of the
-	// target for a warm runner.
-	started := 0
-	reason := ""
-	for i := 0; i < want-have; i++ {
-		predicted := int64(0)
-		if k := waiting + i; k < len(preds) {
-			predicted = preds[k]
-		} else {
-			predicted, _ = t.m.predict.predict(t.ctx, jobKey{owner: cfg.Owner, repo: cfg.Repo})
-		}
-		lease, why := t.m.pool.Admit(t.ctx, pool.Request{Owner: cfg.Owner, TargetID: cfg.ID, Strict: cfg.Strict, Predicted: predicted, Since: since})
-		if why != "" {
-			reason = why
-			break
-		}
-		started++
-		t.mu.Lock()
-		t.starting++
-		t.mu.Unlock()
-		go t.launch(lease)
-	}
-	missing := max(0, want-have-started)
-
-	// The target became strict: its idle runners started without strict
-	// isolation go (retried at every reconcile until none is left).
-	for _, r := range stale {
-		if r.runnerID != 0 {
-			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
-				continue // a job was just assigned to it, or GitHub is unreachable
-			}
-			t.m.forgetRunner(r.runnerID, nil)
-		}
-		t.log.Info("replacing idle runner started without strict isolation", "runner", r.name)
-		t.m.pool.Remove(context.Background(), r.containerID)
-	}
-
-	// Scale down: idle runners beyond what is needed are deregistered first
-	// (GitHub refuses if a job was just assigned) and only then killed.
-	excess := have + started - want
-	for _, r := range idle {
-		if excess <= 0 {
-			break
-		}
-		if r.runnerID != 0 {
-			if err := client.removeRunner(t.ctx, r.runnerID); err != nil {
-				continue
-			}
-			t.m.forgetRunner(r.runnerID, nil)
-		}
-		t.log.Info("removing idle runner", "runner", r.name)
-		t.m.pool.Remove(context.Background(), r.containerID)
-		excess--
-	}
-
-	t.mu.Lock()
-	// A target that got a runner and still waits goes behind the others
-	// (reconcileAll serves the longest waiting first): targets take turns.
-	if missing > 0 && (t.waiting == 0 || started > 0) {
-		t.waitSince = time.Now()
-	}
-	if missing == 0 {
-		reason = ""
-	} else if reason == "" {
-		reason = pool.WaitSlot // capped by MaxRunners or still starting
-	}
-	changed := t.waiting != missing || started > 0 || t.waitReason != reason
-	t.waiting, t.waitReason = missing, reason
-	t.mu.Unlock()
-	if changed {
-		t.m.changed()
-	}
-}
-
-func (t *target) launch(lease pool.Lease) {
-	defer func() {
-		t.mu.Lock()
-		t.starting--
-		t.mu.Unlock()
-		t.m.changed()
-	}()
-	if err := t.m.pool.Prepare(t.ctx, lease); err != nil {
-		t.log.Error("prepare slot", "slot", lease.Slot, "error", err)
-		if !errors.Is(err, pool.ErrSlotRebuilding) {
-			t.m.pool.Release(context.Background(), lease)
-		}
-		return
-	}
-	if cfg := t.cfg(); cfg.Strict && !lease.Strict {
-		// Switched to strict while the slot was being prepared.
-		t.m.pool.Release(context.Background(), lease)
-		return
-	}
-	if err := t.startRunner(lease); err != nil {
-		t.log.Error("start runner", "error", err)
-		t.m.pool.Release(context.Background(), lease)
-		t.setStatus("error", err.Error())
-	}
-}
-
-func randomSuffix() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func (t *target) startRunner(lease pool.Lease) error {
-	cfg := t.cfg()
-	t.mu.Lock()
-	client, ssID := t.client, t.scaleSetID
-	t.mu.Unlock()
-	name := "pitlane-" + randomSuffix()
-	lease.Runner = name
-	jit, err := client.generateJIT(t.ctx, name, ssID)
-	if err != nil {
-		return fmt.Errorf("generate JIT config: %w", err)
-	}
-	if jit.runnerID != 0 {
-		// Recorded before the container exists: if Pitlane dies now, the
-		// orphan cleanup still finds this registration.
-		if err := t.m.store.AddRunner(store.RegisteredRunner{ID: jit.runnerID, TargetID: cfg.ID, Name: name}); err != nil {
-			// Not fatal, but the orphan cleanup will never see this runner.
-			t.log.Error("record runner registration: it will not be cleaned up if it is orphaned", "runner", name, "id", jit.runnerID, "error", err)
-		}
-	}
-	id, err := t.m.pool.StartRunner(t.ctx, pool.RunnerSpec{Name: name, JITConfig: jit.encoded, TargetID: cfg.ID, Owner: cfg.Owner, Repo: cfg.Repo, Lease: lease})
-	if err != nil {
-		if jit.runnerID != 0 {
-			t.m.forgetRunner(jit.runnerID, client.removeRunner(context.Background(), jit.runnerID))
-		}
-		return err
-	}
-	r := &runner{name: name, containerID: id, lease: lease, runnerID: jit.runnerID, startedAt: time.Now(),
-		meter: t.m.pool.MeasureJob(t.ctx, id, lease.Slot), predicted: lease.Predicted}
-	t.mu.Lock()
-	t.runners[name] = r
-	t.mu.Unlock()
-	t.log.Info("runner started", "runner", name, "slot", lease.Slot)
-	go t.watch(r)
-	return nil
-}
-
-func (t *target) watch(r *runner) {
-	code := t.m.pool.Wait(context.Background(), r.containerID)
-	t.log.Info("runner exited", "runner", r.name, "code", code)
-	t.m.finishRunner(t, r)
-}
-
-// finishRunner archives logs, removes the container, frees the slot and
-// makes sure the runner is gone from GitHub.
-func (m *Manager) finishRunner(t *target, r *runner) {
-	ctx := context.Background()
-	// Before the slot cleanup, which is not part of the job.
-	m.recordUsage(r.name, r.meter.Stop())
-	if f, err := os.OpenFile(m.LogFile(r.name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-		if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
-			m.log.Warn("archive runner log", "runner", r.name, "error", err)
-		}
-		if err := f.Close(); err != nil {
-			m.log.Warn("archive runner log", "runner", r.name, "error", err)
-		}
-	} else {
-		m.log.Warn("archive runner log", "runner", r.name, "error", err)
-	}
-	m.pool.Remove(ctx, r.containerID)
-	if t != nil {
-		t.runnerGone(r)
-		t.mu.Lock()
-		r.exited = true
-		client := t.client
-		t.mu.Unlock()
-		if client != nil && r.runnerID != 0 {
-			// Usually already gone (ephemeral): NotFound also clears the record.
-			m.forgetRunner(r.runnerID, client.removeRunner(ctx, r.runnerID))
-		}
-	}
-	if r.lease.Slot >= 0 { // -1: the container had no valid slot label
-		m.pool.Release(ctx, r.lease)
-	}
-	if t != nil {
-		t.mu.Lock()
-		delete(t.runners, r.name)
-		t.mu.Unlock()
-	}
-	m.changed()
-	m.pool.EnsureFreeDisk(ctx) // idle slots only; skipped while another prune runs
-}
-
-// usageRetry is how long recordUsage waits before trying again when the
-// runner's job is not recorded yet (its JobStarted message can arrive after
-// the runner exited).
-var usageRetry = 15 * time.Second
-
-// recordUsage stores what a runner's job used. A failure only loses the
-// measurement.
-func (m *Manager) recordUsage(runner string, u pool.JobUsage) {
-	if !u.Known() {
-		return
-	}
-	su := storeUsage(u)
-	save := func() bool {
-		ok, err := m.store.SetJobUsage(context.Background(), runner, su)
-		if err != nil {
-			m.log.Warn("record job resource usage", "runner", runner, "error", err)
-			return true
-		}
-		return ok
-	}
-	if save() {
-		return
-	}
-	go func() {
-		time.Sleep(usageRetry)
-		save() // still unknown: the runner never ran a job
-	}()
-}
-
-// storeUsage converts a measurement to its stored form (-1 = unknown).
-func storeUsage(u pool.JobUsage) store.JobUsage {
-	v := func(n int64) *int64 {
-		if n < 0 {
-			return nil
-		}
-		return &n
-	}
-	c := func(c pool.CgroupUsage) store.ContainerUsage {
-		return store.ContainerUsage{MemPeak: v(c.MemPeak), CPUUsec: v(c.CPUUsec), CPUSomeUsec: v(c.CPUSomeUsec), IOFullUsec: v(c.IOFullUsec), MemFullUsec: v(c.MemFullUsec)}
-	}
-	slot := c(u.Slot)
-	slot.AnonPeak = v(u.Slot.AnonPeak) // only the slot's is stored (its peak counts the page cache)
-	return store.JobUsage{WallMs: u.Wall.Milliseconds(), Runner: c(u.Runner), Slot: slot}
-}
-
-// maxArchivedLog bounds the archived log of one runner (its output is
-// controlled by the job).
-const maxArchivedLog = 64 << 20
-
-var errLogFull = errors.New("log size limit reached")
-
-// capWriter passes through at most n bytes, then fails with errLogFull.
-type capWriter struct {
-	w io.Writer
-	n int64
-}
-
-func (c *capWriter) Write(b []byte) (int, error) {
-	if c.n <= 0 {
-		return 0, errLogFull
-	}
-	full := int64(len(b)) > c.n
-	if full {
-		b = b[:c.n]
-	}
-	n, err := c.w.Write(b)
-	c.n -= int64(n)
-	if err == nil && full {
-		err = errLogFull
-	}
-	return n, err
-}
-
-// archiveLog copies a log through copyTo into w, keeping at most max bytes
-// followed by a truncation notice.
-func archiveLog(w io.Writer, max int64, copyTo func(io.Writer) error) error {
-	err := copyTo(&capWriter{w: w, n: max})
-	if errors.Is(err, errLogFull) {
-		_, err = fmt.Fprintf(w, "\n[pitlane] log truncated at %d MB\n", max>>20)
-	}
-	return err
-}
-
-// jobStart is when a runner's job started, for its time limit: GitHub's
-// assignment time, since the JobStarted message can arrive tens of seconds
-// later. A zero, future or impossible time (before the runner existed, e.g.
-// a skewed clock) falls back to now.
-func jobStart(assigned, runnerCreated, now time.Time) time.Time {
-	if assigned.IsZero() || assigned.After(now) || assigned.Before(runnerCreated) {
-		return now
-	}
-	return assigned
-}
-
-// timedOut reports whether a runner's job ran longer than limit (0 = no limit).
-func timedOut(r *runner, limit time.Duration, now time.Time) bool {
-	return limit > 0 && r.busy && !r.exited && !r.killed && !r.busySince.IsZero() && now.Sub(r.busySince) > limit
-}
-
-// timeoutStopGrace is how long a runner over its time limit has, after
-// SIGTERM, to cancel its job and report it before it is killed.
-const timeoutStopGrace = 30 * time.Second
-
-// enforceTimeouts stops the runners whose job exceeded the target's
-// max_job_minutes. The runner's watch then goes through finishRunner as for
-// any other exit (logs archived, slot cleaned and released).
-func (m *Manager) enforceTimeouts() {
-	m.mu.Lock()
-	ts := make([]*target, 0, len(m.targets))
-	for _, t := range m.targets {
-		ts = append(ts, t)
-	}
-	m.mu.Unlock()
-	now := time.Now()
-	for _, t := range ts {
-		t.mu.Lock()
-		limit := time.Duration(t.t.MaxJobMinutes) * time.Minute
-		var kill []*runner
-		for _, r := range t.runners {
-			if timedOut(r, limit, now) {
-				r.killed = true
-				kill = append(kill, r)
-			}
-		}
-		t.mu.Unlock()
-		for _, r := range kill {
-			t.log.Warn("job exceeded the time limit, stopping its runner", "runner", r.name, "job", r.jobName, "limit", limit)
-			// In the background: a graceful stop blocks up to its grace period.
-			go func(t *target, r *runner) {
-				ctx, cancel := context.WithTimeout(context.Background(), timeoutStopGrace+time.Minute)
-				defer cancel()
-				if err := m.pool.StopRunner(ctx, r.containerID, timeoutStopGrace); err != nil {
-					t.log.Error("stop runner", "runner", r.name, "error", err)
-					t.mu.Lock()
-					r.killed = false // retried at the next check
-					t.mu.Unlock()
-				}
-			}(t, r)
-		}
-	}
-}
-
-// ------------------------------------------------------------------ scaler
-
-type scaler struct {
-	t       *target
-	session jobSession
-}
-
-func unix(ts time.Time) int64 {
-	if ts.IsZero() || ts.Year() < 2000 {
-		return 0
-	}
-	return ts.Unix()
-}
-
-func shortRef(ref string) string {
-	// "owner/repo/.github/workflows/ci.yml@refs/heads/main" -> "ci.yml"
-	if i := strings.Index(ref, "@"); i >= 0 {
-		ref = ref[:i]
-	}
-	return filepath.Base(ref)
-}
-
-func (s *scaler) job(b scaleset.JobMessageBase) store.Job {
-	cfg := s.t.cfg()
-	queued := unix(b.QueueTime)
-	if queued == 0 {
-		// Not every message carries queueTime; the scale set assignment is
-		// the closest real date.
-		queued = unix(b.ScaleSetAssignTime)
-	}
-	return store.Job{TargetID: cfg.ID, JobID: b.JobID, RunID: b.WorkflowRunID, Owner: b.OwnerName, Repo: b.RepositoryName,
-		WorkflowRef: shortRef(b.JobWorkflowRef), WorkflowFullRef: b.JobWorkflowRef, JobName: b.JobDisplayName, Event: b.EventName, Slot: -1, QueuedAt: queued}
-}
-
-// upsertJob records a job in the history; a failure only affects the UI and
-// the lost-job detection after a restart, so it is logged.
-func (s *scaler) upsertJob(j store.Job) {
-	if err := s.t.m.store.UpsertJob(j); err != nil {
-		s.t.log.Warn("record job", "job", j.JobID, "error", err)
-	}
-}
-
-// keyOf names a job for the memory prediction.
-func keyOf(j store.Job) jobKey {
-	return jobKey{owner: j.Owner, repo: j.Repo, workflow: j.WorkflowRef, job: j.JobName}
-}
-
-// pendingJob returns the pending entry of a job that just started, or a
-// fresh prediction when it was never seen pending (assigned before a
-// restart).
-func (s *scaler) pendingJob(ctx context.Context, j store.Job) pendingJob {
-	s.t.mu.Lock()
-	pj, ok := s.t.pending[j.JobID]
-	s.t.mu.Unlock()
-	if ok {
-		return pj
-	}
-	k := keyOf(j)
-	pred, _ := s.t.m.predict.predict(ctx, k)
-	return pendingJob{key: k, predicted: pred, at: time.Now()}
-}
-
-// pendingPredictions prunes the pending jobs older than pendingTTL and
-// returns the predictions of the others, heaviest first. Callers hold t.mu.
-func pendingPredictions(pending map[string]pendingJob, now time.Time) []int64 {
-	out := make([]int64, 0, len(pending))
-	for id, pj := range pending {
-		if now.Sub(pj.at) > pendingTTL {
-			delete(pending, id)
-			continue
-		}
-		out = append(out, pj.predicted)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
-	return out
-}
-
-// logTimestamps shows what GitHub sent for each job message, to see which
-// timestamps are missing.
-func (s *scaler) logTimestamps(msg *scaleset.RunnerScaleSetMessage) {
-	log := func(kind string, b scaleset.JobMessageBase) {
-		s.t.log.Debug("job message", "type", kind, "job", b.JobID, "queue", unix(b.QueueTime), "scaleSetAssign", unix(b.ScaleSetAssignTime),
-			"runnerAssign", unix(b.RunnerAssignTime), "finish", unix(b.FinishTime))
-	}
-	for _, j := range msg.JobAvailableMessages {
-		log("available", j.JobMessageBase)
-	}
-	for _, j := range msg.JobAssignedMessages {
-		if j != nil {
-			log("assigned", j.JobMessageBase)
-		}
-	}
-	for _, j := range msg.JobStartedMessages {
-		log("started", j.JobMessageBase)
-	}
-	for _, j := range msg.JobCompletedMessages {
-		log("completed", j.JobMessageBase)
-	}
-}
-
-// queueLookupRetry is how long to wait before asking GitHub again for a job
-// it does not list with its runner yet.
-var queueLookupRetry = 3 * time.Second
-
-// fetchQueueTime records the queue time of a job that started without one.
-// A warm runner can take a job that never produced a JobAvailable message,
-// and GitHub does not always put queueTime in JobStarted; the REST API knows
-// when the job was created. On failure the assignment time recorded earlier
-// stays, which is only an upper bound.
-func (s *scaler) fetchQueueTime(job store.Job) {
-	lookup := s.t.m.JobQueuedAt
-	if lookup == nil || job.RunID == 0 || job.RunnerName == "" {
-		return
-	}
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(queueLookupRetry)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		var at time.Time
-		at, err = lookup(ctx, s.t.cfg(), job.Owner, job.Repo, job.RunID, job.RunnerName)
-		cancel()
-		if err == nil {
-			if q := unix(at); q != 0 {
-				s.upsertJob(store.Job{TargetID: job.TargetID, JobID: job.JobID, Slot: -1, QueuedAt: q})
-			}
-			return
-		}
-	}
-	s.t.log.Debug("queue time lookup failed", "job", job.JobID, "error", err)
-}
-
-func (s *scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
-	if msg == nil {
-		s.t.reconcile()
-		return nil
-	}
-	s.logTimestamps(msg)
-	for _, j := range msg.JobAssignedMessages {
-		// Only a dated assignment is worth a row: an undated one would never
-		// be pruned, and the job is recorded when it starts anyway.
-		if j == nil {
-			continue
-		}
-		if job := s.job(j.JobMessageBase); job.QueuedAt != 0 {
-			s.upsertJob(job)
-		}
-	}
-	if len(msg.JobAvailableMessages) > 0 {
-		ids := make([]int64, 0, len(msg.JobAvailableMessages))
-		for _, j := range msg.JobAvailableMessages {
-			ids = append(ids, j.RunnerRequestID)
-			job := s.job(j.JobMessageBase)
-			if job.QueuedAt == 0 {
-				// GitHub did not say when the job was queued: it was just
-				// now, near enough (the history and its pruning need a date).
-				job.QueuedAt = time.Now().Unix()
-			}
-			s.upsertJob(job)
-			key := keyOf(job)
-			pred, source := s.t.m.predict.predict(ctx, key)
-			s.t.log.Debug("job memory predicted", "job", job.JobName, "repo", job.Repo, "bytes", pred, "from", source)
-			s.t.mu.Lock()
-			s.t.pending[job.JobID] = pendingJob{key: key, predicted: pred, at: time.Now()}
-			s.t.mu.Unlock()
-		}
-		if err := s.session.acquireJobs(ctx, ids); err != nil {
-			return fmt.Errorf("acquire jobs: %w", err)
-		}
-	}
-	for _, j := range msg.JobStartedMessages {
-		job := s.job(j.JobMessageBase)
-		job.RunnerName = j.RunnerName
-		job.StartedAt = unix(j.RunnerAssignTime)
-		if job.StartedAt == 0 {
-			job.StartedAt = time.Now().Unix()
-		}
-		// QueuedAt stays 0 when unknown: the store keeps the queue time
-		// recorded earlier, and a made-up one would fake a wait of 0.
-		pj := s.pendingJob(ctx, job)
-		s.t.mu.Lock()
-		delete(s.t.pending, j.JobID)
-		refine := -1
-		if r, ok := s.t.runners[j.RunnerName]; ok {
-			if !r.busy && r.predicted != pj.predicted {
-				// The job is known now: reserve what it needs, not what
-				// the heaviest pending job needed.
-				r.predicted, refine = pj.predicted, r.lease.Slot
-			}
-			if !r.busy || r.busySince.IsZero() {
-				r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, time.Now())
-			}
-			if !r.busy {
-				r.meter.Begin() // usage counts from the job's start, not the warm runner's
-			}
-			r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
-			job.Slot = r.lease.Slot
-		}
-		if l, ok := s.t.lost[j.JobID]; ok && l.runner != j.RunnerName {
-			delete(s.t.lost, j.JobID) // started again elsewhere: it needs a runner
-		}
-		s.t.mu.Unlock()
-		if refine >= 0 {
-			s.t.m.pool.SetPrediction(refine, pj.predicted)
-		}
-		s.upsertJob(job)
-		if j.QueueTime.IsZero() {
-			go s.fetchQueueTime(job)
-		}
-	}
-	for _, j := range msg.JobCompletedMessages {
-		job := s.job(j.JobMessageBase)
-		job.RunnerName = j.RunnerName
-		job.Result = j.Result
-		job.FinishedAt = unix(j.FinishTime)
-		if job.FinishedAt == 0 {
-			job.FinishedAt = time.Now().Unix()
-		}
-		if job.Result == "" {
-			job.Result = "canceled"
-		}
-		s.t.mu.Lock()
-		delete(s.t.pending, j.JobID)
-		delete(s.t.lost, j.JobID)
-		if r, ok := s.t.runners[j.RunnerName]; ok && r.jobID == j.JobID {
-			r.jobID = ""
-		}
-		s.t.mu.Unlock()
-		s.upsertJob(job)
-	}
-	if msg.Statistics != nil {
-		s.t.mu.Lock()
-		s.t.desired = msg.Statistics.TotalAssignedJobs
-		s.t.mu.Unlock()
-	}
-	s.t.m.changed()
-	s.t.reconcile()
-	return nil
 }

@@ -2,6 +2,8 @@ package scaler
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/TuroYT/pitlane/internal/gh"
@@ -19,13 +21,17 @@ const (
 	// A runner younger than this may still be starting (registered, container
 	// not created yet): never touched.
 	orphanGrace = 15 * time.Minute
+	// orphanMinGap skips a cleanup that follows the previous one too
+	// closely (a listener restarting in a loop runs one at every start).
+	orphanMinGap = time.Minute
+	// orphanCleanupTimeout bounds the Docker and GitHub calls of a cleanup.
+	orphanCleanupTimeout = 2 * time.Minute
 )
 
 type orphanAction int
 
 const (
 	orphanKeep   orphanAction = iota // leave it alone
-	orphanForget                     // already gone from GitHub: drop the record
 	orphanVerify                     // not in the REST list: ask the scale set API
 	orphanRemove                     // offline, idle, no container: deregister
 )
@@ -54,14 +60,10 @@ func (m *Manager) forgetRunner(id int64, err error) {
 	}
 }
 
+// cleanupOrphansAll runs the orphan cleanup of every target (every
+// orphanInterval).
 func (m *Manager) cleanupOrphansAll() {
-	m.mu.Lock()
-	ts := make([]*target, 0, len(m.targets))
-	for _, t := range m.targets {
-		ts = append(ts, t)
-	}
-	m.mu.Unlock()
-	for _, t := range ts {
+	for _, t := range m.liveTargets() {
 		t.cleanupOrphans()
 	}
 }
@@ -72,16 +74,13 @@ func (m *Manager) cleanupOrphansAll() {
 func (t *target) cleanupOrphans() {
 	t.orphanMu.Lock()
 	defer t.orphanMu.Unlock()
-	if time.Since(t.orphanAt) < time.Minute { // listener restarts in a loop
+	if time.Since(t.orphanAt) < orphanMinGap {
 		return
 	}
 	t.orphanAt = time.Now()
 	t.mu.Lock()
 	client, cfg := t.client, t.t
-	known := map[string]bool{}
-	for name := range t.runners {
-		known[name] = true
-	}
+	known := slices.Collect(maps.Keys(t.runners))
 	t.mu.Unlock()
 	if client == nil || t.m.ListRunners == nil {
 		return
@@ -90,43 +89,57 @@ func (t *target) cleanupOrphans() {
 	if err != nil || len(recs) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(t.ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(t.ctx, orphanCleanupTimeout)
 	defer cancel()
+	live, remote, ok := t.runnerViews(ctx, cfg, known)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	for _, r := range recs {
+		t.resolveOrphan(ctx, client, r, orphanDecision(r, now, live, remote))
+	}
+}
+
+// runnerViews returns the runners that have a container (live, including
+// known, the target's own) and GitHub's runners by ID. It reports false,
+// after logging why, when either cannot be listed.
+func (t *target) runnerViews(ctx context.Context, cfg store.Target, known []string) (map[string]bool, map[int64]gh.Runner, bool) {
 	live, err := t.m.pool.RunnerNames(ctx)
 	if err != nil {
 		t.log.Warn("orphan runners: cannot list containers", "error", err)
-		return
+		return nil, nil, false
 	}
-	for name := range known {
+	for _, name := range known {
 		live[name] = true
 	}
 	list, err := t.m.ListRunners(ctx, cfg)
 	if err != nil {
 		t.log.Warn("orphan runners: cannot list GitHub runners", "error", err)
-		return
+		return nil, nil, false
 	}
-	remote := map[int64]gh.Runner{}
+	remote := make(map[int64]gh.Runner, len(list))
 	for _, g := range list {
 		remote[g.ID] = g
 	}
-	now := time.Now()
-	for _, r := range recs {
-		switch orphanDecision(r, now, live, remote) {
-		case orphanVerify:
-			err := client.getRunner(ctx, r.ID)
-			if isNotFound(err) {
-				_ = t.m.store.DeleteRunner(r.ID)
-				t.forgetLostRunner(r.Name)
-			}
-		case orphanRemove:
-			err := client.removeRunner(ctx, r.ID)
-			if err != nil && !isNotFound(err) {
-				t.log.Warn("remove orphan runner", "runner", r.Name, "id", r.ID, "error", err)
-				continue
-			}
-			t.log.Info("removed orphan runner from GitHub", "runner", r.Name, "id", r.ID)
+	return live, remote, true
+}
+
+// resolveOrphan applies an orphanDecision to a recorded runner.
+func (t *target) resolveOrphan(ctx context.Context, client scaleSetAPI, r store.RegisteredRunner, action orphanAction) {
+	switch action {
+	case orphanVerify:
+		if isNotFound(client.getRunner(ctx, r.ID)) {
 			_ = t.m.store.DeleteRunner(r.ID)
-			t.forgetLostRunner(r.Name) // GitHub reports it idle: its job is over
+			t.forgetLostRunner(r.Name)
 		}
+	case orphanRemove:
+		if err := client.removeRunner(ctx, r.ID); err != nil && !isNotFound(err) {
+			t.log.Warn("remove orphan runner", "runner", r.Name, "id", r.ID, "error", err)
+			return
+		}
+		t.log.Info("removed orphan runner from GitHub", "runner", r.Name, "id", r.ID)
+		_ = t.m.store.DeleteRunner(r.ID)
+		t.forgetLostRunner(r.Name) // GitHub reports it idle: its job is over
 	}
 }

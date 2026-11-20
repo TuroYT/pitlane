@@ -11,8 +11,7 @@ import (
 
 func TestRecordUsage(t *testing.T) {
 	h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4}, 0)
-	usageRetry = 10 * time.Millisecond
-	t.Cleanup(func() { usageRetry = 15 * time.Second })
+	h.m.usageRetry = 10 * time.Millisecond
 	u := pool.JobUsage{Wall: 4 * time.Second,
 		Runner: pool.CgroupUsage{MemPeak: 100, CPUUsec: 2_000_000, CPUSomeUsec: 400_000, IOFullUsec: -1, MemFullUsec: 0, AnonPeak: -1},
 		Slot:   pool.CgroupUsage{MemPeak: -1, CPUUsec: -1, CPUSomeUsec: -1, IOFullUsec: -1, MemFullUsec: -1, AnonPeak: -1}}

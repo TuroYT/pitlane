@@ -300,3 +300,64 @@ func TestStartUntrackedRunnerStopFails(t *testing.T) {
 		t.Fatalf("released as %+v", l)
 	}
 }
+
+// TestStartHandsOverBeforeWatching covers a runner adopted at startup whose
+// container exits at once: its watch finishes it while the target is being
+// filled, so the target must be complete before any watch starts (the race
+// detector catches the opposite).
+func TestStartHandsOverBeforeWatching(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	tg, err := st.CreateTarget(store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().Add(-10 * time.Minute)
+	p := newFakePool(0)
+	p.orphans = []pool.Orphan{
+		{ID: "c-gone", Name: "pitlane-gone", Slot: 0, TargetID: tg.ID, Owner: "acme", Running: true, Created: created},
+		{ID: "c-live", Name: "pitlane-live", Slot: 1, TargetID: tg.ID, Owner: "acme", Running: true, Created: created},
+	}
+	p.exit("c-gone") // its Wait returns at once
+	// A job on the runner that exits, one on a runner gone before startup
+	// (in-flight jobs only count on runners still registered).
+	_ = st.AddRunner(store.RegisteredRunner{ID: 21, TargetID: tg.ID, Name: "pitlane-gone"})
+	_ = st.AddRunner(store.RegisteredRunner{ID: 22, TargetID: tg.ID, Name: "pitlane-vanished"})
+	_ = st.UpsertJob(store.Job{TargetID: tg.ID, JobID: "unfinished", RunnerName: "pitlane-gone", Slot: 0, StartedAt: created.Unix()})
+	_ = st.UpsertJob(store.Job{TargetID: tg.ID, JobID: "stale", RunnerName: "pitlane-vanished", Slot: -1, StartedAt: created.Unix()})
+	api := newFakeAPI()
+	m := New(st, p, t.TempDir(), func() Credentials { return Credentials{PAT: "x"} }, func() {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.connect = func(Credentials, store.Target, string) (scaleSetAPI, error) { return api, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+
+	waitFor(t, "exited runner released", func() bool { return len(p.snapshot().released) == 1 })
+	if l := p.snapshot().released[0]; l.Slot != 0 || l.Runner != "pitlane-gone" {
+		t.Fatalf("released %+v, want the exited runner's lease", l)
+	}
+	m.mu.Lock()
+	target := m.targets[tg.ID]
+	m.mu.Unlock()
+	if target == nil {
+		t.Fatal("target not started")
+	}
+	waitFor(t, "exited runner forgotten", func() bool { return target.runnerCount() == 1 })
+	target.mu.Lock()
+	defer target.mu.Unlock()
+	if target.runners["pitlane-live"] == nil {
+		t.Fatal("live adopted runner not kept")
+	}
+	for _, job := range []string{"unfinished", "stale"} {
+		if _, ok := target.lost[job]; !ok {
+			t.Errorf("job %q not kept as lost: %+v", job, target.lost)
+		}
+	}
+}
