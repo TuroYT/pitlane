@@ -32,6 +32,7 @@ type flow struct {
 
 	mu       sync.Mutex
 	status   int               // releases status override (0: 200)
+	runnerSt int               // same for the runner releases
 	releases []Release         // served for Repo
 	files    map[string][]byte // served under /dl/
 	smoke    string            // output of the new binary's "version"
@@ -71,6 +72,10 @@ func newFlow(t *testing.T) *flow {
 			}
 			_ = json.NewEncoder(w).Encode(f.releases)
 		case strings.Contains(r.URL.Path, "/repos/"+RunnerRepo+"/"):
+			if f.runnerSt != 0 {
+				w.WriteHeader(f.runnerSt)
+				return
+			}
 			_ = json.NewEncoder(w).Encode([]Release{})
 		default:
 			http.NotFound(w, r)
@@ -927,5 +932,27 @@ func TestTickAutoPull(t *testing.T) {
 	f.u.tick(ctx)
 	if f.u.State().Pitlane.CheckError == "" {
 		t.Error("no check after CheckEvery")
+	}
+}
+
+// The runner releases and the Pitlane releases fail independently.
+func TestCheckRunnerReleasesFailure(t *testing.T) {
+	t.Parallel()
+	f := newFlow(t)
+	f.mu.Lock()
+	f.runnerSt = http.StatusBadGateway
+	f.mu.Unlock()
+	var buf bytes.Buffer
+	f.u.Log = newBufLogger(&buf)
+	f.u.Check(context.Background())
+	s := f.u.State()
+	if s.Pitlane.CheckError != "" || s.Pitlane.Latest != "v0.2.1" {
+		t.Errorf("Pitlane state affected by the runner repository: %+v", s.Pitlane)
+	}
+	if !strings.Contains(s.Runner.CheckError, "HTTP 502") || s.Runner.Status != RunnerUnknown {
+		t.Errorf("runner state %+v", s.Runner)
+	}
+	if !strings.Contains(buf.String(), "update check: runner releases") {
+		t.Errorf("failure not logged: %s", buf.String())
 	}
 }
