@@ -8,7 +8,7 @@
   acquires the jobs and starts N runners. This is the same API that GitHub's
   Kubernetes controller (ARC) uses, so no webhook or public endpoint is needed.
 - **Slots.** A slot is a long-lived `docker:dind` container with its own Docker
-  data volume. It stays up between jobs, so images, layers and the buildx cache
+  data volume. It stays up between jobs, so images, layers and the build cache
   are already there when the next job starts. There are as many slots as
   parallel jobs. The slot daemon pulls up to 8 image layers at once (Docker's
   default is 3).
@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | Job pickup | queue + VM boot | seconds (instant with warm runners) |
 | `services:` images (postgres, redis…) | pulled every job | already in the slot |
-| `docker build` | cold, unless you wire a remote cache | incremental, local buildx cache |
+| `docker build` | cold, unless you wire a remote cache | incremental, local build cache (see [Caches](#caches)) |
 | `npm ci` / `pnpm i` / `pip` / Go modules | download, or restore `actions/cache` from blob storage | local disk cache (`~/.cache` volume) |
 | `actions/cache`, `setup-*` with `cache:` | Azure blob storage | the Pitlane host's disk |
 | `setup-node` / `setup-python` / … | download toolchain | shared `/opt/hostedtoolcache` |
@@ -150,13 +150,26 @@ jobs take any slot, cheapest wipe first).
 
 | Cache | Scope | Location |
 | --- | --- | --- |
-| Docker images, layers, buildx cache | per slot | `pitlane-slot-N-docker` volume |
+| Docker images, layers, build cache | per slot | `pitlane-slot-N-docker` volume |
 | Toolchains (`setup-*` actions) | per owner (or global) | `pitlane-toolcache-<owner>` volume → `/opt/hostedtoolcache` |
 | npm, yarn, bun, pip, Go modules | per owner (or global) | `pitlane-cache-<owner>` volume → `/home/runner/.cache` |
 | pnpm store | per owner (or global), hardlinked into each slot | `pitlane-cache-<owner>.pnpm` volume (never mounted) ↔ `_work/.pnpm-store` in `pitlane-slot-N-work` |
 | `actions/cache` entries | per repository and branch, within one owner (strict jobs: GitHub's cache) | `<data dir>/actions-cache` |
 | Docker Hub mirror | global | `pitlane-mirror-data` volume |
 | Downloaded actions | per slot (wiped when the slot changes owner) | `_work/_actions` in `pitlane-slot-N-work` |
+
+`docker build` with the default `docker` driver uses the slot daemon's own
+BuildKit, so its cache stays in the slot (up to the build cache size kept per
+slot). `docker/setup-buildx-action` creates a builder of the
+`docker-container` driver instead: BuildKit runs in a container with its own
+state volume. The action removes the builder and its volume at the end of the
+job unless you set `keep-state: true` (or `cleanup: false`). After each job
+Pitlane removes the container but keeps the volume when the builder has a
+fixed `name:`, so the next job on the same slot that creates a builder with
+that name finds its cache. A builder without a name gets a random one
+(`builder-<uuid>`) and its volume is removed after the job. When free disk
+space runs low, these kept volumes are the first thing removed. Strict jobs
+and slot wipes remove them with the rest of the slot.
 
 pnpm only hardlinks packages into `node_modules` from a store on the same
 mount as the workspace, so each slot keeps its store in its work volume. After
@@ -197,7 +210,10 @@ are evicted first.
   keep it (workflows shared with GitHub-hosted runners), it is served from the
   Pitlane host, so it costs seconds instead of the 30–60 s of an upload to GitHub.
 - Prefer `docker buildx build` without `cache-from: type=gha`: the slot's local
-  build cache is faster.
+  build cache is faster. It is kept between jobs with the default `docker`
+  driver, or with `docker/setup-buildx-action` when you give the builder a
+  fixed `name:` and set `keep-state: true`; otherwise the builder starts cold
+  on every job.
 - With pnpm, keep the default store location (do not set `store-dir`) and do
   not cache it with `actions/cache` / `cache: pnpm`: Pitlane points
   `npm_config_store_dir` at the shared, hardlinked store.

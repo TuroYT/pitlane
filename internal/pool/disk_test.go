@@ -27,7 +27,10 @@ func (f *fakeDisk) freeBytes() (int64, error) { return f.free, f.freeErr }
 
 func (f *fakeDisk) execSlot(_ context.Context, slot int, script string) error {
 	what := "image"
-	if strings.Contains(script, "builder prune") {
+	switch {
+	case strings.Contains(script, "buildx_buildkit_"):
+		what = "buildx"
+	case strings.Contains(script, "builder prune"):
 		what = "build"
 	}
 	key := fmt.Sprintf("%d/%s", slot, what)
@@ -76,7 +79,7 @@ func TestReclaimDiskOrderAndStopsWhenAbove(t *testing.T) {
 	f.freed["1/image"] = 5 * gib
 	f.vols = []volInfo{{Name: "pitlane-cache-acme", Size: 50 * gib}}
 	n := p.reclaimDisk(context.Background(), 20*gib, f)
-	want := []string{"1/build", "2/build", "1/image"}
+	want := []string{"1/buildx", "2/buildx", "1/build", "2/build", "1/image"}
 	if strings.Join(f.calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
@@ -92,6 +95,23 @@ func TestReclaimDiskOrderAndStopsWhenAbove(t *testing.T) {
 		if got := p.slots[i].Status; got != want {
 			t.Errorf("slot %d status %q, want %q", i, got, want)
 		}
+	}
+}
+
+// The BuildKit state kept for named buildx builders is the first thing
+// reclaimed: it has no size limit of its own.
+func TestReclaimDiskRemovesBuildkitStateFirst(t *testing.T) {
+	p := newTestPool("owner", SlotState{Index: 0, Status: "ready"})
+	f := newFake(p, 10*gib)
+	f.freed["0/buildx"] = 15 * gib
+	if n := p.reclaimDisk(context.Background(), 20*gib, f); n != 15*gib {
+		t.Fatalf("freed %d", n)
+	}
+	if got := strings.Join(f.calls, ","); got != "0/buildx" {
+		t.Fatalf("calls %v, want only the buildx state", f.calls)
+	}
+	if slotPrunes[0].script != removeBuildkitStateScript {
+		t.Fatalf("first slot prune is %q", slotPrunes[0].what)
 	}
 }
 
@@ -189,7 +209,7 @@ func TestReclaimDiskSlotPruneFailureGoesOn(t *testing.T) {
 	f := &failingDisk{fakeDisk: newFake(p, 10*gib), failSlot: 0}
 	f.freed["1/build"] = 15 * gib
 	n := p.reclaimDisk(context.Background(), 20*gib, f)
-	if n != 15*gib || strings.Join(f.calls, ",") != "0/build,1/build" {
+	if n != 15*gib || strings.Join(f.calls, ",") != "0/buildx,1/buildx,0/build,1/build" {
 		t.Fatalf("freed %d, calls %v", n, f.calls)
 	}
 	if p.slots[0].Status != "ready" {
@@ -296,7 +316,7 @@ func TestReclaimDiskStopsWhenSpaceBecomesUnknown(t *testing.T) {
 	f := &flakyFree{fakeDisk: newFake(p, 1*gib)}
 	f.vols = []volInfo{{Name: "pitlane-cache-big", Size: 10 * gib}}
 	p.reclaimDisk(context.Background(), 20*gib, f)
-	if got := strings.Join(f.calls, ","); got != "0/build" {
+	if got := strings.Join(f.calls, ","); got != "0/buildx" {
 		t.Fatalf("calls %v: pruning must stop once the free space is unknown", f.calls)
 	}
 }

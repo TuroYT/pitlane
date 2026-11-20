@@ -137,7 +137,9 @@ func strictVolumes(runner string) (cache, tools string) {
 }
 
 // releaseStrict wipes everything a strict job could have touched: the slot
-// is rebuilt from the host side, its throwaway caches removed. On any
+// is rebuilt from the host side, its throwaway caches removed. The wipe
+// drops the slot's Docker volume, so the BuildKit state volumes that
+// releaseScript keeps for named buildx builders go with it. On any
 // failure it stays dirty and is rebuilt rather than reused.
 func (p *Pool) releaseStrict(ctx context.Context, l Lease) {
 	p.unreserve(l.Slot)
@@ -205,18 +207,19 @@ func clearDir(dir string, keep ...string) string {
 }
 
 // releaseScript cleans what a job left in its slot while keeping the owner's
-// caches (images, build cache, actions, pnpm store). The daemon prunes are
-// best effort; the script fails when the workspace cannot be emptied or a
-// container of the job survives, and the slot is then never reused as is.
+// caches (images, build cache, BuildKit state of named buildx builders,
+// actions, pnpm store). The daemon prunes are best effort; the script fails
+// when the workspace cannot be emptied or a container of the job survives,
+// and the slot is then never reused as is.
 func releaseScript(keepBuildGB int) string {
 	return fmt.Sprintf(`docker ps -aq | xargs -r docker rm -f >/dev/null 2>&1
 docker network prune -f >/dev/null 2>&1
-docker volume prune -af >/dev/null 2>&1
+%s
 docker image prune -f >/dev/null 2>&1
 docker builder prune -f --keep-storage %dgb >/dev/null 2>&1
 %s &&
 chown %s %s &&
-left=$(docker ps -aq) && test -z "$left"`, keepBuildGB, clearDir(workDir, "_actions", pnpmStoreDir), runnerUID, workDir)
+left=$(docker ps -aq) && test -z "$left"`, removeVolumesScript, keepBuildGB, clearDir(workDir, "_actions", pnpmStoreDir), runnerUID, workDir)
 }
 
 // Release cleans what the job left in the slot (containers, networks,
