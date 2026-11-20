@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -113,16 +111,7 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 	ctx := context.Background()
 	// Before the slot cleanup, which is not part of the job.
 	m.recordUsage(r.name, r.meter.Stop())
-	if f, err := os.OpenFile(m.LogFile(r.name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-		if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
-			m.log.Warn("archive runner log", "runner", r.name, "error", err)
-		}
-		if err := f.Close(); err != nil {
-			m.log.Warn("archive runner log", "runner", r.name, "error", err)
-		}
-	} else {
-		m.log.Warn("archive runner log", "runner", r.name, "error", err)
-	}
+	m.archiveRunnerLog(ctx, r)
 	m.pool.Remove(ctx, r.containerID)
 	if t != nil {
 		t.runnerGone(r)

@@ -7,9 +7,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -17,7 +18,20 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
+// Periods of the manager's loop.
+const (
+	// reconcileInterval also catches demand the pool's release signal and
+	// the listener did not report.
+	reconcileInterval    = 3 * time.Second
+	housekeepingInterval = time.Hour
+	// timeoutCheckInterval is short: the check reads memory only.
+	timeoutCheckInterval = 10 * time.Second
+)
+
 // Manager runs one listener per target.
+//
+// Lock order: m.mu before t.mu. Neither is held across GitHub or Docker
+// calls.
 type Manager struct {
 	Version string
 	// ListRunners lists a target's self-hosted runners through the REST API
@@ -40,14 +54,21 @@ type Manager struct {
 	logDir  string
 	creds   func() Credentials
 	changed func()
+	// usageRetry and queueLookupRetry are the waits of recordUsage and
+	// fetchQueueTime before they ask again (shortened by tests).
+	usageRetry       time.Duration
+	queueLookupRetry time.Duration
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// targets are the running listeners, by target ID. Guarded by mu.
 	targets map[int64]*target
+	// adopted and lost are found at startup and handed to each target's
+	// listener by Sync. Guarded by mu.
 	adopted map[int64][]*runner
-	lost    map[int64]map[string]lostJob // found at startup, handed to targets by Sync
+	lost    map[int64]map[string]lostJob
 	// ctx is set by Start; until then Sync does nothing (the UI is served
 	// while slots start, and runners left by a previous run are not adopted
-	// yet).
+	// yet). Guarded by mu.
 	ctx context.Context
 }
 
@@ -56,54 +77,23 @@ func New(st *store.Store, p Pool, dataDir string, creds func() Credentials, chan
 	logDir := filepath.Join(dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
 	return &Manager{store: st, pool: p, connect: newScaleSetAPI, log: log, logDir: logDir, creds: creds, changed: changed,
-		predict: newPredictor(st.MemoryHistory),
+		predict:    newPredictor(st.MemoryHistory),
+		usageRetry: defaultUsageRetry, queueLookupRetry: defaultQueueLookupRetry,
 		targets: map[int64]*target{}, adopted: map[int64][]*runner{}, lost: map[int64]map[string]lostJob{}}
 }
 
 // Start adopts runners left by a previous process and starts every enabled target.
 func (m *Manager) Start(ctx context.Context) error {
-	orphans, err := m.pool.RunnerContainers(ctx)
+	containers, err := m.pool.RunnerContainers(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("list runner containers: %w", err)
 	}
 	targets, err := m.store.Targets()
 	if err != nil {
 		return fmt.Errorf("load targets: %w", err)
 	}
-	enabled := map[int64]bool{}
-	for _, t := range targets {
-		enabled[t.ID] = t.Enabled
-	}
-	running := map[string]*runner{}
-	for _, o := range orphans {
-		// Assume busy since the container was created: the job timeout then
-		// still applies after a restart.
-		// The lease comes from the container's labels: a strict runner is
-		// released (slot rebuilt, throwaway caches removed) as strict.
-		r := &runner{name: o.Name, containerID: o.ID, lease: o.Lease(), busy: true, startedAt: time.Now(), busySince: o.Created}
-		if o.Created.Year() < 2000 {
-			r.busySince = time.Now()
-		}
-		r.runnerID = m.store.RunnerIDByName(o.Name)
-		if o.Untrusted || !enabled[o.TargetID] {
-			// No listener would ever watch it: stop it now. Its owner cannot
-			// be trusted, so its slot is rebuilt.
-			r.lease = untrustedLease(r.lease)
-			m.log.Warn("runner container from a previous run has no known enabled target, stopping it",
-				"container", o.Name, "id", o.ID, "target", o.TargetID, "slot", o.Slot, "running", o.Running)
-			go m.stopUntracked(r, o.Running)
-			continue
-		}
-		if !o.Running {
-			go m.finishRunner(nil, r)
-			continue
-		}
-		m.log.Info("adopting runner from previous run", "runner", o.Name, "slot", o.Slot, "strict", o.Strict)
-		m.mu.Lock()
-		m.adopted[o.TargetID] = append(m.adopted[o.TargetID], r)
-		m.mu.Unlock()
-		running[o.Name] = r
-	}
+	enabled, _ := enabledTargets(targets)
+	running := m.adoptContainers(containers, enabled)
 	m.findLostJobs(ctx, running)
 	// Only now may Sync start listeners: adopted runners and lost jobs are
 	// known, so they are handed to their target.
@@ -116,12 +106,26 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// enabledTargets returns the enabled targets by ID, and whether one of them
+// is strict.
+func enabledTargets(targets []store.Target) (map[int64]store.Target, bool) {
+	enabled := map[int64]store.Target{}
+	strict := false
+	for _, t := range targets {
+		if t.Enabled {
+			enabled[t.ID] = t
+			strict = strict || t.Strict
+		}
+	}
+	return enabled, strict
+}
+
 func (m *Manager) loop(ctx context.Context) {
-	tick := time.NewTicker(3 * time.Second)
+	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
-	clean := time.NewTicker(time.Hour)
+	clean := time.NewTicker(housekeepingInterval)
 	defer clean.Stop()
-	timeouts := time.NewTicker(10 * time.Second) // in memory only: cheap
+	timeouts := time.NewTicker(timeoutCheckInterval)
 	defer timeouts.Stop()
 	orphans := time.NewTicker(orphanInterval)
 	defer orphans.Stop()
@@ -144,84 +148,20 @@ func (m *Manager) loop(ctx context.Context) {
 	}
 }
 
-func (m *Manager) reconcileAll() {
+// liveTargets returns the running targets, to work on them without holding
+// m.mu.
+func (m *Manager) liveTargets() []*target {
 	m.mu.Lock()
-	ts := make([]*target, 0, len(m.targets))
-	for _, t := range m.targets {
-		ts = append(ts, t)
-	}
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	return slices.Collect(maps.Values(m.targets))
+}
+
+func (m *Manager) reconcileAll() {
+	ts := m.liveTargets()
 	// Oldest demand first so a busy target cannot starve the others.
-	sort.Slice(ts, func(i, j int) bool { return ts[i].waitingSince().Before(ts[j].waitingSince()) })
+	slices.SortFunc(ts, func(a, b *target) int { return a.waitingSince().Compare(b.waitingSince()) })
 	for _, t := range ts {
 		t.reconcile()
-	}
-}
-
-func (m *Manager) housekeeping() {
-	retention := time.Duration(m.store.GetInt("history_days", 30)) * 24 * time.Hour
-	if err := m.store.PruneJobs(retention); err != nil {
-		m.log.Warn("prune job history", "error", err)
-	}
-	if err := m.store.PruneAudit(retention); err != nil {
-		m.log.Warn("prune audit log", "error", err)
-	}
-	if err := m.store.PruneSessions(); err != nil {
-		m.log.Warn("prune expired sessions", "error", err)
-	}
-	entries, _ := os.ReadDir(m.logDir)
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > retention {
-			_ = os.Remove(filepath.Join(m.logDir, e.Name()))
-		}
-	}
-}
-
-// ApplyStrictRequirement records why a target must run strict (reason, ""
-// when it need not, as GitHub just reported it) and switches it to strict if
-// needed. It reports whether the stored target changed; the caller syncs.
-func (m *Manager) ApplyStrictRequirement(t store.Target, reason string) bool {
-	if reason == t.StrictRequired && (reason == "" || t.Strict) {
-		return false
-	}
-	flipped, err := m.store.SetStrictRequirement(t.ID, reason)
-	if err != nil {
-		m.log.Error("record strict requirement", "target", t.FullName(), "reason", reason, "error", err)
-		return false
-	}
-	if flipped {
-		m.log.Warn("target switched to strict mode", "target", t.FullName(), "reason", reason)
-	}
-	return true
-}
-
-// EnforceStrictAll asks GitHub, for every target, whether it must run strict
-// (at start, then hourly) and switches the ones that must. When GitHub
-// cannot be asked, a target keeps its current mode.
-func (m *Manager) EnforceStrictAll(ctx context.Context) {
-	if m.StrictReason == nil {
-		return
-	}
-	targets, err := m.store.Targets()
-	if err != nil {
-		m.log.Error("load targets", "error", err)
-		return
-	}
-	changed := false
-	for _, t := range targets {
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		reason, err := m.StrictReason(cctx, t)
-		cancel()
-		if err != nil {
-			m.log.Warn("cannot check whether the target must run strict, its mode is left unchanged", "target", t.FullName(), "strict", t.Strict, "error", err)
-			continue
-		}
-		if m.ApplyStrictRequirement(t, reason) {
-			changed = true
-		}
-	}
-	if changed {
-		m.Sync()
 	}
 }
 
@@ -240,52 +180,54 @@ func (m *Manager) Sync() {
 		m.log.Error("load targets", "error", err)
 		return
 	}
-	want := map[int64]store.Target{}
-	strict := false
-	for _, t := range targets {
-		if t.Enabled {
-			want[t.ID] = t
-			strict = strict || t.Strict
-		}
-	}
+	want, strict := enabledTargets(targets)
 	m.pool.SetStrictDemand(strict)
 	m.mu.Lock()
+	m.syncRunningLocked(want)
+	m.startMissingLocked(want)
+	m.mu.Unlock()
+	m.changed()
+}
+
+// syncRunningLocked updates the running listeners to their stored target,
+// and stops those whose target was disabled, deleted or moved to another
+// scale set or installation. Callers hold m.mu.
+func (m *Manager) syncRunningLocked(want map[int64]store.Target) {
 	for id, t := range m.targets {
 		w, ok := want[id]
-		if !ok || w.ScaleSetName != t.cfg().ScaleSetName || w.InstallationID != t.cfg().InstallationID {
-			delete(m.targets, id)
-			if ok {
-				m.keepLostLocked(id, t)
-			}
-			go t.stop(!ok)
+		if ok && !needsNewListener(t.cfg(), w) {
+			t.update(w)
 			continue
 		}
-		t.update(w)
+		delete(m.targets, id)
+		if ok {
+			m.keepLostLocked(id, t)
+		}
+		go t.stop(!ok)
 	}
-	creds := m.creds()
+}
+
+// needsNewListener reports whether a target changed in a way its running
+// listener cannot follow.
+func needsNewListener(cur, next store.Target) bool {
+	return next.ScaleSetName != cur.ScaleSetName || next.InstallationID != cur.InstallationID
+}
+
+// startMissingLocked starts a listener for every wanted target that has
+// none, when there are credentials to start it with. Callers hold m.mu.
+func (m *Manager) startMissingLocked(want map[int64]store.Target) {
+	if !m.creds().Valid() {
+		return
+	}
 	for id, w := range want {
-		if _, ok := m.targets[id]; ok || !creds.Valid() {
+		if _, ok := m.targets[id]; ok {
 			continue
 		}
 		t := newTarget(m, w)
-		for _, r := range m.adopted[id] {
-			// Adopted after a restart: its job is unknown, reserve what the
-			// target's jobs usually need.
-			r.predicted, _ = m.predict.predict(m.ctx, jobKey{owner: w.Owner, repo: w.Repo})
-			m.pool.SetPrediction(r.lease.Slot, r.predicted)
-			t.runners[r.name] = r
-			go t.watch(r)
-		}
-		delete(m.adopted, id)
-		for jobID, l := range m.lost[id] {
-			t.lost[jobID] = l
-		}
-		delete(m.lost, id)
+		m.handOverLocked(t)
 		m.targets[id] = t
 		go t.run(m.ctx)
 	}
-	m.mu.Unlock()
-	m.changed()
 }
 
 // Restart restarts every listener (e.g. after credentials change).

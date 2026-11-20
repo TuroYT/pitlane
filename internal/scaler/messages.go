@@ -19,10 +19,14 @@ type scaler struct {
 	session jobSession
 }
 
+// plausible reports whether a timestamp from GitHub or Docker is set: they
+// report unknown times as the zero time or the Unix epoch.
+func plausible(ts time.Time) bool { return ts.Year() >= 2000 }
+
 // unix converts a message timestamp to Unix seconds, 0 when GitHub left it
 // unset.
 func unix(ts time.Time) int64 {
-	if ts.IsZero() || ts.Year() < 2000 {
+	if !plausible(ts) {
 		return 0
 	}
 	return ts.Unix()
@@ -133,9 +137,14 @@ func (s *scaler) logTimestamps(msg *scaleset.RunnerScaleSetMessage) {
 	}
 }
 
-// queueLookupRetry is how long to wait before asking GitHub again for a job
+// defaultQueueLookupRetry is how long to wait before asking GitHub again for a job
 // it does not list with its runner yet.
-var queueLookupRetry = 3 * time.Second
+const defaultQueueLookupRetry = 3 * time.Second
+
+const (
+	queueLookupAttempts = 3
+	queueLookupTimeout  = 15 * time.Second
+)
 
 // fetchQueueTime records the queue time of a job that started without one.
 // A warm runner can take a job that never produced a JobAvailable message,
@@ -148,11 +157,11 @@ func (s *scaler) fetchQueueTime(job store.Job) {
 		return
 	}
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range queueLookupAttempts {
 		if attempt > 0 {
-			time.Sleep(queueLookupRetry)
+			time.Sleep(s.t.m.queueLookupRetry)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), queueLookupTimeout)
 		var at time.Time
 		at, err = lookup(ctx, s.t.cfg(), job.Owner, job.Repo, job.RunID, job.RunnerName)
 		cancel()

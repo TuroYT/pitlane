@@ -1,9 +1,11 @@
 package scaler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 )
 
@@ -48,4 +50,20 @@ func archiveLog(w io.Writer, max int64, copyTo func(io.Writer) error) error {
 		_, err = fmt.Fprintf(w, "\n[pitlane] log truncated at %d MB\n", max>>20)
 	}
 	return err
+}
+
+// archiveRunnerLog saves the output of a runner's container to its log
+// file. A failure only loses the log.
+func (m *Manager) archiveRunnerLog(ctx context.Context, r *runner) {
+	f, err := os.OpenFile(m.LogFile(r.name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		m.log.Warn("archive runner log", "runner", r.name, "error", err)
+		return
+	}
+	if err := archiveLog(f, maxArchivedLog, func(w io.Writer) error { return m.pool.Logs(ctx, r.containerID, false, w) }); err != nil {
+		m.log.Warn("archive runner log", "runner", r.name, "error", err)
+	}
+	if err := f.Close(); err != nil {
+		m.log.Warn("archive runner log", "runner", r.name, "error", err)
+	}
 }

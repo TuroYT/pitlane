@@ -88,9 +88,7 @@ func TestQueueTimeFromAPIWhenMissing(t *testing.T) {
 		}
 		return created, nil
 	}
-	old := queueLookupRetry
-	queueLookupRetry = time.Millisecond
-	t.Cleanup(func() { queueLookupRetry = old })
+	tg.m.queueLookupRetry = time.Millisecond
 
 	st := started("pitlane-a", "j1")
 	st.OwnerName, st.RepositoryName, st.WorkflowRunID = "acme", "app", 7

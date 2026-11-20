@@ -8,10 +8,10 @@ import (
 	"github.com/TuroYT/pitlane/internal/store"
 )
 
-// usageRetry is how long recordUsage waits before trying again when the
-// runner's job is not recorded yet (its JobStarted message can arrive after
-// the runner exited).
-var usageRetry = 15 * time.Second
+// defaultUsageRetry is how long recordUsage waits before trying again when
+// the runner's job is not recorded yet (its JobStarted message can arrive
+// after the runner exited).
+const defaultUsageRetry = 15 * time.Second
 
 // recordUsage stores what a runner's job used. A failure only loses the
 // measurement.
@@ -32,7 +32,7 @@ func (m *Manager) recordUsage(runner string, u pool.JobUsage) {
 		return
 	}
 	go func() {
-		time.Sleep(usageRetry)
+		time.Sleep(m.usageRetry)
 		save() // still unknown: the runner never ran a job
 	}()
 }
