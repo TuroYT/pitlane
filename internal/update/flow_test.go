@@ -639,6 +639,42 @@ func TestHandlerSettings(t *testing.T) {
 	}
 }
 
+// A settings change the store cannot save is the server's failure (500,
+// logged, the cause kept out of the response), not a bad request.
+func TestHandlerSettingsStoreFailure(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	f := newFlow(t)
+	f.u.Store = &failingStore{failKey: keyAutoPull}
+	f.u.Log = newBufLogger(&buf)
+	code, body, _ := serve(t, f.u.Handler(), "PUT", "/api/updates/settings", `{"autoUpdate":true,"window":{"start":22,"end":4}}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500 (%s)", code, body)
+	}
+	var e map[string]string
+	if json.Unmarshal([]byte(body), &e) != nil || e["error"] == "" || strings.Contains(body, "disk full") {
+		t.Errorf("error body %q: want a generic message, not the cause", body)
+	}
+	if !strings.Contains(buf.String(), "level=ERROR") || !strings.Contains(buf.String(), "disk full") {
+		t.Errorf("failure not logged: %s", buf.String())
+	}
+}
+
+// An invalid window stays a 400 and does not touch the store or the log.
+func TestHandlerSettingsInvalidWindowIsABadRequest(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	f := newFlow(t)
+	f.u.Log = newBufLogger(&buf)
+	code, body, _ := serve(t, f.u.Handler(), "PUT", "/api/updates/settings", `{"window":{"start":0,"end":24}}`)
+	if code != http.StatusBadRequest || !strings.Contains(body, "between 0 and 23") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("a client mistake was logged as an error: %s", buf.String())
+	}
+}
+
 func TestHandlerApply(t *testing.T) {
 	t.Parallel()
 	t.Run("without a release", func(t *testing.T) {
