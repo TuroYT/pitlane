@@ -104,7 +104,10 @@ body {
   color: var(--text);
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
+  accent-color: var(--brand-emphasis);
+  caret-color: var(--brand-emphasis);
 }
+html { scrollbar-color: var(--control-border) transparent; }
 ::selection { background: color-mix(in srgb, var(--link) 25%, transparent); }
 a { color: var(--link); text-decoration: none; text-underline-offset: 0.2em; }
 a:hover { text-decoration: underline; }
@@ -115,7 +118,8 @@ code { background: var(--bg-inset); padding: 0.15em 0.4em; border-radius: var(--
 h1 { font-size: 20px; font-weight: 600; margin: 0; line-height: 1.4; }
 h2 { font-size: 16px; font-weight: 600; margin: 0; line-height: 1.5; }
 h3 { font-size: 14px; font-weight: 600; margin: 0; }
-p { margin: 0; }
+p { margin: 0; text-wrap: pretty; }
+h1, h2, h3 { text-wrap: balance; }
 svg.icon { flex: none; vertical-align: text-bottom; }
 
 .boot { padding: 40px; color: var(--muted); }
@@ -176,7 +180,8 @@ svg.icon { flex: none; vertical-align: text-bottom; }
   .content { padding: 16px 16px 40px; }
 }
 
-.center-page { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg-subtle); }
+/* minmax(0, 1fr): the column must not grow to the widest code block and push the card off a phone screen. */
+.center-page { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px 16px; background: var(--bg-subtle); }
 .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
 .card.narrow { width: 100%; max-width: 480px; padding: 24px; }
 .brand-big { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; font-size: 20px; }
@@ -241,7 +246,7 @@ button.danger:hover:not(:disabled) { background: var(--error-bg); }
 .alert.warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
 .alert.ok { background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
 .alert.info { background: var(--info-bg); border-color: color-mix(in srgb, var(--link) 30%, transparent); }
-pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--radius); margin: 0; }
+pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--radius); margin: 0; overflow-x: auto; }
 
 .steps { display: flex; gap: 8px; padding: 0; margin: 12px 0 20px; list-style: none; counter-reset: s; font-size: 12px; }
 .steps li { flex: 1; counter-increment: s; color: var(--muted); border-top: 2px solid var(--border); padding-top: 6px; }
@@ -269,7 +274,10 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .status .label { color: var(--text); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1.2s linear infinite; transform-origin: 50% 50%; }
-@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+  button, .button, .switch span, .switch span::before { transition: none; }
+}
 
 /* ------------------------------------------------------------ boxes */
 .box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
@@ -404,6 +412,16 @@ pre.logs {
 .tabs button:focus-visible { outline-offset: -2px; border-radius: var(--radius); }
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pager .filters { align-items: center; }
+/* Touch: 16px fields stop iOS zooming the page on focus, and controls get a finger-sized target. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']), select { height: 40px; font-size: 16px; }
+  button, .button { height: 40px; }
+  button.small, .button.small { height: 36px; }
+  button.link { height: auto; }
+  .chip { height: 32px; }
+  .seg button { height: 32px; }
+  input[type='checkbox'] { width: 20px; height: 20px; }
+}
 @media (max-width: 700px) {
   .filters input:not([type='checkbox']), .filters select { flex: 1 1 100%; min-width: 0; width: 100%; }
   .table-wrap .table { min-width: 560px; }
