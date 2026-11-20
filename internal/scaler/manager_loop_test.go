@@ -333,3 +333,19 @@ func TestRestartReplacesListenersAndKeepsLostJobs(t *testing.T) {
 		t.Fatal("lost job dropped by the restart")
 	}
 }
+
+// A store failure shows no targets, but is logged: an empty dashboard must
+// not look like a configuration with no target.
+func TestSnapshotLogsStoreFailure(t *testing.T) {
+	h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 2}, 0)
+	rec := &recordingLog{}
+	h.m.log = slog.New(rec)
+	_ = h.st.Close()
+	got := h.m.Snapshot()
+	if got == nil || len(got) != 0 {
+		t.Fatalf("snapshot %v, want an empty list", got)
+	}
+	if !rec.has("ERROR load targets") {
+		t.Fatalf("failure not logged: %v", rec.logs)
+	}
+}
