@@ -137,3 +137,44 @@ func TestFindLostJobsAtStartup(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestMarkLostIgnoresUnknownJob(t *testing.T) {
+	tg := testTarget(t)
+	tg.mu.Lock()
+	tg.markLostLocked("", "pitlane-a", time.Now())
+	tg.mu.Unlock()
+	if len(tg.lost) != 0 {
+		t.Fatalf("a runner without a job left %v", tg.lost)
+	}
+}
+
+func TestFindLostJobsStoreFailure(t *testing.T) {
+	tg := testTarget(t)
+	rec := &recordingLog{}
+	tg.m.log = slog.New(rec)
+	_ = tg.m.store.Close()
+	tg.m.findLostJobs(context.Background(), nil)
+	if len(tg.m.lost) != 0 || !rec.has("find in-flight jobs") {
+		t.Fatalf("lost %v, logs %v", tg.m.lost, rec.logs)
+	}
+}
+
+func TestKeepLostMergesWithWhatIsKept(t *testing.T) {
+	tg := testTarget(t)
+	m := tg.m
+	now := time.Now()
+	m.mu.Lock()
+	m.keepLostLocked(1, tg) // nothing to keep: no entry made
+	m.mu.Unlock()
+	if _, ok := m.lost[1]; ok {
+		t.Fatal("an empty map was kept")
+	}
+	m.lost[1] = map[string]lostJob{"old": {runner: "a", at: now}}
+	tg.lost["new"] = lostJob{runner: "b", at: now}
+	m.mu.Lock()
+	m.keepLostLocked(1, tg)
+	m.mu.Unlock()
+	if len(m.lost[1]) != 2 {
+		t.Fatalf("kept %v, want both jobs", m.lost[1])
+	}
+}

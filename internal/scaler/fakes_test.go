@@ -224,6 +224,7 @@ type fakeAPI struct {
 	ensureErr error
 	openErr   error
 	jitErr    error
+	deleteErr error
 }
 
 func newFakeAPI() *fakeAPI {
@@ -278,7 +279,7 @@ func (f *fakeAPI) deleteScaleSet(_ context.Context, id int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, id)
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeAPI) removedIDs() []int64 {
@@ -512,4 +513,36 @@ func (h *harness) startedManager(t *testing.T) context.Context {
 	h.m.ctx = ctx
 	h.m.mu.Unlock()
 	return ctx
+}
+
+// fakeTickers hands the manager loop channels the test fires by hand. A
+// send returns once the loop received it, so sending twice on the same
+// channel also tells the first tick's work is done.
+type fakeTickers struct {
+	ch map[time.Duration]chan time.Time
+}
+
+func newFakeTickers() *fakeTickers {
+	f := &fakeTickers{ch: map[time.Duration]chan time.Time{}}
+	for _, d := range []time.Duration{reconcileInterval, housekeepingInterval, timeoutCheckInterval, orphanInterval} {
+		f.ch[d] = make(chan time.Time)
+	}
+	return f
+}
+
+func (f *fakeTickers) tick(d time.Duration) (<-chan time.Time, func()) { return f.ch[d], func() {} }
+
+func (f *fakeTickers) fire(d time.Duration) { f.ch[d] <- time.Time{} }
+
+// newBareManager is a manager over a fresh store, without any target.
+func newBareManager(t *testing.T, p Pool) (*Manager, *store.Store) {
+	t.Helper()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	m := New(st, p, t.TempDir(), func() Credentials { return Credentials{PAT: "x"} }, func() {},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return m, st
 }
