@@ -193,14 +193,16 @@ func reexec(log *slog.Logger) {
 
 // logSetupToken tells the operator how to get the setup token. The token
 // itself only goes to the log when it could not be saved: logs are often
-// shipped elsewhere, the data directory is not.
+// shipped elsewhere, the data directory is not. That fallback is a warning
+// so that it shows at any log level but error: it is the only way left to
+// get the token.
 func logSetupToken(log *slog.Logger, tok server.SetupToken) {
 	switch {
 	case tok.Value == "":
 	case tok.Saved:
 		log.Info("first-time setup: open the web UI and enter the setup token saved in this file", "file", tok.File)
 	default:
-		log.Info("first-time setup: open the web UI and enter this setup token", "token", tok.Value)
+		log.Warn("first-time setup: open the web UI and enter this setup token", "token", tok.Value)
 	}
 }
 

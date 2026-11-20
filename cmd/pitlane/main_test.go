@@ -15,17 +15,20 @@ func TestLogSetupToken(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		tok          server.SetupToken
+		level        slog.Level // the level the operator logs at
 		wantToken    bool
 		wantFile     bool
 		wantNoOutput bool
 	}{
-		{"saved", server.SetupToken{Value: secret, File: "/data/setup-token", Saved: true}, false, true, false},
-		{"not saved", server.SetupToken{Value: secret, File: "/data/setup-token"}, true, false, false},
-		{"setup complete", server.SetupToken{}, false, false, true},
+		{"saved", server.SetupToken{Value: secret, File: "/data/setup-token", Saved: true}, slog.LevelInfo, false, true, false},
+		{"not saved", server.SetupToken{Value: secret, File: "/data/setup-token"}, slog.LevelInfo, true, false, false},
+		// The token is the only way in: it must survive a quiet log level.
+		{"not saved, warn level", server.SetupToken{Value: secret, File: "/data/setup-token"}, slog.LevelWarn, true, false, false},
+		{"setup complete", server.SetupToken{}, slog.LevelInfo, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			logSetupToken(slog.New(slog.NewTextHandler(&buf, nil)), tc.tok)
+			logSetupToken(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tc.level})), tc.tok)
 			out := buf.String()
 			if got := strings.Contains(out, secret); got != tc.wantToken {
 				t.Errorf("token in the log = %v, want %v: %s", got, tc.wantToken, out)
