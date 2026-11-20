@@ -52,7 +52,11 @@ Yes, it is the setup the benchmarks were measured on. The container can be
 Docker-in-Docker daemons run inside it.
 
 The one-liner creates such a container for you (8 cores, 16 GB of RAM and
-150 GB of disk by default; `CORES`, `MEMORY` and `DISK` override them):
+150 GB of disk by default). It runs the same scripts as the
+[community-scripts](https://community-scripts.org/) installers, so you get their
+menu (default or advanced settings) and their overrides (`var_cpu`, `var_ram`,
+`var_disk`, `var_hostname`, ...), and `update` inside the container updates
+Pitlane:
 
 ```sh
 bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"

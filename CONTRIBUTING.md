@@ -33,7 +33,7 @@ The repository layout:
 | `internal/update` | Self-update and provenance checks |
 | `web/` | Vue 3 + Vite UI, embedded into the binary from `web/dist` |
 | `docs/`, `site/` | Markdown docs and the VitePress site that renders them |
-| `deploy/` | `install.sh`, the systemd unit, Compose file, Proxmox LXC script |
+| `deploy/` | `install.sh`, the systemd unit, Compose file, Proxmox LXC scripts (`proxmox/ct`, `proxmox/install`, `proxmox/json` mirror the community-scripts format) |
 | `images/runner` | The runner image released with each version |
 | `e2e/` | End-to-end workflows run against a real instance |
 

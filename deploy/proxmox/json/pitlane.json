@@ -1,0 +1,54 @@
+{
+  "name": "Pitlane",
+  "slug": "pitlane",
+  "categories": [
+    20
+  ],
+  "date_created": "2026-11-14",
+  "type": "ct",
+  "platforms": ["pve"],
+  "updateable": true,
+  "privileged": false,
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "interface_port": 8080,
+  "documentation": "https://github.com/TuroYT/pitlane/tree/main/docs",
+  "website": "https://github.com/TuroYT/pitlane",
+  "repository": "https://github.com/TuroYT/pitlane",
+  "logo": "https://cdn.jsdelivr.net/gh/TuroYT/pitlane@main/docs/logo.svg",
+  "description": "Pitlane autoscales ephemeral self-hosted GitHub Actions runners on a Docker host, with a web UI. Each job gets a fresh runner while Docker layers, package caches and toolchains stay warm in long-lived Docker-in-Docker slots, so CI runs faster than on GitHub-hosted runners. It uses GitHub's scale set API (no public URL needed) and creates its own GitHub App in one click.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/pitlane.sh",
+      "config_path": "/etc/pitlane/pitlane.env",
+      "resources": {
+        "cpu": 8,
+        "ram": 16384,
+        "hdd": 150,
+        "os": "Debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "Open the web UI, enter the setup token saved in ~/pitlane.creds inside the container, then click Create GitHub App and install it on your account or organization.",
+      "type": "info"
+    },
+    {
+      "text": "Each parallel job needs roughly 2-4 GB of RAM: set the number of slots and the memory limit per job in Settings to fit the container's resources.",
+      "type": "info"
+    },
+    {
+      "text": "Every job controls a privileged Docker-in-Docker daemon inside the container. Do not run untrusted pull requests from forks on it.",
+      "type": "warning"
+    }
+  ]
+}
