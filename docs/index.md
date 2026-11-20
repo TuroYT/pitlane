@@ -44,7 +44,7 @@ On a Linux host with systemd (Docker is installed if missing):
 curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh | sudo sh
 ```
 
-Open the printed URL, enter the setup token (`pitlane setup-token`), click
+Open the printed URL, enter the setup token (`sudo pitlane setup-token`, see [Getting started](getting-started.md)), click
 **Create GitHub App**, install it, enable a repository, and use the label:
 
 ```yaml

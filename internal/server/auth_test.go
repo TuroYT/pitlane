@@ -246,7 +246,8 @@ func TestFirstAdminNeedsSetupCookie(t *testing.T) {
 	})
 	t.Run("with the setup cookie", func(t *testing.T) {
 		s, st := authServer(t, "alice")
-		tok := s.EnsureSetupToken()
+		setup := s.EnsureSetupToken()
+		tok := setup.Value
 		file := filepath.Join(s.cfg.DataDir, "setup-token")
 		if _, err := os.Stat(file); err != nil {
 			t.Fatal("setup token file missing")
@@ -265,6 +266,49 @@ func TestFirstAdminNeedsSetupCookie(t *testing.T) {
 		login(t, s.Handler(), &http.Cookie{Name: setupCookie, Value: tok})
 		if !onlyAdmin(st, "alice") {
 			t.Fatal("setup token reused")
+		}
+	})
+}
+
+func TestEnsureSetupToken(t *testing.T) {
+	t.Run("saved to the data directory", func(t *testing.T) {
+		s, _ := authServer(t, "alice")
+		tok := s.EnsureSetupToken()
+		file := filepath.Join(s.cfg.DataDir, "setup-token")
+		if tok.Value == "" || !tok.Saved || tok.File != file {
+			t.Fatalf("got %+v", tok)
+		}
+		if b, err := os.ReadFile(file); err != nil || strings.TrimSpace(string(b)) != tok.Value {
+			t.Fatalf("file holds %q (%v), want %q", b, err, tok.Value)
+		}
+		// A restart reuses the saved token.
+		if again := s.EnsureSetupToken(); again != tok {
+			t.Fatalf("second start: got %+v, want %+v", again, tok)
+		}
+	})
+	t.Run("data directory not writable", func(t *testing.T) {
+		s, _ := authServer(t, "alice")
+		s.cfg.DataDir = filepath.Join(t.TempDir(), "missing")
+		tok := s.EnsureSetupToken()
+		if tok.Value == "" || tok.Saved {
+			t.Fatalf("got %+v, want a token that is not saved", tok)
+		}
+		if got := s.getSetupToken(); got != tok.Value {
+			t.Fatalf("token not accepted by the server: %q", got)
+		}
+	})
+	t.Run("setup complete", func(t *testing.T) {
+		s, st := authServer(t, "alice")
+		file := filepath.Join(s.cfg.DataDir, "setup-token")
+		if err := os.WriteFile(file, []byte("old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		addUser(t, st, "alice", store.RoleAdmin)
+		if tok := s.EnsureSetupToken(); tok != (SetupToken{}) {
+			t.Fatalf("got %+v, want none", tok)
+		}
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
+			t.Fatal("stale setup token file kept")
 		}
 	})
 }

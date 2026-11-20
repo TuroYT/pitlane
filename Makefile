@@ -6,13 +6,16 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOLANGCI_LINT_VERSION ?= v2.15.0
 # renovate: datasource=go depName=gotest.tools/gotestsum
 GOTESTSUM_VERSION ?= v1.13.0
+# renovate: datasource=go depName=golang.org/x/vuln
+GOVULNCHECK_VERSION ?= v1.10.0
 
 GOLANGCI_LINT = go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 GOTESTSUM = go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
+GOVULNCHECK = go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 
 .DEFAULT_GOAL := build
 
-.PHONY: help build web run dev test check lint golangci-lint test-race clean
+.PHONY: help build web run dev test check lint golangci-lint test-race vuln vuln-go vuln-web clean
 
 help: ## List available Makefile targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "%-13s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -38,6 +41,7 @@ check: ## Run what CI runs on code, in CI's order, stopping at the first failure
 	$(MAKE) --no-print-directory lint
 	$(MAKE) --no-print-directory test-race
 	$(MAKE) --no-print-directory build
+	$(MAKE) --no-print-directory vuln
 
 lint: ## What CI's "Go / lint" checks: gofmt, go vet, go.mod tidiness, golangci-lint
 	@test -z "$$(gofmt -l ./cmd ./internal ./web)" || { gofmt -l ./cmd ./internal ./web; echo "run gofmt -w on the files above"; exit 1; }
@@ -50,6 +54,14 @@ golangci-lint: ## Run golangci-lint only (extra flags in GOLANGCI_LINT_ARGS)
 
 test-race: ## What CI's "Go / test (race)" runs: race detector and coverage
 	$(GOTESTSUM) $(GOTESTSUM_ARGS) -- -race -covermode=atomic -coverprofile=coverage.out ./...
+
+vuln: vuln-go vuln-web ## Scan for known vulnerabilities: what CI's "Go / vulnerabilities" and "Web / audit" run
+
+vuln-go: ## govulncheck on the Go code and its dependencies (known false positives: .github/scripts/govulncheck-ignore.txt)
+	.github/scripts/govulncheck.sh $(GOVULNCHECK)
+
+vuln-web: ## pnpm audit of the UI's runtime dependencies, failing on high or above
+	cd web && pnpm audit --prod --audit-level high
 
 clean: ## Remove build output and local data
 	rm -rf bin .data web/node_modules coverage.out

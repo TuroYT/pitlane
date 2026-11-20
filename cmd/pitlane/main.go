@@ -32,6 +32,21 @@ import (
 
 var version = "dev"
 
+// Timeouts of both HTTP servers. There is deliberately no ReadTimeout or
+// WriteTimeout: they would cut the long-lived event streams and the actions
+// cache uploads and downloads, which can take minutes.
+const (
+	// readHeaderTimeout bounds how long a client may take to send its headers.
+	readHeaderTimeout = 10 * time.Second
+	// idleTimeout closes keep-alive connections nobody uses.
+	idleTimeout = 2 * time.Minute
+)
+
+// newHTTPServer is the http.Server both listeners (UI and actions cache) use.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -176,6 +191,21 @@ func reexec(log *slog.Logger) {
 	os.Exit(1)
 }
 
+// logSetupToken tells the operator how to get the setup token. The token
+// itself only goes to the log when it could not be saved: logs are often
+// shipped elsewhere, the data directory is not. That fallback is a warning
+// so that it shows at any log level but error: it is the only way left to
+// get the token.
+func logSetupToken(log *slog.Logger, tok server.SetupToken) {
+	switch {
+	case tok.Value == "":
+	case tok.Saved:
+		log.Info("first-time setup: open the web UI and enter the setup token saved in this file", "file", tok.File)
+	default:
+		log.Warn("first-time setup: open the web UI and enter this setup token", "token", tok.Value)
+	}
+}
+
 // startActionsCache opens the actions cache and starts its listener. On any
 // failure Pitlane runs without it: jobs use GitHub's cache.
 func startActionsCache(log *slog.Logger, dataDir, listen string) (*cache.Server, *http.Server, int) {
@@ -197,8 +227,7 @@ func startActionsCache(log *slog.Logger, dataDir, listen string) (*cache.Server,
 		log.Error("actions cache disabled (jobs use GitHub's cache)", "error", err)
 		return nil, nil, 0
 	}
-	// No write timeout: archives can take minutes to stream.
-	hs := &http.Server{Handler: cs.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	hs := newHTTPServer("", cs.Handler()) // the listener is already open
 	go func() {
 		log.Info("actions cache listening", "addr", listen)
 		if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -271,7 +300,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 	}
 	srv.SetUpdates(upd.Handler())
 
-	httpSrv := &http.Server{Addr: listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := newHTTPServer(listen, srv.Handler())
 	go func() {
 		log.Info("pitlane listening", "addr", listen, "version", version)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -279,9 +308,7 @@ func run(log *slog.Logger, cfg server.Config, cacheListen string) error {
 			stop()
 		}
 	}()
-	if tok := srv.EnsureSetupToken(); tok != "" {
-		log.Info("first-time setup: open the web UI and enter this setup token", "token", tok)
-	}
+	logSetupToken(log, srv.EnsureSetupToken())
 
 	log.Info("starting warm slots (first start pulls images and may take a minute)")
 	if err := p.Start(ctx); err != nil {

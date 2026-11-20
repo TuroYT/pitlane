@@ -14,7 +14,9 @@ forks run on GitHub-hosted runners.
 | `Go / lint` | Go code, `go.mod`, `.golangci.yml`, `Makefile`, `web/` | `gofmt`, `go vet`, `go mod tidy -diff`, golangci-lint. | Annotations on the offending lines; the summary lists the golangci-lint issues. |
 | `Go / test (race)` | same as `Go / lint` | `go test -race` with coverage, through gotestsum. | Annotations on the failing assertion; the summary has one row per package with its tests, time and coverage. The log has one group per package. |
 | `Go / build` | same as `Go / lint` | Builds the UI, then the `pitlane` binary with the UI embedded (`make build`). | Compiler errors are annotated. |
+| `Go / vulnerabilities` | same as `Go / lint` | [govulncheck](https://go.dev/doc/security/vuln/) fails when the code calls a function with a known vulnerability, in Pitlane or in a dependency. | The annotation names the advisory (GO-…) and links to it; run `make vuln-go` for the details. |
 | `Web / build, lint, test` | `web/` | `vue-tsc` and `vite build`, ESLint with no warnings allowed, Vitest. | ESLint errors and failing tests are annotated; Vitest writes its own summary. |
+| `Web / audit` | `web/` | `pnpm audit --prod`: fails on a known vulnerability of high severity or above in the UI's runtime dependencies (the build tooling is not part of the binary). | The log lists the advisories and the dependency path. |
 | `Docs / build` | `docs/`, `site/` | Builds the VitePress site, which fails on a dead link. | The log names the page and the link. |
 | `all green` | always | Fails if any job above failed or was cancelled. Skipped jobs count as passed. | The summary lists the result of every job. |
 
@@ -22,6 +24,11 @@ A change to the CI itself (`.github/workflows/ci.yml`, `.github/actions/`,
 `.github/scripts/`) runs every job. Pushes to `main` run every job except the
 docs build: the [`docs` workflow](../.github/workflows/docs.yml) builds and
 publishes the site from `main`.
+
+New advisories are published without any change to the code, so the
+[`Vulnerabilities` workflow](../.github/workflows/vulnerabilities.yml) runs both
+scans on `main` every Monday (and from the Actions tab). A failed run is reported
+by e-mail to whoever watches failed workflows; fix it like a failed check.
 
 A new push to a pull request cancels the run it replaces. Every job has a
 timeout, and the workflow token can only read the repository.
@@ -40,12 +47,24 @@ make check       # all of the below except the docs build, in order, stopping at
 make lint        # Go / lint
 make test-race   # Go / test (race)
 make web build   # Go / build
+make vuln        # Go / vulnerabilities and Web / audit (vuln-go, vuln-web)
 cd web && pnpm build && pnpm lint && pnpm test   # Web / build, lint, test
 cd site && pnpm install && pnpm build            # Docs / build
 ```
 
-The versions of golangci-lint and gotestsum are pinned in the `Makefile`;
-Renovate proposes new ones.
+The versions of golangci-lint, gotestsum and govulncheck are pinned in the
+`Makefile`; Renovate proposes new ones.
+
+### Advisories that do not apply
+
+`govulncheck` also reports a vulnerability when a module has one that no fixed
+version of that module solves. Those the code cannot suffer from are listed in
+[`.github/scripts/govulncheck-ignore.txt`](../.github/scripts/govulncheck-ignore.txt),
+each with its reason; the check fails on anything else, and warns when a line no
+longer matches an advisory so it can be removed. Today these are two bugs of the
+Docker daemon (GO-2026-4883, GO-2026-4887), flagged on `github.com/docker/docker`
+even though Pitlane only uses its client library; they are fixed in the new
+`github.com/moby/moby/v2` module only.
 
 ## Dependency updates
 

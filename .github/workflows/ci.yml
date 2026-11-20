@@ -64,6 +64,7 @@ jobs:
               - web/**
             web:
               - *ci
+              - Makefile # vuln-web runs from it
               - web/**
             docs:
               - *ci
@@ -82,8 +83,8 @@ jobs:
             echo
             echo "| Area | Jobs | |"
             echo "| --- | --- | --- |"
-            echo "| Go | lint, test (race), build | $(mark "$GO") |"
-            echo "| Web | build, lint, test | $(mark "$WEB") |"
+            echo "| Go | lint, test (race), build, vulnerabilities | $(mark "$GO") |"
+            echo "| Web | build, lint, test, audit | $(mark "$WEB") |"
             echo "| Docs | build | $(mark "$DOCS") |"
             echo
             echo "Runner: \`$RUNNER\`"
@@ -208,6 +209,25 @@ jobs:
             echo "\`bin/pitlane\` $(./bin/pitlane --version 2>/dev/null || true): $(du -h bin/pitlane | cut -f1), linux/$(go env GOARCH), UI embedded"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  go-vuln:
+    name: Go / vulnerabilities
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          go: true
+          go-cache: vuln
+      # Fails when the code calls a vulnerable function (see docs/ci.md for the
+      # advisories known not to apply, and for the weekly scan of main).
+      - name: govulncheck
+        run: make vuln-go
+
   web:
     name: Web / build, lint, test
     needs: changes
@@ -256,6 +276,23 @@ jobs:
             echo "| $(icon "$TEST") | Vitest (details below) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  web-audit:
+    name: Web / audit
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ${{ needs.changes.outputs.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-package: web
+      # The dependencies that end up in the binary, not the build tooling.
+      - name: pnpm audit
+        run: make vuln-web
+
   docs:
     name: Docs / build
     needs: changes
@@ -283,7 +320,7 @@ jobs:
     # The one check to require in branch protection: it reports on every run,
     # and fails if a job failed or was cancelled (skipped jobs are fine).
     name: all green
-    needs: [changes, go-lint, go-test, go-build, web, docs]
+    needs: [changes, go-lint, go-test, go-build, go-vuln, web, web-audit, docs]
     if: always()
     runs-on: ${{ needs.changes.outputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 5

@@ -13,7 +13,7 @@ and vulnerabilities to a private advisory (see [SECURITY.md](SECURITY.md)).
 
 You need:
 
-- Go, at the version in [`go.mod`](go.mod) (currently 1.27.3). With a recent Go
+- Go, at the version in [`go.mod`](go.mod) (currently 1.27.4). With a recent Go
   and the default `GOTOOLCHAIN=auto`, the right toolchain is downloaded for you.
 - Node.js 22 and pnpm 10 for the web UI (`web/`) and the docs site (`site/`).
 - Docker, if you want to run Pitlane for real. Its slots are privileged

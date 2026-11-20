@@ -1,7 +1,8 @@
 # Pitlane with Docker Compose.
 #   1. Set PITLANE_BASE_URL to the address you will open in your browser.
 #   2. docker compose up -d
-#   3. Open that address and follow the setup (token: docker compose logs pitlane | grep token)
+#   3. Open that address and follow the setup (token: docker compose exec pitlane /pitlane setup-token;
+#      if the data directory is not writable, it is in docker compose logs pitlane)
 services:
   pitlane:
     image: ghcr.io/turoyt/pitlane:v1.2.0@sha256:232a156461d35d9810dc626f114d15aa97a6f75ce53eba251ec8f15fa43c09a3
