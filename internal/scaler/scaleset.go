@@ -204,3 +204,18 @@ func (g *ghSession) close(ctx context.Context) error { return g.s.Close(ctx) }
 func isNotFound(err error) bool {
 	return errors.Is(err, scaleset.NotFoundError) || errors.Is(err, scaleset.RunnerNotFoundError)
 }
+
+// Credentials used to talk to GitHub. Either the App fields or PAT is set.
+type Credentials struct {
+	AppClientID string
+	AppPEM      string
+	PAT         string
+}
+
+// RunnerGroupID is the runner group of every scale set Pitlane creates: the
+// default group (for an organisation, its "Allow public repositories"
+// setting decides whether public repositories can use the runners).
+const RunnerGroupID = 1
+
+// Valid reports whether credentials are usable.
+func (c Credentials) Valid() bool { return c.PAT != "" || (c.AppClientID != "" && c.AppPEM != "") }
