@@ -39,19 +39,21 @@ func TestAutoDecision(t *testing.T) {
 		t.Errorf("minor refused after 1.0: %s", why)
 	}
 	cases := map[string]func(*AutoInput){
-		"off":                func(in *AutoInput) { in.Enabled = false },
-		"outside window":     func(in *AutoInput) { in.Now = at(12) },
-		"a job is running":   func(in *AutoInput) { in.Busy = true },
-		"new major":          func(in *AutoInput) { in.Current, in.Candidate = "1.4.0", Release{Tag: "v2.0.0"} },
-		"new minor in 0.x":   func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0"} },
-		"pre-release flag":   func(in *AutoInput) { in.Candidate.Prerelease = true },
-		"pre-release tag":    func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0-rc.1"} },
-		"older":              func(in *AutoInput) { in.Candidate = Release{Tag: "v0.1.9"} },
-		"same":               func(in *AutoInput) { in.Candidate = Release{Tag: "v0.2.0"} },
-		"dev build":          func(in *AutoInput) { in.Current = "dev" },
-		"git describe":       func(in *AutoInput) { in.Current = "v0.2.0-4-gabcdef1" },
-		"cannot self-update": func(in *AutoInput) { in.CanSelf = false },
-		"no release":         func(in *AutoInput) { in.Candidate = Release{} },
+		"off":                     func(in *AutoInput) { in.Enabled = false },
+		"outside window":          func(in *AutoInput) { in.Now = at(12) },
+		"a job is running":        func(in *AutoInput) { in.Busy = true },
+		"new major":               func(in *AutoInput) { in.Current, in.Candidate = "1.4.0", Release{Tag: "v2.0.0"} },
+		"new minor in 0.x":        func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0"} },
+		"pre-release flag":        func(in *AutoInput) { in.Candidate.Prerelease = true },
+		"pre-release tag":         func(in *AutoInput) { in.Candidate = Release{Tag: "v0.3.0-rc.1"} },
+		"older":                   func(in *AutoInput) { in.Candidate = Release{Tag: "v0.1.9"} },
+		"same":                    func(in *AutoInput) { in.Candidate = Release{Tag: "v0.2.0"} },
+		"dev build":               func(in *AutoInput) { in.Current = "dev" },
+		"git describe":            func(in *AutoInput) { in.Current = "v0.2.0-4-gabcdef1" },
+		"cannot self-update":      func(in *AutoInput) { in.CanSelf = false },
+		"no release":              func(in *AutoInput) { in.Candidate = Release{} },
+		"draft":                   func(in *AutoInput) { in.Candidate.Draft = true },
+		"candidate not a version": func(in *AutoInput) { in.Candidate = Release{Tag: "nightly"} },
 	}
 	for name, mut := range cases {
 		in := base

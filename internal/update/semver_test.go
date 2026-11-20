@@ -58,3 +58,70 @@ func TestReleaseVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionString(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"1.2.3":              "1.2.3",
+		"v1.2.3":             "1.2.3",
+		"1.2.3-rc.1":         "1.2.3-rc.1",
+		"1.2.3+build.5":      "1.2.3+build.5",
+		"v1.2.3-rc.1+build5": "1.2.3-rc.1+build5",
+		"0.0.0":              "0.0.0",
+	} {
+		v, err := ParseVersion(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String(); got != want {
+			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+		if again, err := ParseVersion(v.String()); err != nil || Compare(v, again) != 0 {
+			t.Errorf("%s does not round-trip: %v", in, err)
+		}
+	}
+}
+
+func TestIsPrerelease(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]bool{"1.0.0": false, "1.0.0+b": false, "1.0.0-rc.1": true, "1.0.0-0": true} {
+		v, _ := ParseVersion(in)
+		if v.IsPrerelease() != want {
+			t.Errorf("%s: %v", in, !want)
+		}
+	}
+}
+
+func TestComparePrereleaseIdentifiers(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ a, b string }{
+		{"1.0.0-1", "1.0.0-alpha"},       // numeric before alphanumeric
+		{"1.0.0-alpha", "1.0.0-alpha.1"}, // a shorter set is lower
+		{"1.0.0-2", "1.0.0-10"},          // numeric, not lexical
+		{"1.0.0-rc.1", "1.0.0"},
+		{"1.9.9", "2.0.0-rc.1"},
+		{"1.0.0-a-b", "1.0.0-b"}, // hyphen inside an identifier
+	}
+	for _, tc := range tests {
+		a, _ := ParseVersion(tc.a)
+		b, _ := ParseVersion(tc.b)
+		if Compare(a, b) != -1 || Compare(b, a) != 1 || Compare(a, a) != 0 {
+			t.Errorf("%s < %s: %d %d", tc.a, tc.b, Compare(a, b), Compare(b, a))
+		}
+	}
+}
+
+func TestParseVersionBounds(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{"1.2.3-", "1.2.3+", "1.2.3-rc..1", "1.2.3-rc.1+", "1.2.-3", "v", "v1", "1.2.3-0123", "1.2.3 rc"} {
+		if _, err := ParseVersion(s); err == nil {
+			t.Errorf("%q parsed", s)
+		}
+	}
+	if v, err := ParseVersion("  v1.2.3\n"); err != nil || v.Major != 1 {
+		t.Errorf("surrounding whitespace: %v %v", v, err)
+	}
+	if v, err := ParseVersion("1.2.3-0"); err != nil || len(v.Pre) != 1 {
+		t.Errorf("a lone zero identifier is valid: %v %v", v, err)
+	}
+}
