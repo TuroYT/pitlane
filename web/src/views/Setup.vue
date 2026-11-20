@@ -88,10 +88,11 @@ async function createApp() {
       <p v-if="error" class="alert error" role="alert">{{ error }}</p>
 
       <form v-if="step === 'unlock'" class="stack" @submit.prevent="unlock">
-        <p>Enter the one-time setup token. Read it on the Pitlane host with:</p>
-        <pre class="code">pitlane setup-token</pre>
-        <p>or, with Docker Compose:</p>
+        <p>Enter the one-time setup token. Read it on the Pitlane host, as root:</p>
+        <pre class="code">sudo pitlane setup-token</pre>
+        <p>If you changed PITLANE_DATA, add the data directory as an argument. With Docker Compose:</p>
         <pre class="code">docker compose exec pitlane /pitlane setup-token</pre>
+        <p>If the token file could not be written, Pitlane logs the token instead: check the server logs.</p>
         <input v-model="token" placeholder="Setup token" aria-label="Setup token" autofocus required autocomplete="off" spellcheck="false" />
         <button type="submit" class="primary" :disabled="busy || !token">{{ busy ? 'Checking…' : 'Continue' }}</button>
       </form>

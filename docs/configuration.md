@@ -231,7 +231,7 @@ and make sure nothing else can reach that port. Add targets manually in **Reposi
   master.key      encrypts the GitHub App private key and secrets: keep it with the db
   logs/           runner logs
   actions-cache/  actions/cache entries (entries/<id>.bin + .json) and the key signing per-job tokens
-  setup-token     one-time setup token (`pitlane setup-token`), only until the first admin signs in
+  setup-token     one-time setup token (`sudo pitlane setup-token [data dir]`), only until the first admin signs in; logged only if this file cannot be written
 ```
 
 Pitlane restricts the data directory to its owner (`0700`) and creates every file

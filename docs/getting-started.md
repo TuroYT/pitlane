@@ -32,9 +32,16 @@ unless that file cannot be written) and removes the file once the first admin
 has signed in. Read it with:
 
 ```sh
-pitlane setup-token                          # systemd install, Proxmox
+sudo pitlane setup-token                           # systemd install
 docker compose exec pitlane /pitlane setup-token   # Compose
 ```
+
+The data directory is only readable by root (in a Proxmox container you are
+root: leave out `sudo`). If you changed `PITLANE_DATA` in
+`/etc/pitlane/pitlane.env`, your shell does not have it: pass the directory,
+`sudo pitlane setup-token /path/to/data`. If Pitlane could not write the file,
+it logs the token instead: look in the server logs (`journalctl -u pitlane`,
+`docker compose logs pitlane`).
 
 Click **Create GitHub App on github.com**. GitHub shows the App that will be
 created (private to you or your organization). Confirm, and you are sent back to Pitlane.
