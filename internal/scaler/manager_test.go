@@ -167,12 +167,15 @@ func TestByWaitTurn(t *testing.T) {
 func TestDeleteScaleSetWhenDrained(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// drainAt is how long after the start the last runner exits.
+		// drainAt is how long after the start the last runner exits, during
+		// the sleep that brings the clock there.
 		drainAt time.Duration
 		deleted bool
 	}{
 		{"drained before the cutoff", time.Hour, true},
-		{"drained only after the cutoff", drainTimeout + drainPoll/2, false},
+		// The last runner exits as the clock reaches the cutoff, before the
+		// next poll: too late, the scale set stays.
+		{"drained at the cutoff", drainTimeout, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, store.Target{Kind: "org", Owner: "acme", Enabled: true, MaxRunners: 4}, 0)
@@ -191,6 +194,9 @@ func TestDeleteScaleSetWhenDrained(t *testing.T) {
 			h.api.mu.Lock()
 			deleted := len(h.api.deleted) > 0
 			h.api.mu.Unlock()
+			if h.runnerCount() != 0 {
+				t.Fatal("the last runner never exited: the cutoff was not reached by sleeping")
+			}
 			if deleted != tc.deleted {
 				t.Fatalf("scale set deleted: %v, want %v", deleted, tc.deleted)
 			}
