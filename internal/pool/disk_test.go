@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -151,4 +152,29 @@ func TestEnsureFreeDiskDisabled(t *testing.T) {
 	p := newTestPool("owner")
 	p.cfg.MinFreeDiskGB = 0
 	p.EnsureFreeDisk(context.Background()) // must not touch Docker (nil client)
+}
+
+// dockerDiskOps against a fake Docker API: only managed volumes are listed,
+// in use when a container mounts them or Docker counts a reference.
+func TestDockerDiskOpsVolumes(t *testing.T) {
+	p := newTestPool("owner")
+	managed := map[string]string{LabelManaged: "true"}
+	newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"GET /system/df": reply(map[string]any{"Volumes": []map[string]any{
+			{"Name": "pitlane-cache-a", "Labels": managed, "UsageData": map[string]any{"Size": 10, "RefCount": 0}},
+			{"Name": "pitlane-cache-b", "Labels": managed, "UsageData": map[string]any{"Size": 20, "RefCount": 0}},
+			{"Name": "pitlane-cache-c", "Labels": managed, "UsageData": map[string]any{"Size": 30, "RefCount": 1}},
+			{"Name": "pitlane-cache-d", "Labels": managed},
+			{"Name": "other", "Labels": map[string]string{}},
+		}}),
+		"GET /containers/json": reply([]map[string]any{{"Id": "c1", "Mounts": []map[string]any{{"Name": "pitlane-cache-b"}}}}),
+	})
+	vols, err := dockerDiskOps{p}.volumes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []volInfo{{"pitlane-cache-a", 10, false}, {"pitlane-cache-b", 20, true}, {"pitlane-cache-c", 30, true}, {"pitlane-cache-d", -1, false}}
+	if fmt.Sprint(vols) != fmt.Sprint(want) {
+		t.Fatalf("volumes: %v", vols)
+	}
 }
