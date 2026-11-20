@@ -59,7 +59,8 @@ curl -O https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/compose.yam
 PITLANE_BASE_URL=http://my-server:8080 docker compose up -d
 ```
 
-Or on Proxmox VE (creates a ready-to-use LXC container):
+Or on Proxmox VE (creates a ready-to-use LXC container, with the same menu as the
+[community-scripts](https://community-scripts.org/) installers):
 
 ```sh
 bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"
@@ -67,7 +68,7 @@ bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download
 
 Then:
 
-1. Open the printed URL and enter the setup token (`sudo pitlane setup-token`, `docker compose exec pitlane /pitlane setup-token` with Compose, or `pct exec <CTID> -- pitlane setup-token` on the Proxmox host; details in [Getting started](docs/getting-started.md)).
+1. Open the printed URL and enter the setup token (`sudo pitlane setup-token`, `docker compose exec pitlane /pitlane setup-token` with Compose, or `pct exec <CTID> -- pitlane setup-token` on the Proxmox host, also saved in `~/pitlane.creds` inside the container; details in [Getting started](docs/getting-started.md)).
 2. Click **Create GitHub App**, then install the App on your account or organization.
 3. Sign in with GitHub, go to **Repositories** and click **Enable**.
 4. In your workflows:

@@ -4,8 +4,9 @@
 #
 #   bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"
 #
-# This runs the same scripts as the community-scripts installer
-# (ct/pitlane.sh, install/pitlane-install.sh), served from this repository.
+# This runs the community-scripts installer (ct/pitlane.sh,
+# install/pitlane-install.sh) from the fork it is prepared in,
+# TuroYT/ProxmoxVE. deploy/proxmox/{ct,install,json} mirror those files.
 # You get the same menu (default or advanced settings) and the same overrides,
 # for example:
 #
@@ -17,5 +18,5 @@ set -euo pipefail
 command -v pct >/dev/null || { echo "Run this on a Proxmox VE host." >&2; exit 1; }
 
 # The container's `update` command fetches ct/pitlane.sh from this base too.
-export COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/TuroYT/pitlane/main/deploy/proxmox}"
+export COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/TuroYT/ProxmoxVE/feat/pitlane}"
 exec bash -c "$(curl -fsSL "$COMMUNITY_SCRIPTS_URL/ct/pitlane.sh")"
