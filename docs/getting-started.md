@@ -18,7 +18,13 @@ Pick one:
 | --- | --- |
 | systemd | `curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh \| sudo sh` |
 | Docker Compose | download [`deploy/compose.yaml`](../deploy/compose.yaml), set `PITLANE_BASE_URL`, `docker compose up -d` |
-| Proxmox VE | run [`deploy/proxmox/pitlane-lxc.sh`](../deploy/proxmox/pitlane-lxc.sh) on the Proxmox host |
+| Proxmox VE | on the Proxmox host: `bash -c "$(curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/pitlane-lxc.sh)"` |
+
+On Proxmox the script is the [community-scripts](https://community-scripts.org/)
+installer (sources in [`deploy/proxmox`](../deploy/proxmox)): you pick default or
+advanced settings in its menu, or set `var_cpu`, `var_ram`, `var_disk`,
+`var_hostname`... before the command (8 cores, 16 GB of RAM and 150 GB of disk by
+default). It always installs the latest release.
 
 `PITLANE_BASE_URL` is the address **you** type in your browser, e.g.
 `http://pitlane.lan:8080`. GitHub only redirects your browser there, so it can be
@@ -34,6 +40,7 @@ has signed in. Read it with:
 ```sh
 sudo pitlane setup-token                           # systemd install
 pct exec <CTID> -- pitlane setup-token             # Proxmox, on the Proxmox host
+cat ~/pitlane.creds                                # Proxmox, inside the container
 docker compose exec pitlane /pitlane setup-token   # Compose
 ```
 
@@ -83,6 +90,7 @@ Try [`examples/smoke.yml`](../examples/smoke.yml): it uses a Postgres service,
 ```sh
 curl -fsSL https://github.com/TuroYT/pitlane/releases/latest/download/install.sh | sudo sh   # systemd
 docker compose pull && docker compose up -d                                                    # Compose
+update                                                                                         # Proxmox, inside the container
 ```
 
 With Compose, first set the new version in the `image:` tag of `compose.yaml`
