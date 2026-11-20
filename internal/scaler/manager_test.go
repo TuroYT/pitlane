@@ -110,3 +110,43 @@ func TestJobKeepsWorkflowRef(t *testing.T) {
 		t.Fatalf("unexpected job: %+v", j)
 	}
 }
+
+func TestEnabledTargets(t *testing.T) {
+	got, strict := enabledTargets([]store.Target{{ID: 1, Enabled: true}, {ID: 2, Strict: true}, {ID: 3, Enabled: true}})
+	if len(got) != 2 || got[1].ID != 1 || got[3].ID != 3 || strict {
+		t.Fatalf("enabled %v strict %v", got, strict)
+	}
+	if _, strict := enabledTargets([]store.Target{{ID: 1, Enabled: true, Strict: true}}); !strict {
+		t.Fatal("an enabled strict target sets the strict demand")
+	}
+}
+
+func TestNeedsNewListener(t *testing.T) {
+	cur := store.Target{ScaleSetName: "pitlane", InstallationID: 7, MaxRunners: 2}
+	for _, tc := range []struct {
+		name string
+		next store.Target
+		want bool
+	}{
+		{"capacity only", store.Target{ScaleSetName: "pitlane", InstallationID: 7, MaxRunners: 5, Strict: true}, false},
+		{"renamed scale set", store.Target{ScaleSetName: "other", InstallationID: 7}, true},
+		{"other installation", store.Target{ScaleSetName: "pitlane", InstallationID: 8}, true},
+	} {
+		if got := needsNewListener(cur, tc.next); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUnix(t *testing.T) {
+	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	if unix(at) != at.Unix() || unix(time.Time{}) != 0 || unix(time.Unix(0, 0)) != 0 {
+		t.Fatal("unix: set times convert, zero and epoch are unset")
+	}
+	if unixOrNow(at) != at.Unix() {
+		t.Fatal("unixOrNow kept a set time")
+	}
+	if now := time.Now().Unix(); unixOrNow(time.Time{}) < now {
+		t.Fatal("unixOrNow: an unset time becomes now")
+	}
+}
