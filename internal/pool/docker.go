@@ -75,6 +75,17 @@ func (p *Pool) ensureNetwork(ctx context.Context, name string, internal bool) er
 	return nil
 }
 
+// createVolume creates a managed volume unless it exists.
+func (p *Pool) createVolume(ctx context.Context, name string) error {
+	if _, err := p.cli.VolumeInspect(ctx, name); err == nil {
+		return nil
+	}
+	if _, err := p.cli.VolumeCreate(ctx, volume.CreateOptions{Name: name, Labels: map[string]string{LabelManaged: "true"}}); err != nil {
+		return fmt.Errorf("create volume %s: %w", name, err)
+	}
+	return nil
+}
+
 // ensureVolume creates a volume and makes its root writable by the runner user.
 func (p *Pool) ensureVolume(ctx context.Context, name string) error {
 	p.mu.Lock()
@@ -83,10 +94,8 @@ func (p *Pool) ensureVolume(ctx context.Context, name string) error {
 	if done {
 		return nil
 	}
-	if _, err := p.cli.VolumeInspect(ctx, name); err != nil {
-		if _, err := p.cli.VolumeCreate(ctx, volume.CreateOptions{Name: name, Labels: map[string]string{LabelManaged: "true"}}); err != nil {
-			return fmt.Errorf("create volume %s: %w", name, err)
-		}
+	if err := p.createVolume(ctx, name); err != nil {
+		return err
 	}
 	cfg := p.Config()
 	c, err := p.cli.ContainerCreate(ctx, &container.Config{

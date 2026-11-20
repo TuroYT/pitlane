@@ -30,16 +30,6 @@ func testHost(t *testing.T) *hostEnv {
 	}
 }
 
-func writeTestFile(t *testing.T, name, content string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestDiskSpaceUsesDockerRoot(t *testing.T) {
 	p := newTestPool("owner")
 	p.env = testHost(t)
@@ -60,12 +50,12 @@ func TestDiskSpaceUsesDockerRoot(t *testing.T) {
 
 func TestHostMemory(t *testing.T) {
 	h := testHost(t)
-	writeTestFile(t, h.meminfo, "MemTotal:       8000000 kB\n")
-	writeTestFile(t, h.memoryMax, "4096000000\n")
+	write(t, h.meminfo, "MemTotal:       8000000 kB\n")
+	write(t, h.memoryMax, "4096000000\n")
 	if got := h.memory(); got != 4096000000 {
 		t.Fatalf("cgroup limit must lower MemTotal: %d", got)
 	}
-	writeTestFile(t, h.dockerEnv, "")
+	write(t, h.dockerEnv, "")
 	if got := h.memory(); got != 8000000<<10 {
 		t.Fatalf("inside Docker the cgroup limit is Pitlane's own: %d", got)
 	}
@@ -93,7 +83,7 @@ func TestSelfContainer(t *testing.T) {
 
 	p = newTestPool("owner")
 	p.env = testHost(t)
-	writeTestFile(t, p.env.dockerEnv, "")
+	write(t, p.env.dockerEnv, "")
 	p.env.hostname = func() (string, error) { return "abc123", nil }
 	p.env.executable = func() (string, error) { return "/pitlane", nil }
 	newDockerAPI(t, p, map[string]http.HandlerFunc{
@@ -117,10 +107,10 @@ func TestRestoreBinfmtKeepsUnchangedHandlers(t *testing.T) {
 	p.env = testHost(t)
 	p.cfg.StateFile = filepath.Join(t.TempDir(), "slots.json")
 	def := qemuDef("qemu-aarch64", `\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00`)
-	writeTestFile(t, filepath.Join(p.env.binfmtDir, "register"), "")
-	writeTestFile(t, filepath.Join(p.env.binfmtDir, "qemu-aarch64"), def)
+	write(t, filepath.Join(p.env.binfmtDir, "register"), "")
+	write(t, filepath.Join(p.env.binfmtDir, "qemu-aarch64"), def)
 	b, _ := json.Marshal(map[string]string{"qemu-aarch64": def})
-	writeTestFile(t, p.binfmtStateFile(), string(b))
+	write(t, p.binfmtStateFile(), string(b))
 	p.qemuWant = true
 	p.restoreBinfmt(context.Background())
 	if p.qemuWant || p.binfmt["qemu-aarch64"] != def {

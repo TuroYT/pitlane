@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -74,5 +76,36 @@ func TestMergeStoreDirs(t *testing.T) {
 	st, err = mergeStoreDirs(slot, canon, uid, gid)
 	if err != nil || st.down != 3 || st.up != 0 {
 		t.Fatalf("fill = %+v, %v; want 3 down", st, err)
+	}
+}
+
+// The Docker side of the pnpm store sync, against a fake Docker API whose
+// volumes live in temporary directories.
+func TestDockerSlotOpsStore(t *testing.T) {
+	root := t.TempDir()
+	work, canon := filepath.Join(root, "work"), filepath.Join(root, "canon")
+	write(t, filepath.Join(canon, "v3/files/aa/pkg"), "package")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := newTestPool("owner")
+	newDockerAPI(t, p, map[string]http.HandlerFunc{
+		"GET /volumes/pitlane-slot-0-work":     reply(map[string]string{"Name": "pitlane-slot-0-work", "Mountpoint": work}),
+		"GET /volumes/pitlane-cache-acme.pnpm": reply(map[string]string{"Name": "pitlane-cache-acme.pnpm", "Mountpoint": canon}),
+	})
+	ops := dockerSlotOps{p}
+	ctx := context.Background()
+	if !ops.slotStoreEmpty(ctx, 0) {
+		t.Fatal("a work volume without a store is empty")
+	}
+	st, err := ops.mergeStore(ctx, 0, "pitlane-cache-acme.pnpm")
+	if err != nil || st.down != 1 {
+		t.Fatalf("merge: %+v %v", st, err)
+	}
+	if inode(t, filepath.Join(work, pnpmStoreDir, "v3/files/aa/pkg")) != inode(t, filepath.Join(canon, "v3/files/aa/pkg")) {
+		t.Fatal("the slot store must share the canonical inode")
+	}
+	if ops.slotStoreEmpty(ctx, 0) {
+		t.Fatal("the store is filled now")
 	}
 }
