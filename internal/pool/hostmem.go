@@ -10,27 +10,42 @@ import (
 	"time"
 )
 
-var (
-	hostMemMu   sync.Mutex
-	hostMemAt   time.Time
-	hostMemLast int64
-)
+// hostMemoryTTL is how long a reading of the host's memory is reused.
+const hostMemoryTTL = 30 * time.Second
 
-// hostMemory returns the memory Pitlane's jobs share, cached for 30 s: the
-// MemTotal of /proc/meminfo (the LXC container's under lxcfs), lowered to
-// the memory.max of Pitlane's cgroup when Pitlane runs on the host or in an
-// LXC container (inside a Docker container, that limit is Pitlane's own,
-// not its slots'). 0 when unknown.
-func hostMemory() int64 {
-	hostMemMu.Lock()
-	defer hostMemMu.Unlock()
-	if time.Since(hostMemAt) < 30*time.Second {
-		return hostMemLast
+// memoryProbe caches a memory reading for hostMemoryTTL.
+type memoryProbe struct {
+	read func() int64
+	now  func() time.Time
+
+	mu   sync.Mutex
+	at   time.Time // guarded by mu: when last was read
+	last int64     // guarded by mu
+}
+
+func (m *memoryProbe) total() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	if now.Sub(m.at) < hostMemoryTTL {
+		return m.last
 	}
-	_, docker := os.Stat("/.dockerenv")
-	hostMemLast = memoryLimit(readFile("/proc/meminfo"), readFile("/sys/fs/cgroup/memory.max"), docker == nil)
-	hostMemAt = time.Now()
-	return hostMemLast
+	m.last, m.at = m.read(), now
+	return m.last
+}
+
+var hostMem = &memoryProbe{read: realHost.memory, now: time.Now}
+
+// hostMemory returns the memory Pitlane's jobs share (see hostEnv.memory),
+// cached for hostMemoryTTL. 0 when unknown.
+func hostMemory() int64 { return hostMem.total() }
+
+// memory returns the MemTotal of /proc/meminfo (the LXC container's under
+// lxcfs), lowered to the memory.max of Pitlane's cgroup when Pitlane runs on
+// the host or in an LXC container (inside a Docker container, that limit is
+// Pitlane's own, not its slots'). 0 when unknown.
+func (h *hostEnv) memory() int64 {
+	return memoryLimit(readFile(h.meminfo), readFile(h.memoryMax), h.inDocker())
 }
 
 func readFile(name string) []byte {

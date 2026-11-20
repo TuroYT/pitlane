@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 
@@ -150,14 +149,15 @@ type selfInfo struct {
 // the host. It is looked up once.
 func (p *Pool) selfContainer(ctx context.Context) *selfInfo {
 	p.selfOnce.Do(func() {
-		if _, err := os.Stat("/.dockerenv"); err != nil {
+		env := p.host()
+		if !env.inDocker() {
 			return
 		}
-		host, err := os.Hostname()
+		host, err := env.hostname()
 		if err != nil {
 			return
 		}
-		exe, err := os.Executable()
+		exe, err := env.executable()
 		if err != nil {
 			return
 		}

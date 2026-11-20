@@ -84,11 +84,12 @@ func (p *Pool) openShim() (*os.File, error) {
 	if p.shimExe != "" {
 		return os.Open(p.shimExe)
 	}
-	f, err := os.Open("/proc/self/exe")
+	env := p.host()
+	f, err := os.Open(env.selfExe)
 	if err == nil {
 		return f, nil
 	}
-	exe, eerr := os.Executable()
+	exe, eerr := env.executable()
 	if eerr != nil {
 		return nil, err
 	}

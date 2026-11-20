@@ -41,8 +41,10 @@ type diskOps interface {
 // DiskPath returns the filesystem whose free space Pitlane watches: Docker's
 // data directory when visible, else Pitlane's own data directory.
 func (p *Pool) DiskPath() string {
-	if _, err := os.Stat("/var/lib/docker"); err == nil {
-		return "/var/lib/docker"
+	if root := p.host().dockerRoot; root != "" {
+		if _, err := os.Stat(root); err == nil {
+			return root
+		}
 	}
 	if f := p.Config().StateFile; f != "" {
 		return filepath.Dir(f)
@@ -52,11 +54,7 @@ func (p *Pool) DiskPath() string {
 
 // DiskSpace returns the total and available bytes of DiskPath.
 func (p *Pool) DiskSpace() (total, free int64, err error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(p.DiskPath(), &st); err != nil {
-		return 0, 0, err
-	}
-	return int64(st.Blocks) * st.Bsize, int64(st.Bavail) * st.Bsize, nil //nolint:gosec // G115: block counts of a real filesystem fit in int64
+	return p.host().statfs(p.DiskPath())
 }
 
 // EnsureFreeDisk frees disk space when less than the configured minimum is

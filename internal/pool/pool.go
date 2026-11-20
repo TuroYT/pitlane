@@ -91,48 +91,55 @@ type slot struct {
 }
 
 // Pool owns the slots.
+//
+// Locking: mu guards the slot table and everything marked "guarded by mu".
+// It is never held across a Docker call (only the small state file is
+// written under it): the slow paths take a snapshot under mu, work without
+// it, then publish the result under mu again, re-checking what may have
+// changed meanwhile.
 type Pool struct {
 	cli *client.Client
 	log *slog.Logger
 
+	released chan struct{} // signalled (without blocking) when a slot frees up
+
 	mu        sync.Mutex
-	cfg       Config
-	slots     map[int]*slot
-	chowned   map[string]bool
-	externals map[int]string // slot -> runner image ID copied into its externals volume
-	released  chan struct{}
-	restored  map[int]persistedSlot
-	binfmt    map[string]string // binfmt_misc entries registered by Pitlane (name -> content)
-	qemuWant  bool              // QEMU should be (re)registered as soon as no job runs
-	qemuBusy  bool              // registration in progress: no slot is handed out
+	cfg       Config                // guarded by mu
+	slots     map[int]*slot         // guarded by mu
+	chowned   map[string]bool       // guarded by mu: volumes whose root is owned by the runner user
+	externals map[int]string        // guarded by mu: slot -> runner image ID copied into its externals volume
+	restored  map[int]persistedSlot // guarded by mu: persisted state, including slots not live
+	binfmt    map[string]string     // guarded by mu: binfmt_misc entries registered by Pitlane (name -> content)
+	qemuWant  bool                  // guarded by mu: QEMU should be (re)registered as soon as no job runs
+	qemuBusy  bool                  // guarded by mu: registration in progress, no slot is handed out
 
-	strictWaitSince time.Time        // a strict job has been waiting for a clean slot since then
-	strictDemand    bool             // a strict target is enabled (AutoStrictSlots)
-	reserved        map[int]int64    // slot -> memory reserved for its job (bytes)
-	meters          map[int]*Meter   // slot -> measurement of its running job
-	memHead         *memWaiter       // oldest request refused for memory
-	memTotal        func() int64     // nil: hostMemory (tests set a value)
-	wipes           map[string]int64 // slot wipes before a job, by reason
-	now             func() time.Time // nil: time.Now (tests set a clock)
+	strictWaitSince time.Time        // guarded by mu: a strict job has been waiting for a clean slot since then
+	strictDemand    bool             // guarded by mu: a strict target is enabled (AutoStrictSlots)
+	reserved        map[int]int64    // guarded by mu: slot -> memory reserved for its job (bytes)
+	meters          map[int]*Meter   // guarded by mu: slot -> measurement of its running job
+	memHead         *memWaiter       // guarded by mu: oldest request refused for memory
+	wipes           map[string]int64 // guarded by mu: slot wipes before a job, by reason
+	cache           CacheBroker      // guarded by mu: actions cache server, nil when not serving
+	cachePort       int              // guarded by mu
 
-	pruneMu sync.Mutex   // one disk reclaim at a time
-	volMu   sync.RWMutex // cache volume removal (write) vs runner creation (read)
+	pruneMu       sync.Mutex   // one disk reclaim at a time
+	volMu         sync.RWMutex // cache volume removal (write) vs runner creation (read)
+	cacheLimitsMu sync.Mutex   // serializes applyCacheLimits
+	fwdMu         sync.Mutex   // cache forwarder creation
 
 	stores storeSync // slot pnpm stores merged with their owner's canonical store
 
-	cache     CacheBroker // actions cache server, nil when not serving
-	cachePort int
-	// cacheLimitsMu serializes applyCacheLimits.
-	cacheLimitsMu sync.Mutex
-	selfOnce      sync.Once
-	self          *selfInfo  // container Pitlane runs in (nil on the host)
-	fwdMu         sync.Mutex // cache forwarder creation
-	shimExe       string     // binary installed as the Node shim; "" = the running Pitlane
-
-	sops slotOps // nil: Docker (tests set a fake)
-
-	cgroups    cgroupFS  // zero: the host's (tests set fake directories)
+	selfOnce   sync.Once
+	self       *selfInfo // set once by selfContainer: the container Pitlane runs in (nil on the host)
 	cgroupWarn sync.Once // "cgroups not readable" is logged once
+
+	// Seams: the zero value is the real thing, tests set fakes.
+	sops     slotOps          // nil: Docker
+	env      *hostEnv         // nil: realHost
+	cgroups  cgroupFS         // zero: the host's cgroups
+	memTotal func() int64     // nil: hostMemory
+	now      func() time.Time // nil: time.Now
+	shimExe  string           // binary installed as the Node shim; "": the running Pitlane
 }
 
 // New connects to Docker and prepares the pool. Call Start to bring slots up.
