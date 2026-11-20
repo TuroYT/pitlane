@@ -300,13 +300,15 @@ func TestApplyFailures(t *testing.T) {
 			}
 			f.wantUntouched()
 			// A new attempt is possible after a failure and clears the error.
+			// Apply clears the error before it returns, so the state is either
+			// still running or already failed again, never the first failure.
 			if err := f.u.Apply(false); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
-			if got := f.u.State().Pitlane.ApplyError; got != "" {
-				t.Errorf("error kept while retrying: %q", got)
+			s = f.waitFor("the second failure", func(s State) bool { return s.Pitlane.Phase == "" && s.Pitlane.ApplyError != "" })
+			if !strings.Contains(s.Pitlane.ApplyError, tc.want) {
+				t.Errorf("retry error %q does not mention %q", s.Pitlane.ApplyError, tc.want)
 			}
-			f.waitFor("the second failure", func(s State) bool { return s.Pitlane.Phase == "" && s.Pitlane.ApplyError != "" })
 		})
 	}
 }
@@ -376,6 +378,7 @@ func TestApplyRefusals(t *testing.T) {
 		f := newFlow(t)
 		f.mu.Lock()
 		f.releases = []Release{f.release("v0.3.0")}
+		f.smoke = "pitlane 0.3.0\n"
 		f.mu.Unlock()
 		f.u.Check(context.Background())
 		if err := f.u.Apply(true); err == nil {
@@ -383,6 +386,11 @@ func TestApplyRefusals(t *testing.T) {
 		}
 		if err := f.u.Apply(false); err != nil { // manually it is allowed
 			t.Fatalf("manual update: %v", err)
+		}
+		select { // let the install finish before the temporary directory goes
+		case <-f.restart:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no restart")
 		}
 	})
 	t.Run("an update is already running", func(t *testing.T) {
@@ -708,7 +716,7 @@ func TestHandlerPullRunner(t *testing.T) {
 	}
 	close(img.release)
 	s := f.waitFor("the pull to end", func(s State) bool {
-		return !s.Runner.Pulling && s.Runner.PulledAt != 0 && s.Runner.ImageID == "sha256:new"
+		return !s.Runner.Pulling && s.Runner.PulledAt != 0 && s.Runner.ImageID == "sha256:new" && s.Runner.Version != ""
 	})
 	if s.Runner.PullError != "" || s.Runner.Version != "2.340.0" {
 		t.Errorf("runner state %+v", s.Runner)
