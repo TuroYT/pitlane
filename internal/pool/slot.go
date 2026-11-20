@@ -50,6 +50,7 @@ func (p *Pool) Start(ctx context.Context) error {
 	p.mu.Lock()
 	if img != cfg.RunnerImage { // a fallback
 		p.cfg.RunnerImage = img
+		p.runnerFallback.from, p.runnerFallback.to = cfg.RunnerImage, img
 	}
 	p.qemuWant = !cfg.NoQEMU
 	p.mu.Unlock()
@@ -138,6 +139,11 @@ func (p *Pool) takeFailed() (failed, dirty []int) {
 func (p *Pool) Configure(ctx context.Context, cfg Config) error {
 	cfg.defaults()
 	p.mu.Lock()
+	// defaults() sends a Pitlane runner image back to the current default:
+	// keep the fallback Start chose when that default could not be pulled.
+	if fb := p.runnerFallback; fb.from != "" && cfg.RunnerImage == fb.from {
+		cfg.RunnerImage = fb.to
+	}
 	old := p.cfg
 	p.cfg = cfg
 	toStart, toRemove := p.resizeLocked(cfg.Slots)

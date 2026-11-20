@@ -111,6 +111,9 @@ type Pool struct {
 	binfmt    map[string]string     // guarded by mu: binfmt_misc entries registered by Pitlane (name -> content)
 	qemuWant  bool                  // guarded by mu: QEMU should be (re)registered as soon as no job runs
 	qemuBusy  bool                  // guarded by mu: registration in progress, no slot is handed out
+	// runnerFallback is the runner image Start used because the wanted one
+	// (from) could not be pulled: Configure keeps it instead of the default.
+	runnerFallback struct{ from, to string } // guarded by mu
 
 	strictWaitSince time.Time        // guarded by mu: a strict job has been waiting for a clean slot since then
 	strictDemand    bool             // guarded by mu: a strict target is enabled (AutoStrictSlots)
