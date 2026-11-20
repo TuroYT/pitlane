@@ -11,7 +11,7 @@ func (s *Server) snapshot() map[string]any {
 	return map[string]any{
 		"targets": s.mgr.Snapshot(),
 		"slots":   s.pool.Slots(),
-		"host":    readHost(s.cfg.DataDir),
+		"host":    readHost(s.cfg.DataDir, &s.cpu),
 		"memory":  s.pool.Memory(),
 		"time":    time.Now().Unix(),
 	}

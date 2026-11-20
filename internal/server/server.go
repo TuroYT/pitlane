@@ -37,18 +37,27 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	store *store.Store
-	pool  *pool.Pool
-	mgr   *scaler.Manager
-	upd   http.Handler  // /api/updates (internal/update)
-	cache *cache.Server // actions cache, nil when not serving
+	pool  runnerPool
+	mgr   *scaler.Manager // set by SetManager
+	upd   http.Handler    // /api/updates (internal/update), nil when unavailable
+	cache *cache.Server   // actions cache, nil when not serving
 	log   *slog.Logger
-	web   fs.FS
-	hub   *hub
+	web   fs.FS // built UI, nil when not built
+	hub   *hub  // UI subscribers to state changes (see Notify)
 	// started is when the server was created (pitlane_start_time_seconds).
 	started time.Time
+	cpu     cpuSampler // CPU usage shown on the dashboard
 
+	compare compareCache // GET /api/compare
+	jobIDs  jobIDCache   // runner job -> GitHub job ID (see handleGitHubJob)
+
+	// mu guards setupToken and states.
+	mu         sync.Mutex
 	setupToken string
-	compare    compareCache
+	states     map[string]time.Time // OAuth / manifest states
+
+	// Test seams, nil outside tests.
+
 	// strictCheck replaces StrictReason in tests.
 	strictCheck func(ctx context.Context, t store.Target) (string, error)
 	// exchangeCode replaces gh.ExchangeCode (OAuth code -> login, user
@@ -59,15 +68,11 @@ type Server struct {
 	// jobHistory replaces recentJobs (a repository's recent jobs on GitHub)
 	// in tests.
 	jobHistory func(ctx context.Context, t store.Target) ([]gh.JobRun, error)
-	jobIDs     jobIDCache // runner job -> GitHub job ID (see handleGitHubJob)
-	mu         sync.Mutex
-	states     map[string]time.Time // OAuth / manifest states
 }
 
 // New creates the server. web is the built UI (may be nil).
 func New(cfg Config, st *store.Store, p *pool.Pool, log *slog.Logger, web fs.FS) *Server {
-	s := &Server{cfg: cfg, store: st, pool: p, log: log, web: web, hub: newHub(), started: time.Now(), states: map[string]time.Time{}}
-	return s
+	return &Server{cfg: cfg, store: st, pool: p, log: log, web: web, hub: newHub(), started: time.Now(), states: map[string]time.Time{}}
 }
 
 // SetManager wires the scaler manager (created after the server so it can notify the hub).
