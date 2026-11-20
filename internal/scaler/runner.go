@@ -10,6 +10,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/actions/scaleset"
+
 	"github.com/TuroYT/pitlane/internal/pool"
 	"github.com/TuroYT/pitlane/internal/store"
 )
@@ -143,4 +145,22 @@ func (m *Manager) finishRunner(t *target, r *runner) {
 	}
 	m.changed()
 	m.pool.EnsureFreeDisk(ctx) // idle slots only; skipped while another prune runs
+}
+
+// beginJob marks a runner busy with the job GitHub just started on it. It
+// reports whether the runner's memory reservation changed: a runner started
+// before its job was known reserved what the heaviest pending job needed,
+// and now reserves what its own job needs. Callers hold t.mu.
+func (r *runner) beginJob(j *scaleset.JobStarted, predicted int64, now time.Time) (refined bool) {
+	if !r.busy && r.predicted != predicted {
+		r.predicted, refined = predicted, true
+	}
+	if !r.busy || r.busySince.IsZero() {
+		r.busySince = jobStart(j.RunnerAssignTime, r.startedAt, now)
+	}
+	if !r.busy {
+		r.meter.Begin() // usage counts from the job's start, not the warm runner's
+	}
+	r.busy, r.jobName, r.repo, r.jobID = true, j.JobDisplayName, j.RepositoryName, j.JobID
+	return refined
 }

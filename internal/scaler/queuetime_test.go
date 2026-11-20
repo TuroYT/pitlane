@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TuroYT/pitlane/internal/store"
 	"github.com/actions/scaleset"
+
+	"github.com/TuroYT/pitlane/internal/store"
 )
 
 func jobRow(t *testing.T, tg *target, job string) (queued, started int64) {
