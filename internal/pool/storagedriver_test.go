@@ -108,13 +108,18 @@ func TestStorageDriverNotPersisted(t *testing.T) {
 	}
 }
 
-// hungOps answers the storage driver read only when its context ends, like a
-// slot daemon that hangs.
-type hungOps struct{ *fakeSlotOps }
+// hungOps blocks the storage driver read until release is closed, whatever
+// its context, like a slot daemon that does not answer.
+type hungOps struct {
+	*fakeSlotOps
+	release chan struct{}
+	exited  chan struct{}
+}
 
-func (h hungOps) exec(ctx context.Context, _, _ string) (string, int, error) {
-	<-ctx.Done()
-	return "", -1, ctx.Err()
+func (h hungOps) exec(context.Context, string, string) (string, int, error) {
+	<-h.release
+	close(h.exited)
+	return "overlay2", 0, nil
 }
 
 // A hung daemon leaves the driver unknown after storageDriverTimeout instead
@@ -122,7 +127,8 @@ func (h hungOps) exec(ctx context.Context, _, _ string) (string, int, error) {
 func TestStorageDriverReadTimesOut(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := newTestPool("owner", SlotState{Index: 0, Status: statusStarting})
-		p.sops = hungOps{&fakeSlotOps{}}
+		ops := hungOps{fakeSlotOps: &fakeSlotOps{}, release: make(chan struct{}), exited: make(chan struct{})}
+		p.sops = ops
 		start := time.Now()
 		p.recordStorageDriver(context.Background(), 0)
 		if waited := time.Since(start); waited != storageDriverTimeout {
@@ -131,5 +137,13 @@ func TestStorageDriverReadTimesOut(t *testing.T) {
 		if d := p.Slots()[0].StorageDriver; d != "" {
 			t.Fatalf("driver %q, want unknown", d)
 		}
+		select {
+		case <-ops.exited:
+			t.Fatal("the exec should still be blocked")
+		default:
+		}
+		close(ops.release) // the abandoned read ends: no goroutine leaks
+		<-ops.exited
+		synctest.Wait()
 	})
 }

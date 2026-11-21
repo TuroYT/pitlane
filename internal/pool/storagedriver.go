@@ -46,10 +46,30 @@ func (p *Pool) recordStorageDriver(ctx context.Context, i int) {
 func (p *Pool) slotStorageDriver(ctx context.Context, i int) string {
 	ctx, cancel := context.WithTimeout(ctx, storageDriverTimeout)
 	defer cancel()
-	out, code, err := p.ops().exec(ctx, slotName(i), storageDriverScript)
-	if err != nil || code != 0 {
-		p.log.Debug("cannot read the slot storage driver", "slot", i, "code", code, "error", err)
+	type result struct {
+		out  string
+		code int
+		err  error
+	}
+	// exec does not bound its attach handshake or its output read with ctx,
+	// so the read runs aside and is abandoned on timeout. That only happens
+	// when the slot daemon is already unresponsive; the abandoned exec ends
+	// when the daemon answers or the connection closes. The channel is
+	// buffered so its goroutine never blocks.
+	done := make(chan result, 1)
+	go func() {
+		out, code, err := p.ops().exec(ctx, slotName(i), storageDriverScript)
+		done <- result{out, code, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil || r.code != 0 {
+			p.log.Debug("cannot read the slot storage driver", "slot", i, "code", r.code, "error", r.err)
+			return ""
+		}
+		return strings.TrimSpace(r.out)
+	case <-ctx.Done():
+		p.log.Debug("slot storage driver read timed out", "slot", i, "error", ctx.Err())
 		return ""
 	}
-	return strings.TrimSpace(out)
 }
