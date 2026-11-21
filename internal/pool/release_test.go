@@ -32,8 +32,9 @@ type fakeSlotOps struct {
 	removeErr   error
 	recreateErr error
 	mergeErr    error
-	storeFull   bool // the slot already has a pnpm store
-	stores      int  // slotStoreEmpty calls
+	storeFull   bool              // the slot already has a pnpm store
+	stores      int               // slotStoreEmpty calls
+	outputs     map[string]string // exec output per script
 }
 
 func (f *fakeSlotOps) removeVolume(_ context.Context, name string) error {
@@ -47,7 +48,7 @@ func (f *fakeSlotOps) exec(_ context.Context, _, script string) (string, int, er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scripts = append(f.scripts, script)
-	return "", f.code, f.err
+	return f.outputs[script], f.code, f.err
 }
 
 func (f *fakeSlotOps) auditBinfmt(context.Context) {}

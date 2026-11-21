@@ -21,6 +21,39 @@ Jobs still run normally. See [Resource usage per job](how-it-works.md#resource-u
 Usually privileged containers are not allowed. On Proxmox, the LXC needs
 `nesting=1,keyctl=1`. Check `journalctl -u pitlane` and `docker logs pitlane-slot-0`.
 
+**Jobs are slow: check the storage driver of the slots.**
+Each slot runs its own Docker daemon. Pitlane reads its storage driver when
+the slot starts and, when it is not `overlay2` (or `overlayfs`, the name the
+containerd snapshotter gives it), logs a warning and shows the driver as a
+badge on the slot in the dashboard. `/api/state` returns it as `storageDriver`.
+
+The two drivers you will usually see instead are `vfs` and `fuse-overlayfs`.
+`vfs` copies every layer each time a container starts, and `fuse-overlayfs`
+runs in user space. Both are much slower than `overlay2` for jobs that pull
+images, build them, or touch many files. A daemon falls back to them when the
+filesystem under its data directory does not support overlay, for example a
+Docker nested in an LXC container on ZFS.
+
+A slot's data lives in the `pitlane-slot-N-docker` volume, inside the data
+directory of the host's Docker (`/var/lib/docker` by default). Put that
+directory on a native ext4 or xfs filesystem. For a Proxmox LXC container on
+ZFS, use a mount point backed by ext4 or xfs storage (or a volume formatted as
+ext4/xfs) for `/var/lib/docker`.
+
+Do it when no job runs: disable the repositories in **Repositories** or wait
+for the running jobs to finish, and check the dashboard. The steps below stop
+Docker and remove the slots, which kills any job still running.
+
+1. Stop Pitlane and Docker.
+2. Move the content of `/var/lib/docker` to the new filesystem. Mounting over
+   it without that hides the existing data. You can also drop it: slot caches
+   are rebuilt, but images and volumes of other containers are lost.
+3. Mount the new filesystem on `/var/lib/docker`, then start Docker.
+4. Remove the slots and their Docker volumes so they are recreated on the new
+   filesystem: `docker rm -f pitlane-slot-N && docker volume rm pitlane-slot-N-docker`
+   for each slot.
+5. Start Pitlane.
+
 **`services:` or `container:` jobs fail.**
 Make sure you did not override `DOCKER_HOST` in the workflow. Service ports are
 reachable on `localhost`.

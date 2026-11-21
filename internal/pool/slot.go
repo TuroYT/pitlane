@@ -273,6 +273,7 @@ func (p *Pool) startSlot(ctx context.Context, i int) {
 		p.setStatus(i, statusError, err.Error())
 		return
 	}
+	p.recordStorageDriver(ctx, i)
 	p.mu.Lock()
 	s := p.slots[i]
 	busy := s != nil && s.Status == statusBusy

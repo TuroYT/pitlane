@@ -310,9 +310,9 @@ pre.code { background: var(--bg-inset); padding: 8px 12px; border-radius: var(--
 .slot-body { font-size: 12px; }
 .slot-body .ellipsis { max-width: 100%; }
 .slot-mem { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.slot-strict { height: 16px; line-height: 14px; padding: 0 5px; font-size: 11px; }
-.slot-strict + .slot-state { margin-left: 0; }
-.slot-head .slot-strict { margin-left: auto; }
+.slot-tag { height: 16px; line-height: 14px; padding: 0 5px; font-size: 11px; }
+.slot-tag + .slot-state { margin-left: 0; }
+.slot-head .slot-name + .slot-tag { margin-left: auto; }
 .budget { display: grid; gap: 6px; margin-bottom: 12px; }
 .budget p { margin: 0; }
 .budget .meter-head { flex-wrap: wrap; gap: 2px 12px; }

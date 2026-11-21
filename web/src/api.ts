@@ -83,6 +83,8 @@ export interface Slot {
   /** Memory reserved for the running job and what it uses now (bytes). */
   predicted?: number
   actual?: number
+  /** Storage driver of the slot's Docker daemon, read when it starts (absent when unknown). */
+  storageDriver?: string
 }
 
 /** Memory admission: jobs start only when their predicted memory fits. */
@@ -403,6 +405,15 @@ export function jobWait(j: { targetId: number; startedAt: number; finishedAt: nu
   if (j.startedAt || j.finishedAt) return ''
   const t = live.snap?.targets.find((x) => x.id === j.targetId)
   return t && t.waiting > 0 ? (t.waitReason ?? 'slot') : ''
+}
+
+/** Storage drivers that use the kernel's overlay filesystem (overlayfs is the containerd snapshotter's name). */
+const FAST_STORAGE_DRIVERS = ['overlay2', 'overlayfs']
+
+/** The tooltip of a slot whose daemon uses a slow storage driver, or '' when the driver is fine or unknown. */
+export function slowStorageTitle(driver?: string): string {
+  if (!driver || FAST_STORAGE_DRIVERS.includes(driver)) return ''
+  return `This slot's Docker daemon uses the ${driver} storage driver instead of overlay2: jobs with heavy file or layer work run much slower. See Troubleshooting in the docs.`
 }
 
 export function targetName(t: { kind: string; owner: string; repo?: string }) {

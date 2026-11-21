@@ -75,6 +75,9 @@ type SlotState struct {
 	// memory.current plus the slot's anonymous memory, 0 when unknown).
 	Predicted int64 `json:"predicted,omitempty"`
 	Actual    int64 `json:"actual,omitempty"`
+	// StorageDriver is the storage driver of the slot's daemon, read when
+	// the slot starts ("" when unknown). It is not persisted.
+	StorageDriver string `json:"storageDriver,omitempty"`
 }
 
 type slot struct {
