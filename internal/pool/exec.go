@@ -25,6 +25,10 @@ func (p *Pool) exec(ctx context.Context, name, script string) (string, int, erro
 		return "", -1, err
 	}
 	defer att.Close()
+	// The output stream does not follow ctx: close it when ctx ends, so a
+	// script that hangs does not block the read forever.
+	stop := context.AfterFunc(ctx, att.Close)
+	defer stop()
 	// Read to the end (output beyond the cap is discarded): stopping early
 	// would leave the process running and its exit code unknown.
 	out := &capWriter{max: execOutputMax}

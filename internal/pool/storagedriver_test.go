@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestSlowStorageDriver(t *testing.T) {
@@ -104,4 +106,30 @@ func TestStorageDriverNotPersisted(t *testing.T) {
 	if !strings.Contains(string(b), "acme") || strings.Contains(string(b), "vfs") {
 		t.Fatalf("storage driver persisted: %s", b)
 	}
+}
+
+// hungOps answers the storage driver read only when its context ends, like a
+// slot daemon that hangs.
+type hungOps struct{ *fakeSlotOps }
+
+func (h hungOps) exec(ctx context.Context, _, _ string) (string, int, error) {
+	<-ctx.Done()
+	return "", -1, ctx.Err()
+}
+
+// A hung daemon leaves the driver unknown after storageDriverTimeout instead
+// of stalling the slot start.
+func TestStorageDriverReadTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestPool("owner", SlotState{Index: 0, Status: statusStarting})
+		p.sops = hungOps{&fakeSlotOps{}}
+		start := time.Now()
+		p.recordStorageDriver(context.Background(), 0)
+		if waited := time.Since(start); waited != storageDriverTimeout {
+			t.Fatalf("waited %v, want %v", waited, storageDriverTimeout)
+		}
+		if d := p.Slots()[0].StorageDriver; d != "" {
+			t.Fatalf("driver %q, want unknown", d)
+		}
+	})
 }

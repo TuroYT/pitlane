@@ -3,10 +3,15 @@ package pool
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 // storageDriverScript prints the storage driver of a slot's daemon.
 const storageDriverScript = "docker info --format '{{.Driver}}'"
+
+// storageDriverTimeout bounds the storage driver read: a hung daemon leaves
+// the driver unknown instead of stalling the slot start.
+const storageDriverTimeout = 10 * time.Second
 
 // SlowStorageDriver reports whether a slot daemon's storage driver is known
 // and is not overlay-based: vfs copies every layer on each container start
@@ -39,6 +44,8 @@ func (p *Pool) recordStorageDriver(ctx context.Context, i int) {
 // slotStorageDriver returns the storage driver of slot i's daemon, or ""
 // when it cannot be read.
 func (p *Pool) slotStorageDriver(ctx context.Context, i int) string {
+	ctx, cancel := context.WithTimeout(ctx, storageDriverTimeout)
+	defer cancel()
 	out, code, err := p.ops().exec(ctx, slotName(i), storageDriverScript)
 	if err != nil || code != 0 {
 		p.log.Debug("cannot read the slot storage driver", "slot", i, "code", code, "error", err)
