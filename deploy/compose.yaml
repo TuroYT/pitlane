@@ -5,7 +5,7 @@
 #      if the data directory is not writable, it is in docker compose logs pitlane)
 services:
   pitlane:
-    image: ghcr.io/turoyt/pitlane:v1.3.0@sha256:a61b6a6f60383fa9e2ab04fc8ead59082bd26b3fe6ffaaa4c3fbe2b418e549eb
+    image: ghcr.io/turoyt/pitlane:v1.4.0@sha256:5e33f13a6340b01267fdd42a85028db2c11d3f7c4efd15a9aa941b509e3f8c41
     restart: unless-stopped
     ports:
       - "8080:8080"
