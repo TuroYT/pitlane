@@ -39,10 +39,10 @@ lockups come from [`assets/src/gen_assets.py`](assets/src/gen_assets.py).
 | Token | Hex | Use |
 | --- | --- | --- |
 | Signal orange | `#E5482D` | The logo tile. Large text and graphics only (3.96:1 on white). |
-| Orange emphasis | `#CF3F22` | Primary buttons with white text (4.79:1), active tab underline in light mode. |
+| Orange emphasis | `#CF3F22` | Primary buttons with white text (4.79:1), the active navigation item's icon in light mode. |
 | Orange bright | `#F0684F` | Accents on dark backgrounds (6.13:1 on `#0d1117`). |
 
-Everything else is neutral and functional, in the spirit of GitHub's own UI:
+Everything else is neutral and functional, in the spirit of GitHub's own UI (hairline borders, no shadows):
 
 | Role | Light | Dark |
 | --- | --- | --- |
@@ -61,6 +61,18 @@ Everything else is neutral and functional, in the spirit of GitHub's own UI:
 Orange is the brand, never a status: success is green, failure is red, a job in
 progress is amber, like a workflow run on GitHub. In charts, Pitlane is orange
 and GitHub-hosted runners are gray; percentiles are blue (p50) and purple (p90).
+
+## Layout
+
+The web UI has a Material 3 structure on top of those GitHub-like tokens:
+
+- A navigation rail (76 px) sits on the canvas, with the page on a white
+  rounded sheet beside it. On a phone the rail becomes a bottom bar.
+- Boxes, tables and counters have a 1 px border and 12 px corners. The sheet has
+  16 px corners. Buttons and fields keep 8 px, and the segmented control is a pill.
+- Hover and selected states use a flat tint (`--bg-hover`, `--bg-active`), not a
+  shadow. Transitions are 150-240 ms with an ease-out curve, and are off under
+  `prefers-reduced-motion`.
 
 ## Typography
 

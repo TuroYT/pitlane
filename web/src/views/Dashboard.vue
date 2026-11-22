@@ -121,6 +121,7 @@ function level(p: number) {
   <p v-if="!snap" class="muted" role="status">Connecting to Pitlane…</p>
   <div v-else class="stack-lg">
     <div class="stack">
+      <h1>Dashboard</h1>
       <p v-for="t in problems" :key="t.id" class="alert error">
         <strong>{{ t.kind === 'repo' ? `${t.owner}/${t.repo}` : t.owner }}</strong>:
         {{ t.status === 'no-credentials' ? 'no GitHub credentials. Finish the setup or install the App on this account.' : t.error }}
