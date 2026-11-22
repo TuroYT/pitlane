@@ -53,13 +53,14 @@ async function logout() {
   await refresh()
 }
 
-const allNav: { to: string; label: string; icon: string; role?: Role }[] = [
+// `short` is the rail label when the full one does not fit under an icon.
+const allNav: { to: string; label: string; short?: string; icon: string; role?: Role }[] = [
   { to: '/', label: 'Dashboard', icon: 'dashboard' },
   { to: '/targets', label: 'Repositories', icon: 'repo' },
   { to: '/jobs', label: 'Jobs', icon: 'jobs' },
   { to: '/settings', label: 'Settings', icon: 'settings', role: 'operator' },
   { to: '/users', label: 'Users', icon: 'users', role: 'admin' },
-  { to: '/audit', label: 'Audit log', icon: 'audit', role: 'admin' },
+  { to: '/audit', label: 'Audit log', short: 'Audit', icon: 'audit', role: 'admin' },
 ]
 const nav = computed(() => allNav.filter((n) => !n.role || can(n.role)))
 
@@ -84,9 +85,18 @@ const role = computed(() => status.value?.role || '')
   <RouterView v-else-if="route.meta.bare" @refresh="refresh" />
   <div v-else class="shell">
     <a class="skip" href="#main">Skip to content</a>
-    <header class="header">
-      <div class="header-top">
-        <RouterLink to="/" class="brand"><BrandMark :size="28" /> Pitlane</RouterLink>
+    <aside class="rail">
+      <RouterLink to="/" class="rail-brand" aria-label="Pitlane"><BrandMark :size="36" /></RouterLink>
+      <nav ref="navEl" class="rail-nav" aria-label="Main">
+        <RouterLink v-for="n in nav" :key="n.to" :to="n.to" :class="{ active: isActive(n.to) }"
+          :aria-label="n.label" :aria-current="isActive(n.to) ? 'page' : undefined">
+          <span class="rail-icon"><Icon :name="n.icon" :size="20" /></span>{{ n.short ?? n.label }}
+        </RouterLink>
+      </nav>
+    </aside>
+    <div class="sheet">
+      <header class="topbar">
+        <RouterLink to="/" class="topbar-brand"><BrandMark :size="24" /> Pitlane</RouterLink>
         <div class="who">
           <span class="live" role="status" :title="live.connected ? 'Live updates connected' : 'Reconnecting…'">
             <span class="dot" :class="live.connected ? 'ok' : 'off'" />{{ live.connected ? 'Live' : 'Reconnecting…' }}
@@ -95,21 +105,15 @@ const role = computed(() => status.value?.role || '')
           <span v-if="role" class="badge muted" :title="roleHelp[role]">{{ role }}</span>
           <button type="button" class="small" @click="logout">Sign out</button>
         </div>
-      </div>
-      <nav ref="navEl" class="underline-nav" aria-label="Main">
-        <RouterLink v-for="n in nav" :key="n.to" :to="n.to" :class="{ active: isActive(n.to) }"
-          :aria-current="isActive(n.to) ? 'page' : undefined">
-          <Icon :name="n.icon" />{{ n.label }}
-        </RouterLink>
-      </nav>
-    </header>
-    <main id="main" class="content" tabindex="-1">
-      <RouterView />
-    </main>
-    <footer class="foot muted">
-      <span>Pitlane {{ status?.version }}</span><span>·</span>
-      <a href="https://github.com/TuroYT/pitlane" target="_blank" rel="noopener">Source</a><span>·</span>
-      <a href="https://github.com/TuroYT/pitlane/tree/main/docs" target="_blank" rel="noopener">Docs</a>
-    </footer>
+      </header>
+      <main id="main" class="content" tabindex="-1">
+        <RouterView />
+      </main>
+      <footer class="foot muted">
+        <span>Pitlane {{ status?.version }}</span><span>·</span>
+        <a href="https://github.com/TuroYT/pitlane" target="_blank" rel="noopener">Source</a><span>·</span>
+        <a href="https://github.com/TuroYT/pitlane/tree/main/docs" target="_blank" rel="noopener">Docs</a>
+      </footer>
+    </div>
   </div>
 </template>
